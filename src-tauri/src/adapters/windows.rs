@@ -1,4 +1,5 @@
 use crate::core::hardware::AccelerationInfo;
+use sha2::{Digest, Sha256};
 
 pub fn detect() -> AccelerationInfo {
     if let Ok(output) = std::process::Command::new("nvidia-smi")
@@ -57,6 +58,33 @@ pub fn app_data_dir() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("EdgeSwarm")
         .join("unified-node")
+}
+
+pub fn hardware_identity_override() -> Option<(String, String)> {
+    let script = r#"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;$u=(Get-CimInstance Win32_ComputerSystemProduct -ErrorAction Stop).UUID.Trim();$p=(Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1).ProcessorId.Trim();if($u -and $p){Write-Output ($u+'_'+$p)}"#;
+
+    let output = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let material = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?
+        .to_string();
+
+    let digest = Sha256::digest(material.as_bytes());
+    let hardware_id = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+
+    Some(("windows_legacy_uuid_processor_id".into(), hardware_id))
 }
 
 pub fn hardware_identity_material() -> Option<(String, String)> {

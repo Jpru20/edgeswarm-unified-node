@@ -14,16 +14,24 @@ mod android;
 
 pub fn platform_name() -> &'static str {
     #[cfg(target_os = "linux")]
-    { return linux::platform_name(); }
+    {
+        return linux::platform_name();
+    }
 
     #[cfg(target_os = "windows")]
-    { return windows::platform_name(); }
+    {
+        return windows::platform_name();
+    }
 
     #[cfg(target_os = "macos")]
-    { return macos::platform_name(); }
+    {
+        return macos::platform_name();
+    }
 
     #[cfg(target_os = "android")]
-    { return android::platform_name(); }
+    {
+        return android::platform_name();
+    }
 
     #[allow(unreachable_code)]
     "unknown"
@@ -31,16 +39,24 @@ pub fn platform_name() -> &'static str {
 
 pub fn app_data_dir() -> std::path::PathBuf {
     #[cfg(target_os = "linux")]
-    { return linux::app_data_dir(); }
+    {
+        return linux::app_data_dir();
+    }
 
     #[cfg(target_os = "windows")]
-    { return windows::app_data_dir(); }
+    {
+        return windows::app_data_dir();
+    }
 
     #[cfg(target_os = "macos")]
-    { return macos::app_data_dir(); }
+    {
+        return macos::app_data_dir();
+    }
 
     #[cfg(target_os = "android")]
-    { return android::app_data_dir(); }
+    {
+        return android::app_data_dir();
+    }
 
     #[allow(unreachable_code)]
     std::path::PathBuf::from(".")
@@ -50,28 +66,42 @@ pub fn identity_file_path() -> std::path::PathBuf {
     app_data_dir().join("node_identity.json")
 }
 
-pub fn hardware_identity_material()
-    -> Option<(String, String)>
-{
-    #[cfg(target_os = "linux")]
-    { return linux::hardware_identity_material(); }
-
+pub fn hardware_identity_override() -> Option<(String, String)> {
     #[cfg(target_os = "windows")]
-    { return windows::hardware_identity_material(); }
-
-    #[cfg(target_os = "macos")]
-    { return macos::hardware_identity_material(); }
-
-    #[cfg(target_os = "android")]
-    { return android::hardware_identity_material(); }
+    {
+        return windows::hardware_identity_override();
+    }
 
     #[allow(unreachable_code)]
     None
 }
 
-pub fn hardware_identity_fallback_path()
-    -> std::path::PathBuf
-{
+pub fn hardware_identity_material() -> Option<(String, String)> {
+    #[cfg(target_os = "linux")]
+    {
+        return linux::hardware_identity_material();
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return windows::hardware_identity_material();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return macos::hardware_identity_material();
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        return android::hardware_identity_material();
+    }
+
+    #[allow(unreachable_code)]
+    None
+}
+
+pub fn hardware_identity_fallback_path() -> std::path::PathBuf {
     app_data_dir().join("hardware_identity.json")
 }
 
