@@ -183,6 +183,18 @@ fn run() -> Result<(), String> {
 
     println!("READINESS_HEARTBEAT_HTTP_STATUS={readiness_status}");
 
+    if env::var("EDGESWARM_HEARTBEAT_ONLY")
+        .map(|value| value.trim() == "1")
+        .unwrap_or(false)
+    {
+        println!("HEARTBEAT_ONLY_MODE=true");
+        println!("HEARTBEAT_SENT=true");
+        println!("GET_JOBS_CALLED=false");
+        println!("TASK_CLAIMED=false");
+        println!("RESULT_SUBMITTED=false");
+        return Ok(());
+    }
+
     let mut last_idle_heartbeat = Instant::now();
 
     loop {
