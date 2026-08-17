@@ -9,7 +9,10 @@ use edgeswarm_unified_node_lib::{
         model_registry::OUTPUT_LIMIT_POLICY_VERSION,
         NodeState,
     },
-    runtime::llama_cpp::LlamaCppHttpExecutor,
+    runtime::{
+        llama_cpp::LlamaCppHttpExecutor,
+        llama_process::{LlamaProcessConfig, ManagedLlamaProcess},
+    },
 };
 use std::{
     path::Path,
@@ -42,18 +45,15 @@ fn runtime_version(path: &Path) -> Result<String, String> {
 }
 
 fn run() -> Result<(), String> {
-    let model_path = std::env::args().nth(1).ok_or_else(|| {
-        "usage: real_capacity_certificate <model> <runtime> [base-url]".to_string()
-    })?;
+    let model_path = std::env::args()
+        .nth(1)
+        .ok_or_else(|| "usage: real_capacity_certificate <model> <runtime>".to_string())?;
 
-    let runtime_path = std::env::args().nth(2).ok_or_else(|| {
-        "usage: real_capacity_certificate <model> <runtime> [base-url]".to_string()
-    })?;
+    let runtime_path = std::env::args()
+        .nth(2)
+        .ok_or_else(|| "usage: real_capacity_certificate <model> <runtime>".to_string())?;
 
-    let base_url = std::env::args()
-        .nth(3)
-        .unwrap_or_else(|| "http://127.0.0.1:18081".into());
-
+    let model_path_string = model_path.clone();
     let model_path = Path::new(&model_path);
     let runtime_path = Path::new(&runtime_path);
 
@@ -82,7 +82,15 @@ fn run() -> Result<(), String> {
     policy.maximum_concurrency = 2;
 
     let runner = CertificationRunner::new(policy);
-    let mut executor = LlamaCppHttpExecutor::new(base_url)?;
+
+    let runtime_config = LlamaProcessConfig::for_model(model_path_string)?;
+    let managed_runtime = ManagedLlamaProcess::start(&runtime_config)?;
+    let runtime_base_url = managed_runtime.base_url().to_string();
+
+    println!("LLAMA_RUNTIME_OWNERSHIP=managed");
+    println!("LLAMA_BASE_URL={runtime_base_url}");
+
+    let mut executor = LlamaCppHttpExecutor::new(runtime_base_url)?;
 
     println!("REAL_CERTIFICATION_STARTED=true");
     println!("PACK_ID={}", pack.pack_id);
