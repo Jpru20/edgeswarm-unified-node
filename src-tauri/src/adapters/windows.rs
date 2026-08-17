@@ -1,15 +1,47 @@
 use crate::core::hardware::AccelerationInfo;
 
 pub fn detect() -> AccelerationInfo {
+    if let Ok(output) = std::process::Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=name,memory.total",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+    {
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout);
+
+            if let Some(line) = text.lines().next() {
+                let mut parts = line.splitn(2, ',');
+
+                let name = parts
+                    .next()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+
+                let memory_mib = parts
+                    .next()
+                    .and_then(|value| value.trim().parse::<u64>().ok());
+
+                return AccelerationInfo {
+                    backend: "cuda".into(),
+                    device_name: name.map(str::to_string),
+                    vram_bytes: memory_mib.map(|mib| mib * 1024 * 1024),
+                    available: true,
+                    detection_status: "detected".into(),
+                };
+            }
+        }
+    }
+
     AccelerationInfo {
-        backend: "unprobed".into(),
+        backend: "cpu".into(),
         device_name: None,
         vram_bytes: None,
-        available: false,
-        detection_status: "windows_adapter_pending".into(),
+        available: true,
+        detection_status: "cpu_fallback".into(),
     }
 }
-
 
 pub fn platform_name() -> &'static str {
     "windows"
@@ -27,9 +59,7 @@ pub fn app_data_dir() -> std::path::PathBuf {
         .join("unified-node")
 }
 
-pub fn hardware_identity_material()
-    -> Option<(String, String)>
-{
+pub fn hardware_identity_material() -> Option<(String, String)> {
     let output = std::process::Command::new("reg")
         .args([
             "query",
@@ -51,10 +81,7 @@ pub fn hardware_identity_material()
             let value = line.split_whitespace().last()?.trim();
 
             if !value.is_empty() {
-                return Some((
-                    "windows_machine_guid".into(),
-                    value.to_lowercase(),
-                ));
+                return Some(("windows_machine_guid".into(), value.to_lowercase()));
             }
         }
     }
