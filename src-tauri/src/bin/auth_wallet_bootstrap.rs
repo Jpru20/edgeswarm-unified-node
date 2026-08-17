@@ -6,6 +6,7 @@ use edgeswarm_unified_node_lib::core::{
     wallet_account::DeviceWallet,
     wallet_client::WorkerWalletClient,
     wallet_identity::{select_wallet_row, WalletRowDecision},
+    wallet_public_identity::WalletPublicIdentity,
     wallet_vault,
 };
 use std::{
@@ -74,8 +75,6 @@ fn run() -> Result<(), String> {
         &aal2.refresh_token,
         expires_at,
     )?;
-    session.save_secure()?;
-
     let hardware = HardwareIdentity::detect()?;
     let wallet_client = WorkerWalletClient::from_env()?;
 
@@ -91,6 +90,19 @@ fn run() -> Result<(), String> {
 
             let wallet = DeviceWallet::from_private_key(&private_key)?;
 
+            let public_wallet = WalletPublicIdentity::save_current(wallet.wallet_address())?;
+
+            if !public_wallet
+                .hardware_id
+                .eq_ignore_ascii_case(&hardware.hardware_id)
+            {
+                return Err("wallet_public_identity_hardware_mismatch".into());
+            }
+
+            session.save_secure()?;
+
+            println!("WALLET_PUBLIC_IDENTITY_WRITTEN=true");
+
             println!("WALLET_ACTION=reuse_exact_device");
             println!("WALLET_ADDRESS={}", wallet.wallet_address());
         }
@@ -100,49 +112,7 @@ fn run() -> Result<(), String> {
         }
 
         WalletRowDecision::CreateDevice => {
-            let wallet = DeviceWallet::generate()?;
-
-            let encrypted =
-                wallet_vault::encrypt(wallet.private_key(), &password, &authenticated_email)?;
-
-            let status = wallet_client.insert_device(
-                &aal2.access_token,
-                &authenticated_email,
-                &hardware.hardware_id,
-                &encrypted,
-            )?;
-
-            let rows_after =
-                wallet_client.rows_for_email(&aal2.access_token, &authenticated_email)?;
-
-            let exact = rows_after.iter().find(|row| {
-                row.hardware_id
-                    .as_deref()
-                    .unwrap_or("")
-                    .eq_ignore_ascii_case(&hardware.hardware_id)
-            });
-
-            let exact =
-                exact.ok_or_else(|| format!("wallet_insert_not_visible_after_http_{status}"))?;
-
-            let recovered_key = Zeroizing::new(wallet_vault::decrypt(
-                &exact.private_key,
-                &password,
-                &authenticated_email,
-            )?);
-
-            let recovered = DeviceWallet::from_private_key(&recovered_key)?;
-
-            if !recovered
-                .wallet_address()
-                .eq_ignore_ascii_case(wallet.wallet_address())
-            {
-                return Err("wallet_post_insert_identity_mismatch".into());
-            }
-
-            println!("WALLET_ACTION=create_new_device_wallet");
-            println!("WALLET_INSERT_HTTP_STATUS={status}");
-            println!("WALLET_ADDRESS={}", wallet.wallet_address());
+            return Err("device_wallet_missing_refusing_creation".into());
         }
     }
 
