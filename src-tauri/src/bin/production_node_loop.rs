@@ -375,6 +375,16 @@ fn run() -> Result<(), String> {
         println!("PRIVATE_KEY_PRINTED=false");
         println!("PRIVATE_KEY_PERSISTED=false");
 
+        if env::var("EDGESWARM_SINGLE_TASK")
+            .map(|value| value.trim() == "1")
+            .unwrap_or(false)
+        {
+            println!("SINGLE_TASK_MODE=true");
+            println!("SINGLE_TASK_COMPLETE=true");
+            println!("GET_JOBS_AFTER_COMPLETION=false");
+            return Ok(());
+        }
+
         last_idle_heartbeat = Instant::now();
         thread::sleep(Duration::from_millis(250));
     }
@@ -383,5 +393,6 @@ fn run() -> Result<(), String> {
 fn main() {
     if let Err(error) = run() {
         println!("PRODUCTION_TASK_RUNNER_ERROR={}", error.replace('\n', " "));
+        std::process::exit(1);
     }
 }
