@@ -1,0 +1,96 @@
+use crate::core::wallet_identity::WorkerWalletRow;
+use reqwest::{
+    blocking::Client,
+    header::{HeaderValue, AUTHORIZATION},
+};
+use serde_json::json;
+use std::{env, time::Duration};
+
+pub struct WorkerWalletClient {
+    supabase_url: String,
+    anon_key: String,
+    http: Client,
+}
+
+impl WorkerWalletClient {
+    pub fn from_env() -> Result<Self, String> {
+        let supabase_url = env::var("SUPABASE_URL")
+            .or_else(|_| env::var("EDGESWARM_SUPABASE_URL"))
+            .map_err(|_| "supabase_url_missing".to_string())?
+            .trim_end_matches('/')
+            .to_string();
+
+        let anon_key = env::var("SUPABASE_ANON_KEY")
+            .or_else(|_| env::var("EDGESWARM_SUPABASE_ANON_KEY"))
+            .map_err(|_| "supabase_anon_key_missing".to_string())?;
+
+        Ok(Self {
+            supabase_url,
+            anon_key,
+            http: Client::builder()
+                .timeout(Duration::from_secs(20))
+                .build()
+                .map_err(|_| "wallet_http_client_failed".to_string())?,
+        })
+    }
+
+    fn bearer(token: &str) -> Result<HeaderValue, String> {
+        let mut value = HeaderValue::from_str(
+            &format!("Bearer {}", token.trim())
+        )
+        .map_err(|_| "wallet_bearer_invalid".to_string())?;
+
+        value.set_sensitive(true);
+        Ok(value)
+    }
+
+    pub fn rows_for_email(
+        &self,
+        access_token: &str,
+        email: &str,
+    ) -> Result<Vec<WorkerWalletRow>, String> {
+        let response = self.http
+            .get(format!("{}/rest/v1/worker_wallets", self.supabase_url))
+            .header("apikey", &self.anon_key)
+            .header(AUTHORIZATION, Self::bearer(access_token)?)
+            .query(&[
+                ("email", format!("eq.{}", email.trim().to_lowercase())),
+                ("select", "id,hardware_id,private_key".to_string()),
+            ])
+            .send()
+            .map_err(|_| "wallet_lookup_request_failed".to_string())?;
+
+        if !response.status().is_success() {
+            return Err(format!(
+                "wallet_lookup_http_{}",
+                response.status().as_u16()
+            ));
+        }
+
+        response
+            .json::<Vec<WorkerWalletRow>>()
+            .map_err(|_| "wallet_lookup_response_invalid".to_string())
+    }
+
+    pub fn insert_device(
+        &self,
+        access_token: &str,
+        email: &str,
+        hardware_id: &str,
+        encrypted_private_key: &str,
+    ) -> Result<u16, String> {
+        let response = self.http
+            .post(format!("{}/rest/v1/worker_wallets", self.supabase_url))
+            .header("apikey", &self.anon_key)
+            .header(AUTHORIZATION, Self::bearer(access_token)?)
+            .json(&json!({
+                "email": email.trim().to_lowercase(),
+                "hardware_id": hardware_id,
+                "private_key": encrypted_private_key
+            }))
+            .send()
+            .map_err(|_| "wallet_insert_request_failed".to_string())?;
+
+        Ok(response.status().as_u16())
+    }
+}

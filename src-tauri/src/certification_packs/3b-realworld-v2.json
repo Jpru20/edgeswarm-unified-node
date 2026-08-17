@@ -1,0 +1,115 @@
+{
+  "packId": "edgeswarm-3b-realworld-v2",
+  "packVersion": 2,
+  "modelTier": "3b",
+  "workloads": [
+    {
+      "id": "sentiment-mixed-01",
+      "profile": "normal",
+      "kind": "sentiment",
+      "expectedRequiredModel": "Neural-Inference-3B",
+      "adapterLane": "sentiment",
+      "productionPolicyVersion": "level2_customer_adapter_v1",
+      "maxOutputTokens": 192,
+      "prompt": "Classify sentiment for this customer feedback. I really like the new dashboard and it feels much faster than before, but report exports keep failing and that problem is blocking my weekly workflow.",
+      "validation": {
+        "requiredJsonKeys": ["sentiment", "confidence", "reason"],
+        "requiredTerms": [],
+        "minimumOutputChars": 60,
+        "maximumOutputChars": 900,
+        "expectedJsonValues": {"sentiment": "mixed"}
+      }
+    },
+    {
+      "id": "sentiment-negative-02",
+      "profile": "normal",
+      "kind": "sentiment",
+      "expectedRequiredModel": "Neural-Inference-3B",
+      "adapterLane": "sentiment",
+      "productionPolicyVersion": "level2_customer_adapter_v1",
+      "maxOutputTokens": 192,
+      "prompt": "Classify sentiment for this customer feedback. The application has been frustrating to use, the integration repeatedly fails, and I have not found anything about the experience that I would describe positively.",
+      "validation": {
+        "requiredJsonKeys": ["sentiment", "confidence", "reason"],
+        "requiredTerms": [],
+        "minimumOutputChars": 60,
+        "maximumOutputChars": 900,
+        "expectedJsonValues": {"sentiment": "negative"}
+      }
+    },
+    {
+      "id": "support-triage-billing-01",
+      "profile": "heavy",
+      "kind": "support_triage",
+      "expectedRequiredModel": "Neural-Inference-3B",
+      "adapterLane": "support_triage",
+      "productionPolicyVersion": "level2_customer_adapter_v1",
+      "maxOutputTokens": 256,
+      "prompt": "Classify this support ticket. The customer says they were charged twice for the same subscription renewal. Their accounting close is tomorrow and they need the duplicate charge investigated before the finance team finishes the close.",
+      "validation": {
+        "requiredJsonKeys": ["category", "priority", "summary", "next_action"],
+        "requiredTerms": [],
+        "minimumOutputChars": 100,
+        "maximumOutputChars": 1200,
+        "expectedJsonValues": {
+          "category": "billing",
+          "priority": "high"
+        }
+      }
+    },
+    {
+      "id": "support-triage-technical-02",
+      "profile": "heavy",
+      "kind": "support_triage",
+      "expectedRequiredModel": "Neural-Inference-3B",
+      "adapterLane": "support_triage",
+      "productionPolicyVersion": "level2_customer_adapter_v1",
+      "maxOutputTokens": 256,
+      "prompt": "Classify this support ticket. The customer says their CRM integration stopped syncing new records this morning and their sales operations workflow is blocked. Other parts of the account are working normally.",
+      "validation": {
+        "requiredJsonKeys": ["category", "priority", "summary", "next_action"],
+        "requiredTerms": [],
+        "minimumOutputChars": 100,
+        "maximumOutputChars": 1200,
+        "expectedJsonValues": {
+          "category": "technical",
+          "priority": "high"
+        }
+      }
+    },
+    {
+      "id": "email-rewrite-schedule-01",
+      "profile": "structured",
+      "kind": "email_rewrite",
+      "expectedRequiredModel": "Neural-Inference-3B",
+      "adapterLane": "email_rewrite",
+      "productionPolicyVersion": "level2_customer_adapter_v1",
+      "maxOutputTokens": 256,
+      "prompt": "Rewrite this email so it sounds professional and concise. Hi Maya, can we move our meeting to Friday? I need another day to finish the budget review and I would rather send you the completed numbers before we meet. Thanks.",
+      "validation": {
+        "requiredJsonKeys": ["subject", "body"],
+        "requiredTerms": ["Friday", "budget"],
+        "minimumOutputChars": 100,
+        "maximumOutputChars": 1200,
+        "expectedJsonValues": {}
+      }
+    },
+    {
+      "id": "email-rewrite-client-02",
+      "profile": "structured",
+      "kind": "email_rewrite",
+      "expectedRequiredModel": "Neural-Inference-3B",
+      "adapterLane": "email_rewrite",
+      "productionPolicyVersion": "level2_customer_adapter_v1",
+      "maxOutputTokens": 256,
+      "prompt": "Rewrite this message so it sounds professional and concise. Hi Daniel, we finished the revised onboarding document and I would like you to review it before we send it to the client. Please send any final comments by tomorrow afternoon.",
+      "validation": {
+        "requiredJsonKeys": ["subject", "body"],
+        "requiredTerms": ["onboarding", "tomorrow"],
+        "minimumOutputChars": 100,
+        "maximumOutputChars": 1200,
+        "expectedJsonValues": {}
+      }
+    }
+  ]
+}

@@ -1,0 +1,85 @@
+{
+  "packId": "edgeswarm-3b-realworld-v1",
+  "packVersion": 1,
+  "modelTier": "3b",
+  "workloads": [
+    {
+      "id": "support-payment-reconciliation-01",
+      "profile": "normal",
+      "kind": "support",
+      "maxOutputTokens": 384,
+      "prompt": "You are assisting a SaaS support team. Invoice INV-4418 for customer Northstar Labs shows unpaid in the dashboard. The bank processor reports transaction TX-7719 as settled for $2,480 at 09:14 UTC. The payment webhook arrived at 09:15 UTC but returned HTTP 500 with error customer_account_mapping_missing. A retry at 09:20 returned the same error. The customer's account was migrated yesterday from account NS-188 to NS-244, but the billing table still references NS-188. Explain the most likely root cause, what support should tell the customer, and the three operational actions the support team should take next. Do not claim the payment failed.",
+      "validation": {
+        "requiredJsonKeys": [],
+        "requiredTerms": ["mapping", "NS-188", "NS-244", "settled"],
+        "minimumOutputChars": 250,
+        "maximumOutputChars": 2200
+      }
+    },
+    {
+      "id": "summarization-incident-01",
+      "profile": "normal",
+      "kind": "summarization",
+      "maxOutputTokens": 384,
+      "prompt": "Summarize this internal incident update for an operations manager. At 14:02 UTC API latency increased from 420 ms to 4.8 seconds. At 14:07 the team identified a database connection pool at its 100-connection ceiling after a traffic spike. No data loss occurred. Checkout completion fell 11 percent between 14:04 and 14:18. At 14:12 the pool was increased to 180 connections and application workers were restarted in rolling groups. Latency returned below 600 ms by 14:19. Engineering will add pool saturation alerts, run a load test at 2x peak traffic, and review query duration outliers tomorrow. Give a concise executive summary containing impact, root cause, resolution, and follow-up actions.",
+      "validation": {
+        "requiredJsonKeys": [],
+        "requiredTerms": ["connection", "11", "14:19", "load test"],
+        "minimumOutputChars": 220,
+        "maximumOutputChars": 1800
+      }
+    },
+    {
+      "id": "debugging-cache-isolation-01",
+      "profile": "heavy",
+      "kind": "debugging",
+      "maxOutputTokens": 512,
+      "prompt": "A multi-tenant Node.js API caches account settings. The cache is declared as const settingsCache = new Map(). The request handler reads const key = req.params.accountId, returns settingsCache.get(key) when present, otherwise executes SELECT * FROM settings WHERE account_id = $1 using req.user.accountId and then stores the returned settings under key. Logs show authenticated user account A requesting /accounts/B/settings and receiving account A's settings, which are then cached under key B. The route currently checks authentication but does not verify that req.params.accountId equals the authenticated account or an account the user is authorized to access. Identify the primary correctness/security bug, explain why the cache makes the impact persist across requests, propose a safe fix, and describe two tests that would prevent regression.",
+      "validation": {
+        "requiredJsonKeys": [],
+        "requiredTerms": ["authorization", "cache", "accountId", "test"],
+        "minimumOutputChars": 400,
+        "maximumOutputChars": 3000
+      }
+    },
+    {
+      "id": "reasoning-support-capacity-01",
+      "profile": "heavy",
+      "kind": "reasoning",
+      "maxOutputTokens": 512,
+      "prompt": "You manage a support queue with 3 agents for the next hour. Agent A can resolve billing or account issues, Agent B can resolve technical or account issues, and Agent C can resolve billing or technical issues. Each agent can complete two tickets during the hour. Current tickets are: T1 critical technical outage affecting 40 customers; T2 billing duplicate charge affecting one customer; T3 account login failure affecting one executive customer; T4 technical export failure affecting five customers; T5 billing invoice-address correction; T6 account email change; T7 low-priority feature question. Critical incidents must be handled first and no agent may exceed two tickets. Assign the six tickets that should be handled this hour, give a valid agent assignment, identify the ticket deferred, and explain the prioritization in a concise operational plan.",
+      "validation": {
+        "requiredJsonKeys": [],
+        "requiredTerms": ["T1", "T7", "Agent"],
+        "minimumOutputChars": 300,
+        "maximumOutputChars": 2500
+      }
+    },
+    {
+      "id": "extraction-purchase-order-01",
+      "profile": "structured",
+      "kind": "extraction",
+      "maxOutputTokens": 300,
+      "prompt": "Extract the following purchase order into JSON only. Purchase order PO-8841 was issued by Alder Robotics AB to Vector Compute Ltd on 2026-08-01. Currency is EUR. Line 1: Edge inference appliance, SKU EIA-4, quantity 3, unit price 2,400.00 EUR. Line 2: Installation service, SKU INST-1, quantity 1, unit price 850.00 EUR. Payment terms are Net 30. Delivery deadline is 2026-08-28. The purchasing contact is Mira Lund, mira.lund@example.invalid. Return one JSON object with keys purchaseOrder, buyer, seller, currency, lines, paymentTerms, deliveryDeadline, contactEmail, and total. Each line must contain sku, description, quantity, unitPrice, and lineTotal. Calculate the total from the supplied quantities and unit prices. Do not add commentary outside the JSON.",
+      "validation": {
+        "requiredJsonKeys": ["purchaseOrder", "buyer", "seller", "currency", "lines", "paymentTerms", "deliveryDeadline", "contactEmail", "total"],
+        "requiredTerms": ["PO-8841", "8050", "EUR"],
+        "minimumOutputChars": 250,
+        "maximumOutputChars": 2200
+      }
+    },
+    {
+      "id": "instruction-ticket-routing-01",
+      "profile": "structured",
+      "kind": "instruction_following",
+      "maxOutputTokens": 320,
+      "prompt": "Route five incoming service tickets. Rules: security incidents route to SECURITY with severity P1 when active exploitation is reported, otherwise P2. Complete production outages route to SRE with severity P1. Billing disputes route to BILLING with severity P2. Feature requests route to PRODUCT with severity P3. Account-access problems route to SUPPORT with severity P2 unless they affect more than 20 users, in which case severity is P1. Tickets: A: API keys are being actively used by an unknown attacker. B: all production API requests return HTTP 503. C: customer disputes a renewal charge. D: customer requests dark mode. E: SSO login fails for 34 employees. Return JSON only with a top-level key tickets containing an array. Every item must contain id, route, severity, and reason. Preserve ticket order A through E and do not create additional fields.",
+      "validation": {
+        "requiredJsonKeys": ["tickets"],
+        "requiredTerms": ["SECURITY", "SRE", "BILLING", "PRODUCT", "SUPPORT", "P1", "P2", "P3"],
+        "minimumOutputChars": 300,
+        "maximumOutputChars": 2200
+      }
+    }
+  ]
+}
