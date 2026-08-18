@@ -101,6 +101,49 @@ fn run() -> Result<(), String> {
         return Err("wallet_hardware_mismatch".into());
     }
 
+    let heartbeat_only = env::var("EDGESWARM_HEARTBEAT_ONLY")
+        .map(|value| value.trim() == "1")
+        .unwrap_or(false);
+
+    // Deterministic-only nodes do not require a neural model/runtime merely
+    // to prove production heartbeat readiness. They still authenticate,
+    // preserve exact hardware/wallet continuity, and exit before /get-jobs.
+    if heartbeat_only {
+        let heartbeat =
+            ProductionHeartbeatV1::from_node_state(
+                &state,
+                "0.1.0",
+                "laptop",
+                &[],
+            );
+
+        if heartbeat.eligible_model_capabilities.is_empty() {
+            let http = Client::builder()
+                .timeout(Duration::from_secs(65))
+                .build()
+                .map_err(|_| "backend_http_client_failed".to_string())?;
+
+            let status =
+                send_heartbeat(
+                    &http,
+                    &auth_client,
+                    &mut auth,
+                    &heartbeat,
+                )?;
+
+            println!("READINESS_HEARTBEAT_HTTP_STATUS={status}");
+            println!("HEARTBEAT_ONLY_MODE=true");
+            println!("NODE_CAPABILITY_MODE=deterministic_only");
+            println!("WALLET_UNLOCKED=false");
+            println!("NEURAL_RUNTIME_REQUIRED=false");
+            println!("HEARTBEAT_SENT=true");
+            println!("GET_JOBS_CALLED=false");
+            println!("TASK_CLAIMED=false");
+            println!("RESULT_SUBMITTED=false");
+            return Ok(());
+        }
+    }
+
     let wallet_client = WorkerWalletClient::from_env()?;
     let rows = wallet_client.rows_for_email(&auth.access_token, &auth.provider_email)?;
 
@@ -183,10 +226,7 @@ fn run() -> Result<(), String> {
 
     println!("READINESS_HEARTBEAT_HTTP_STATUS={readiness_status}");
 
-    if env::var("EDGESWARM_HEARTBEAT_ONLY")
-        .map(|value| value.trim() == "1")
-        .unwrap_or(false)
-    {
+    if heartbeat_only {
         println!("HEARTBEAT_ONLY_MODE=true");
         println!("HEARTBEAT_SENT=true");
         println!("GET_JOBS_CALLED=false");

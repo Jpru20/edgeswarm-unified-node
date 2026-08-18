@@ -118,6 +118,20 @@ impl ProductionHeartbeatV1 {
                 .into_iter()
                 .collect::<Vec<_>>();
 
+        // Every unified node retains the deterministic baseline.
+        // Neural capabilities are added only after real certification.
+        let capabilities = [
+            "Exact-Extraction",
+            "Data-Scraper",
+            "Distributed-Compute",
+        ]
+        .iter()
+        .map(|capability| (*capability).to_string())
+        .chain(eligible_model_capabilities.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
         let models_available = state
             .models
             .iter()
@@ -175,8 +189,7 @@ impl ProductionHeartbeatV1 {
             app_version:
                 app_version.to_string(),
 
-            capabilities:
-                eligible_model_capabilities.clone(),
+            capabilities,
 
             status:
                 "online".into(),
