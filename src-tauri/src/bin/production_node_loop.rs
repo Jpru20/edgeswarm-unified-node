@@ -1,5 +1,6 @@
 use edgeswarm_unified_node_lib::core::{
     auth_client::SupabaseAuthClient,
+    deterministic_executor,
     production_heartbeat::ProductionHeartbeatV1,
     production_inference::ProductionLlamaClient,
     production_task_http::{poll_once, read_auth, send_heartbeat, submit_with_retry},
@@ -69,6 +70,87 @@ fn failure_payload(
             "runtimeAcceleration": "cpu"
         }
     }))
+}
+
+
+fn build_task_submit_payload(
+    task: &TaskEnvelope,
+    llama: Option<&ProductionLlamaClient>,
+    provider_email: &str,
+    worker: &str,
+    hardware: &str,
+    private_key: &str,
+) -> Result<Value, String> {
+    if let Some(result) = deterministic_executor::execute(task) {
+        println!("DETERMINISTIC_EXECUTION_SUCCEEDED=true");
+        println!("DETERMINISTIC_MODEL_ID={}", result.model_id_used);
+
+        return serde_json::to_value(build_submit_result(
+            task,
+            &result.ai_output,
+            provider_email,
+            worker,
+            hardware,
+            private_key,
+            result.latency_ms,
+            result.model_id_used,
+            "deterministic",
+            "cpu",
+        )?)
+        .map_err(|_| "deterministic_result_payload_encode_failed".to_string());
+    }
+
+    let required = task.required_model.as_deref().unwrap_or("");
+    let selected = task.selected_model.as_deref().unwrap_or("");
+
+    let neural_supported = required == "Neural-Inference-3B"
+        && (selected.is_empty() || selected == "qwen2.5:3b" || selected == "tier:auto");
+
+    if !neural_supported {
+        println!("TASK_SUPPORTED=false");
+        return failure_payload(
+            task,
+            provider_email,
+            worker,
+            hardware,
+            private_key,
+            "unsupported_claimed_task",
+        );
+    }
+
+    let llama = llama.ok_or_else(|| "neural_runtime_unavailable".to_string())?;
+
+    match llama.execute(&task.prompt, task.max_output_tokens) {
+        Ok(result) => {
+            println!("INFERENCE_SUCCEEDED=true");
+            println!("INFERENCE_LATENCY_MS={}", result.latency_ms);
+
+            serde_json::to_value(build_submit_result(
+                task,
+                &result.ai_output,
+                provider_email,
+                worker,
+                hardware,
+                private_key,
+                result.latency_ms,
+                "qwen2.5:3b",
+                "llama.cpp",
+                "cpu",
+            )?)
+            .map_err(|_| "result_payload_encode_failed".to_string())
+        }
+        Err(_) => {
+            println!("INFERENCE_SUCCEEDED=false");
+            failure_payload(
+                task,
+                provider_email,
+                worker,
+                hardware,
+                private_key,
+                "neural_inference_failed",
+            )
+        }
+    }
 }
 
 fn run() -> Result<(), String> {
@@ -177,45 +259,65 @@ fn run() -> Result<(), String> {
 
     let base_heartbeat = ProductionHeartbeatV1::from_node_state(&state, "0.1.0", "laptop", &[]);
 
-    if base_heartbeat.concurrency_limit != 1
-        || base_heartbeat.eligible_model_capabilities != vec!["Neural-Inference-3B".to_string()]
-    {
+    if base_heartbeat.concurrency_limit != 1 {
         return Err("runner_capacity_gate_failed".into());
     }
 
-    // The unified production process owns llama.cpp by default.
-    // EDGESWARM_LLAMA_BASE_URL remains an explicit development /
-    // compatibility override for an externally managed local runtime.
+    let neural_ready = base_heartbeat
+        .eligible_model_capabilities
+        .iter()
+        .any(|capability| capability == "Neural-Inference-3B");
+
+    let deterministic_ready = [
+        "Exact-Extraction",
+        "Data-Scraper",
+        "Distributed-Compute",
+    ]
+    .iter()
+    .all(|required| {
+        base_heartbeat
+            .capabilities
+            .iter()
+            .any(|capability| capability == required)
+    });
+
+    if !neural_ready && !deterministic_ready {
+        return Err("runner_no_executable_capabilities".into());
+    }
+
+    let poll_capabilities = base_heartbeat.capabilities.clone();
+
     let mut _managed_llama: Option<ManagedLlamaProcess> = None;
 
-    let llama_base_url = match env::var("EDGESWARM_LLAMA_BASE_URL") {
-        Ok(value) if !value.trim().is_empty() => {
-            println!("LLAMA_RUNTIME_OWNERSHIP=external");
-            value
-        }
+    let llama = if neural_ready {
+        let llama_base_url = match env::var("EDGESWARM_LLAMA_BASE_URL") {
+            Ok(value) if !value.trim().is_empty() => {
+                println!("LLAMA_RUNTIME_OWNERSHIP=external");
+                value
+            }
+            _ => {
+                let model_path = env::var("EDGESWARM_MODEL_PATH")
+                    .map_err(|_| "EDGESWARM_MODEL_PATH_required".to_string())?;
 
-        _ => {
-            let model_path = env::var("EDGESWARM_MODEL_PATH")
-                .map_err(|_| "EDGESWARM_MODEL_PATH_required".to_string())?;
+                let config = LlamaProcessConfig::for_model(model_path)?;
+                let runtime = ManagedLlamaProcess::start(&config)?;
+                let base_url = runtime.base_url().to_string();
 
-            let config = LlamaProcessConfig::for_model(model_path)?;
+                println!("LLAMA_RUNTIME_OWNERSHIP=managed");
+                _managed_llama = Some(runtime);
+                base_url
+            }
+        };
 
-            let runtime = ManagedLlamaProcess::start(&config)?;
-
-            let base_url = runtime.base_url().to_string();
-
-            println!("LLAMA_RUNTIME_OWNERSHIP=managed");
-
-            _managed_llama = Some(runtime);
-            base_url
-        }
+        let client = ProductionLlamaClient::new(llama_base_url)?;
+        client.health_check()?;
+        println!("LOCAL_RUNTIME_READY=true");
+        Some(client)
+    } else {
+        println!("NODE_CAPABILITY_MODE=deterministic_only");
+        println!("NEURAL_RUNTIME_REQUIRED=false");
+        None
     };
-
-    let llama = ProductionLlamaClient::new(llama_base_url)?;
-
-    // Critical: runtime must be ready BEFORE heartbeat/get-jobs can claim.
-    llama.health_check()?;
-    println!("LOCAL_RUNTIME_READY=true");
 
     let http = Client::builder()
         .timeout(Duration::from_secs(65))
@@ -243,7 +345,7 @@ fn run() -> Result<(), String> {
             &auth_client,
             &mut auth,
             &hardware,
-            &base_heartbeat.eligible_model_capabilities,
+            &poll_capabilities,
         )?;
 
         if poll.blocked {
@@ -295,59 +397,14 @@ fn run() -> Result<(), String> {
             }
         }
 
-        let required = task.required_model.as_deref().unwrap_or("");
-
-        let selected = task.selected_model.as_deref().unwrap_or("");
-
-        let supported = required == "Neural-Inference-3B"
-            && (selected.is_empty() || selected == "qwen2.5:3b" || selected == "tier:auto");
-
-        let submit_payload = if supported {
-            match llama.execute(&task.prompt, task.max_output_tokens) {
-                Ok(result) => {
-                    println!("INFERENCE_SUCCEEDED=true");
-                    println!("INFERENCE_LATENCY_MS={}", result.latency_ms);
-
-                    serde_json::to_value(build_submit_result(
-                        &task,
-                        &result.ai_output,
-                        &auth.provider_email,
-                        &public_wallet.wallet_address,
-                        &hardware,
-                        private_key.as_str(),
-                        result.latency_ms,
-                        "qwen2.5:3b",
-                        "llama.cpp",
-                        "cpu",
-                    )?)
-                    .map_err(|_| "result_payload_encode_failed".to_string())?
-                }
-
-                Err(_) => {
-                    println!("INFERENCE_SUCCEEDED=false");
-
-                    failure_payload(
-                        &task,
-                        &auth.provider_email,
-                        &public_wallet.wallet_address,
-                        &hardware,
-                        private_key.as_str(),
-                        "neural_inference_failed",
-                    )?
-                }
-            }
-        } else {
-            println!("TASK_SUPPORTED=false");
-
-            failure_payload(
-                &task,
-                &auth.provider_email,
-                &public_wallet.wallet_address,
-                &hardware,
-                private_key.as_str(),
-                "unsupported_claimed_task",
-            )?
-        };
+        let submit_payload = build_task_submit_payload(
+            &task,
+            llama.as_ref(),
+            &auth.provider_email,
+            &public_wallet.wallet_address,
+            &hardware,
+            private_key.as_str(),
+        )?;
 
         let outcome = submit_with_retry(&http, &auth_client, &mut auth, &submit_payload)?;
 
@@ -367,7 +424,7 @@ fn run() -> Result<(), String> {
                 &auth_client,
                 &mut auth,
                 &hardware,
-                &base_heartbeat.eligible_model_capabilities,
+                &poll_capabilities,
             )?)
             .ok_or_else(|| "correction_redelivery_missing".to_string())?;
 
@@ -375,21 +432,14 @@ fn run() -> Result<(), String> {
                 return Err("correction_wrong_task".into());
             }
 
-            let result = llama.execute(&correction.prompt, correction.max_output_tokens)?;
-
-            let payload = serde_json::to_value(build_submit_result(
+            let payload = build_task_submit_payload(
                 &correction,
-                &result.ai_output,
+                llama.as_ref(),
                 &auth.provider_email,
                 &public_wallet.wallet_address,
                 &hardware,
                 private_key.as_str(),
-                result.latency_ms,
-                "qwen2.5:3b",
-                "llama.cpp",
-                "cpu",
-            )?)
-            .map_err(|_| "correction_payload_encode_failed".to_string())?;
+            )?;
 
             let correction_outcome = submit_with_retry(&http, &auth_client, &mut auth, &payload)?;
 
