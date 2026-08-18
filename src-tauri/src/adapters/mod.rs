@@ -72,6 +72,11 @@ pub fn hardware_identity_override() -> Option<(String, String)> {
         return windows::hardware_identity_override();
     }
 
+    #[cfg(target_os = "macos")]
+    {
+        return macos::hardware_identity_override();
+    }
+
     #[allow(unreachable_code)]
     None
 }
