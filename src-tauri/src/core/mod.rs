@@ -19,6 +19,7 @@ pub mod model_discovery;
 pub mod model_fingerprint;
 pub mod model_provisioning;
 pub mod model_registry;
+pub mod node_service;
 pub mod per_model_state;
 pub mod platform;
 pub mod production_heartbeat;

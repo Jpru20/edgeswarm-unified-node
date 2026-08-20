@@ -1,4 +1,4 @@
-﻿import { FormEvent, useState } from "react";
+﻿import { FormEvent, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
@@ -11,6 +11,12 @@ type AuthBeginResult = {
 
 type AuthVerifyResult = {
   email: string;
+};
+
+type NodeServiceStatus = {
+  running: boolean;
+  stopping: boolean;
+  lastError?: string | null;
 };
 
 type ModelState = {
@@ -49,11 +55,73 @@ function App() {
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [nodeState, setNodeState] = useState<NodeState | null>(null);
+  const [serviceStatus, setServiceStatus] =
+    useState<NodeServiceStatus>({
+      running: false,
+      stopping: false,
+      lastError: null,
+    });
+  const [nodeActionBusy, setNodeActionBusy] = useState(false);
 
   async function loadNodeState() {
     const state = await invoke<NodeState>("get_node_state");
     setNodeState(state);
   }
+
+  async function toggleNode() {
+    setNodeActionBusy(true);
+
+    try {
+      const command = serviceStatus.running
+        ? "stop_node"
+        : "start_node";
+
+      const current =
+        await invoke<NodeServiceStatus>(command);
+
+      setServiceStatus(current);
+      setStatus("");
+    } catch (error) {
+      setStatus(String(error));
+    } finally {
+      setNodeActionBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (screen !== "dashboard") {
+      return;
+    }
+
+    let disposed = false;
+
+    const refresh = async () => {
+      try {
+        const current =
+          await invoke<NodeServiceStatus>(
+            "node_service_status",
+          );
+
+        if (!disposed) {
+          setServiceStatus(current);
+        }
+      } catch {
+        // The dashboard remains usable if a local status refresh fails.
+      }
+    };
+
+    void refresh();
+
+    const timer = window.setInterval(
+      () => void refresh(),
+      1000,
+    );
+
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [screen]);
 
   async function handleLogin(event: FormEvent) {
     event.preventDefault();
@@ -254,12 +322,18 @@ function App() {
       <div className="earnings-label">Total Earnings</div>
 
       <button
-        className="start-button"
+        className={`start-button ${
+          serviceStatus.running ? "running" : ""
+        }`}
         type="button"
-        disabled
-        title="Production node service wiring is the next step."
+        onClick={toggleNode}
+        disabled={nodeActionBusy || serviceStatus.stopping}
       >
-        START NODE
+        {serviceStatus.stopping
+          ? "STOPPING..."
+          : serviceStatus.running
+            ? "STOP NODE"
+            : "START NODE"}
       </button>
 
       <section className="console">
@@ -281,7 +355,20 @@ function App() {
           <div>&gt; No certified neural model currently active.</div>
         )}
 
-        <div>&gt; Production task service not started.</div>
+        <div>
+          &gt; Node service:{" "}
+          {serviceStatus.stopping
+            ? "stopping after current lifecycle"
+            : serviceStatus.running
+              ? "running"
+              : "stopped"}
+        </div>
+
+        {serviceStatus.lastError && (
+          <div>
+            &gt; Node service error: {serviceStatus.lastError}
+          </div>
+        )}
       </section>
 
       <button className="ledger-button" type="button" disabled>

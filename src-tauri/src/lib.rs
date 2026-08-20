@@ -6,11 +6,17 @@ use crate::core::{
     auth_login_client::SupabaseLoginClient,
     auth_login_contract::{jwt_aal, verified_totp_factor},
     auth_session::AuthSession,
+    node_service::run_node_service,
     NodeState,
 };
 use serde::Serialize;
 use std::{
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+        Mutex,
+    },
+    thread::{self, JoinHandle},
     time::{SystemTime, UNIX_EPOCH},
 };
 use zeroize::Zeroizing;
@@ -27,6 +33,32 @@ struct AppAuthState {
     // Kept only in Rust process memory so the future node service can
     // unlock the encrypted device wallet without prompting in a terminal.
     wallet_password: Option<Zeroizing<String>>,
+}
+
+struct NodeRuntimeState {
+    stop: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
+    last_error: Arc<Mutex<Option<String>>>,
+    worker: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl Default for NodeRuntimeState {
+    fn default() -> Self {
+        Self {
+            stop: Arc::new(AtomicBool::new(false)),
+            running: Arc::new(AtomicBool::new(false)),
+            last_error: Arc::new(Mutex::new(None)),
+            worker: Mutex::new(None),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NodeServiceStatus {
+    running: bool,
+    stopping: bool,
+    last_error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -205,15 +237,147 @@ fn auth_verify(
     Ok(AuthVerifyResult { email })
 }
 
+fn current_node_service_status(
+    runtime: &NodeRuntimeState,
+) -> Result<NodeServiceStatus, String> {
+    let running = runtime.running.load(Ordering::Acquire);
+    let stopping =
+        running && runtime.stop.load(Ordering::Acquire);
+
+    let last_error = runtime
+        .last_error
+        .lock()
+        .map_err(|_| "node_service_error_lock_failed".to_string())?
+        .clone();
+
+    Ok(NodeServiceStatus {
+        running,
+        stopping,
+        last_error,
+    })
+}
+
+#[tauri::command]
+fn node_service_status(
+    runtime: tauri::State<'_, NodeRuntimeState>,
+) -> Result<NodeServiceStatus, String> {
+    current_node_service_status(&runtime)
+}
+
+#[tauri::command]
+fn start_node(
+    auth_state: tauri::State<'_, Mutex<AppAuthState>>,
+    runtime: tauri::State<'_, NodeRuntimeState>,
+) -> Result<NodeServiceStatus, String> {
+    if runtime.running.load(Ordering::Acquire) {
+        return current_node_service_status(&runtime);
+    }
+
+    // Reap a previously completed worker before starting another.
+    {
+        let mut worker = runtime
+            .worker
+            .lock()
+            .map_err(|_| "node_worker_lock_failed".to_string())?;
+
+        if worker
+            .as_ref()
+            .map(|handle| handle.is_finished())
+            .unwrap_or(false)
+        {
+            if let Some(handle) = worker.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    let wallet_password = {
+        let state = auth_state
+            .lock()
+            .map_err(|_| "auth_state_lock_failed".to_string())?;
+
+        if state.authenticated_email.is_none() {
+            return Err("node_start_requires_authenticated_session".into());
+        }
+
+        let password = state
+            .wallet_password
+            .as_ref()
+            .ok_or_else(|| {
+                "node_start_wallet_password_missing".to_string()
+            })?;
+
+        Zeroizing::new(password.as_str().to_owned())
+    };
+
+    runtime.stop.store(false, Ordering::Release);
+
+    {
+        let mut error = runtime
+            .last_error
+            .lock()
+            .map_err(|_| "node_service_error_lock_failed".to_string())?;
+
+        *error = None;
+    }
+
+    runtime.running.store(true, Ordering::Release);
+
+    let stop = Arc::clone(&runtime.stop);
+    let running = Arc::clone(&runtime.running);
+    let last_error = Arc::clone(&runtime.last_error);
+
+    let handle = thread::spawn(move || {
+        let result = run_node_service(
+            Arc::clone(&stop),
+            wallet_password,
+        );
+
+        if let Err(error) = result {
+            if let Ok(mut slot) = last_error.lock() {
+                *slot = Some(error);
+            }
+        }
+
+        running.store(false, Ordering::Release);
+    });
+
+    {
+        let mut worker = runtime
+            .worker
+            .lock()
+            .map_err(|_| "node_worker_lock_failed".to_string())?;
+
+        *worker = Some(handle);
+    }
+
+    current_node_service_status(&runtime)
+}
+
+#[tauri::command]
+fn stop_node(
+    runtime: tauri::State<'_, NodeRuntimeState>,
+) -> Result<NodeServiceStatus, String> {
+    if runtime.running.load(Ordering::Acquire) {
+        runtime.stop.store(true, Ordering::Release);
+    }
+
+    current_node_service_status(&runtime)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(Mutex::new(AppAuthState::default()))
+        .manage(NodeRuntimeState::default())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             get_node_state,
             auth_begin,
-            auth_verify
+            auth_verify,
+            node_service_status,
+            start_node,
+            stop_node
         ])
         .run(tauri::generate_context!())
         .expect("error while running EdgeSwarm Unified Node");

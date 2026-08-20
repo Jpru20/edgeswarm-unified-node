@@ -230,9 +230,25 @@ button:disabled { cursor: default; }
   min-width: 150px;
   padding: 10px 18px;
   margin: 6px 0 8px;
-  background: #555555;
+  background: #15803d;
   font-size: 16px;
   font-weight: 700;
+}
+
+.start-button:hover:not(:disabled) {
+  background: #166534;
+}
+
+.start-button.running {
+  background: #b91c1c;
+}
+
+.start-button.running:hover:not(:disabled) {
+  background: #991b1b;
+}
+
+.start-button:disabled {
+  background: #555555;
 }
 
 .console {
