@@ -10,7 +10,6 @@ pub fn detect() -> AccelerationInfo {
     }
 }
 
-
 pub fn platform_name() -> &'static str {
     "android"
 }
@@ -27,31 +26,23 @@ pub fn app_data_dir() -> std::path::PathBuf {
         .join("unified-node")
 }
 
-pub fn hardware_identity_material()
-    -> Option<(String, String)>
-{
-    for property in ["ro.serialno", "ro.boot.serialno"] {
-        let output = std::process::Command::new("getprop")
-            .arg(property)
-            .output()
-            .ok()?;
-
-        if output.status.success() {
-            let value =
-                String::from_utf8_lossy(&output.stdout)
-                    .trim()
-                    .to_lowercase();
-
-            if !value.is_empty() && value != "unknown" {
-                return Some((
-                    format!("android_{property}"),
-                    value,
-                ));
-            }
-        }
-    }
-
-    // If Android does not expose stable device material to the
-    // app sandbox, HardwareIdentity uses the persisted fallback.
+pub fn hardware_identity_material() -> Option<(String, String)> {
+    // ANDROID_UNIFIED_HARDWARE_IDENTITY_BRIDGE_PENDING_V1
+    //
+    // The unified Android host must provide the existing Android
+    // device-scoped material:
+    //
+    //   ${Build.MANUFACTURER}_${Build.MODEL} + "_" +
+    //   Settings.Secure.ANDROID_ID.take(6)
+    //
+    // with source:
+    //
+    //   android_legacy_device_scoped_v1
+    //
+    // Rust then owns the canonical v1 SHA-256 derivation.
+    //
+    // Do not use ro.serialno, ro.boot.serialno, or another device
+    // identifier here because that would fork an already-migrated
+    // Android node into a second hardware identity.
     None
 }

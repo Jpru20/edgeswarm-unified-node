@@ -23,7 +23,15 @@ impl HardwareIdentity {
             return Self::from_material(&source, &material);
         }
 
-        Self::load_or_create_fallback(&adapters::hardware_identity_fallback_path())
+        #[cfg(target_os = "android")]
+        {
+            return Err("android_hardware_identity_bridge_missing".into());
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            Self::load_or_create_fallback(&adapters::hardware_identity_fallback_path())
+        }
     }
 
     pub fn from_prehashed(source: &str, hardware_id: &str) -> Result<Self, String> {
@@ -141,6 +149,22 @@ mod tests {
         assert_eq!(first.hardware_id, second.hardware_id);
 
         assert!(HardwareIdentity::is_valid_hardware_id(&first.hardware_id));
+    }
+
+    #[test]
+    fn android_legacy_material_matches_pixel_migration_vector() {
+        let identity = HardwareIdentity::from_material(
+            "android_legacy_device_scoped_v1",
+            "Google_Pixel10_a340ea",
+        )
+        .unwrap();
+
+        assert_eq!(
+            identity.hardware_id,
+            "f1ea21f2178c7fa613854da9b4415f6fc6235ed2307647156360b87a9d0c3cb2"
+        );
+
+        assert_eq!(identity.source, "android_legacy_device_scoped_v1");
     }
 
     #[test]
