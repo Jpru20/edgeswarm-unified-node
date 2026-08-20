@@ -1,6 +1,7 @@
 use edgeswarm_unified_node_lib::core::{
     auth_client::SupabaseAuthClient,
     deterministic_executor,
+    model_discovery::discover_models,
     production_heartbeat::ProductionHeartbeatV1,
     production_inference::ProductionLlamaClient,
     production_task_http::{poll_once, read_auth, send_heartbeat, submit_with_retry},
@@ -28,6 +29,43 @@ fn first_task(mut r: GetJobsResponse) -> Option<TaskEnvelope> {
     } else {
         r.task
     }
+}
+
+fn resolve_active_model_path_v1(selected_model: &str) -> Result<String, String> {
+    let root = env::var("EDGESWARM_MODEL_ROOT")
+        .map_err(|_| "EDGESWARM_MODEL_ROOT_required".to_string())?;
+
+    let mut matches = discover_models(std::path::Path::new(&root))
+        .into_iter()
+        .filter(|model| model.selected_model == selected_model)
+        .collect::<Vec<_>>();
+
+    matches.sort_by(|left, right| left.path.cmp(&right.path));
+
+    let model = matches
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("certified_model_artifact_missing:{selected_model}"))?;
+
+    Ok(model.path.to_string_lossy().to_string())
+}
+
+fn execution_acceleration_v1() -> String {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        let layers = env::var("EDGESWARM_LLAMA_GPU_LAYERS")
+            .ok()
+            .and_then(|value| value.parse::<i32>().ok())
+            .unwrap_or(0);
+
+        if layers > 0 {
+            return "metal".into();
+        }
+    }
+
+    env::var("EDGESWARM_EXECUTION_ACCELERATION")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "cpu".into())
 }
 
 fn failure_payload(
@@ -65,13 +103,12 @@ fn failure_payload(
             "latency_ms": 0,
             "requiredModel":
                 task.required_model.clone().unwrap_or_default(),
-            "modelIdUsed": "qwen2.5:3b",
+            "modelIdUsed": task.selected_model.clone().unwrap_or_else(|| "unavailable".into()),
             "runtime": "llama.cpp",
-            "runtimeAcceleration": "cpu"
+            "runtimeAcceleration": "unknown"
         }
     }))
 }
-
 
 fn build_task_submit_payload(
     task: &TaskEnvelope,
@@ -80,6 +117,10 @@ fn build_task_submit_payload(
     worker: &str,
     hardware: &str,
     private_key: &str,
+    active_selected_model: Option<&str>,
+    active_capability: Option<&str>,
+    active_runtime: Option<&str>,
+    runtime_acceleration: &str,
 ) -> Result<Value, String> {
     if let Some(result) = deterministic_executor::execute(task) {
         println!("DETERMINISTIC_EXECUTION_SUCCEEDED=true");
@@ -103,8 +144,13 @@ fn build_task_submit_payload(
     let required = task.required_model.as_deref().unwrap_or("");
     let selected = task.selected_model.as_deref().unwrap_or("");
 
-    let neural_supported = required == "Neural-Inference-3B"
-        && (selected.is_empty() || selected == "qwen2.5:3b" || selected == "tier:auto");
+    let neural_supported = match (active_selected_model, active_capability) {
+        (Some(active_model), Some(active_capability)) => {
+            required == active_capability
+                && (selected.is_empty() || selected == "tier:auto" || selected == active_model)
+        }
+        _ => false,
+    };
 
     if !neural_supported {
         println!("TASK_SUPPORTED=false");
@@ -133,9 +179,9 @@ fn build_task_submit_payload(
                 hardware,
                 private_key,
                 result.latency_ms,
-                "qwen2.5:3b",
-                "llama.cpp",
-                "cpu",
+                active_selected_model.ok_or_else(|| "active_model_missing".to_string())?,
+                active_runtime.ok_or_else(|| "active_runtime_missing".to_string())?,
+                runtime_acceleration,
             )?)
             .map_err(|_| "result_payload_encode_failed".to_string())
         }
@@ -187,43 +233,46 @@ fn run() -> Result<(), String> {
         .map(|value| value.trim() == "1")
         .unwrap_or(false);
 
-    // Deterministic-only nodes do not require a neural model/runtime merely
-    // to prove production heartbeat readiness. They still authenticate,
-    // preserve exact hardware/wallet continuity, and exit before /get-jobs.
+    // Heartbeat-only mode advertises exactly what NodeState has
+    // actually validated/certified, then exits before wallet unlock,
+    // runtime startup, or /get-jobs.
     if heartbeat_only {
-        let heartbeat =
-            ProductionHeartbeatV1::from_node_state(
-                &state,
-                "0.1.0",
-                "laptop",
-                &[],
-            );
+        let heartbeat = ProductionHeartbeatV1::from_node_state(&state, "0.1.0", "laptop", &[]);
 
-        if heartbeat.eligible_model_capabilities.is_empty() {
-            let http = Client::builder()
-                .timeout(Duration::from_secs(65))
-                .build()
-                .map_err(|_| "backend_http_client_failed".to_string())?;
+        let capability_mode = if heartbeat.eligible_model_capabilities.is_empty() {
+            "deterministic_only"
+        } else {
+            "neural_ready"
+        };
 
-            let status =
-                send_heartbeat(
-                    &http,
-                    &auth_client,
-                    &mut auth,
-                    &heartbeat,
-                )?;
+        let http = Client::builder()
+            .timeout(Duration::from_secs(65))
+            .build()
+            .map_err(|_| "backend_http_client_failed".to_string())?;
 
-            println!("READINESS_HEARTBEAT_HTTP_STATUS={status}");
-            println!("HEARTBEAT_ONLY_MODE=true");
-            println!("NODE_CAPABILITY_MODE=deterministic_only");
-            println!("WALLET_UNLOCKED=false");
-            println!("NEURAL_RUNTIME_REQUIRED=false");
-            println!("HEARTBEAT_SENT=true");
-            println!("GET_JOBS_CALLED=false");
-            println!("TASK_CLAIMED=false");
-            println!("RESULT_SUBMITTED=false");
-            return Ok(());
+        let status = send_heartbeat(&http, &auth_client, &mut auth, &heartbeat)?;
+
+        println!("READINESS_HEARTBEAT_HTTP_STATUS={status}");
+        println!("HEARTBEAT_ONLY_MODE=true");
+        println!("NODE_CAPABILITY_MODE={capability_mode}");
+
+        if let Some(model) = heartbeat.model_id.as_deref() {
+            println!("ADVERTISED_MODEL={model}");
         }
+
+        if let Some(capability) = heartbeat.model_capability.as_deref() {
+            println!("ADVERTISED_MODEL_CAPABILITY={capability}");
+        }
+
+        println!("ADVERTISED_CONCURRENCY={}", heartbeat.concurrency_limit);
+        println!("WALLET_UNLOCKED=false");
+        println!("NEURAL_RUNTIME_STARTED=false");
+        println!("HEARTBEAT_SENT=true");
+        println!("GET_JOBS_CALLED=false");
+        println!("TASK_CLAIMED=false");
+        println!("RESULT_SUBMITTED=false");
+
+        return Ok(());
     }
 
     let wallet_client = WorkerWalletClient::from_env()?;
@@ -263,23 +312,28 @@ fn run() -> Result<(), String> {
         return Err("runner_capacity_gate_failed".into());
     }
 
-    let neural_ready = base_heartbeat
-        .eligible_model_capabilities
-        .iter()
-        .any(|capability| capability == "Neural-Inference-3B");
+    let active_selected_model = base_heartbeat.model_id.clone();
 
-    let deterministic_ready = [
-        "Exact-Extraction",
-        "Data-Scraper",
-        "Distributed-Compute",
-    ]
-    .iter()
-    .all(|required| {
-        base_heartbeat
-            .capabilities
-            .iter()
-            .any(|capability| capability == required)
-    });
+    let active_capability = base_heartbeat.model_capability.clone();
+
+    let active_runtime = base_heartbeat.runtime.clone();
+
+    let runtime_acceleration = execution_acceleration_v1();
+
+    let neural_ready = active_selected_model.is_some()
+        && active_capability
+            .as_deref()
+            .map(|capability| capability.starts_with("Neural-Inference"))
+            .unwrap_or(false);
+
+    let deterministic_ready = ["Exact-Extraction", "Data-Scraper", "Distributed-Compute"]
+        .iter()
+        .all(|required| {
+            base_heartbeat
+                .capabilities
+                .iter()
+                .any(|capability| capability == required)
+        });
 
     if !neural_ready && !deterministic_ready {
         return Err("runner_no_executable_capabilities".into());
@@ -296,8 +350,13 @@ fn run() -> Result<(), String> {
                 value
             }
             _ => {
-                let model_path = env::var("EDGESWARM_MODEL_PATH")
-                    .map_err(|_| "EDGESWARM_MODEL_PATH_required".to_string())?;
+                let selected_model = active_selected_model
+                    .as_deref()
+                    .ok_or_else(|| "active_model_missing".to_string())?;
+
+                let model_path = resolve_active_model_path_v1(selected_model)?;
+
+                println!("ACTIVE_EXECUTION_MODEL={selected_model}");
 
                 let config = LlamaProcessConfig::for_model(model_path)?;
                 let runtime = ManagedLlamaProcess::start(&config)?;
@@ -404,6 +463,10 @@ fn run() -> Result<(), String> {
             &public_wallet.wallet_address,
             &hardware,
             private_key.as_str(),
+            active_selected_model.as_deref(),
+            active_capability.as_deref(),
+            active_runtime.as_deref(),
+            &runtime_acceleration,
         )?;
 
         let outcome = submit_with_retry(&http, &auth_client, &mut auth, &submit_payload)?;
@@ -439,6 +502,10 @@ fn run() -> Result<(), String> {
                 &public_wallet.wallet_address,
                 &hardware,
                 private_key.as_str(),
+                active_selected_model.as_deref(),
+                active_capability.as_deref(),
+                active_runtime.as_deref(),
+                &runtime_acceleration,
             )?;
 
             let correction_outcome = submit_with_retry(&http, &auth_client, &mut auth, &payload)?;

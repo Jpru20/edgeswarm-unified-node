@@ -3,10 +3,7 @@ use crate::{
     core::{
         capacity::{CapacityCertificateV1, CapacityStatus},
         capacity_store::load_certificate,
-        certificate_match::{
-            certificate_match_failures,
-            CertificateMatchContext,
-        },
+        certificate_match::{certificate_match_failures, CertificateMatchContext},
         model::ModelState,
         model_discovery::{discover_models, DiscoveredModelV1},
         model_fingerprint::resolve_model_fingerprint,
@@ -45,17 +42,16 @@ struct CertificationPolicyV1 {
     quantization: &'static str,
 }
 
-fn certification_policy(
-    capability: &str,
-) -> Option<CertificationPolicyV1> {
-    match capability {
-        "Neural-Inference-3B" => Some(CertificationPolicyV1 {
-            pack_id: "edgeswarm-3b-realworld-v2",
-            capacity_policy_version: "realworld-capacity-policy-v1",
-            quantization: "Q4_K_M",
-        }),
-        _ => None,
+fn certification_policy(capability: &str) -> Option<CertificationPolicyV1> {
+    if !capability.starts_with("Neural-Inference") {
+        return None;
     }
+
+    Some(CertificationPolicyV1 {
+        pack_id: crate::core::certification_workload::NEURAL_REALWORLD_PACK_ID_V1,
+        capacity_policy_version: "realworld-capacity-policy-v1",
+        quantization: "Q4_K_M",
+    })
 }
 
 fn runtime_version(path: &Path) -> Result<String, String> {
@@ -71,9 +67,7 @@ fn runtime_version(path: &Path) -> Result<String, String> {
     );
 
     for line in text.lines() {
-        if let Some(version) =
-            line.trim().strip_prefix("version: ")
-        {
+        if let Some(version) = line.trim().strip_prefix("version: ") {
             return Ok(version.trim().to_string());
         }
     }
@@ -105,9 +99,7 @@ fn load_certificates() -> Vec<CapacityCertificateV1> {
         .filter_map(|entry| {
             let path = entry.path();
 
-            if path.extension().and_then(|v| v.to_str())
-                != Some("json")
-            {
+            if path.extension().and_then(|v| v.to_str()) != Some("json") {
                 return None;
             }
 
@@ -117,7 +109,8 @@ fn load_certificates() -> Vec<CapacityCertificateV1> {
 }
 
 fn artifact_id(model: &DiscoveredModelV1) -> String {
-    model.path
+    model
+        .path
         .file_stem()
         .and_then(|v| v.to_str())
         .unwrap_or(&model.file_name)
@@ -155,9 +148,7 @@ pub fn resolve_per_model_states(
             certificate_loaded: false,
         };
 
-        let Some(policy) =
-            certification_policy(model.capability)
-        else {
+        let Some(policy) = certification_policy(model.capability) else {
             states.push(state);
             continue;
         };
@@ -167,8 +158,10 @@ pub fn resolve_per_model_states(
             .filter(|certificate| {
                 certificate.model_capability == model.capability
                     && certificate.runtime == model.runtime
-                    && certificate.certification_pack_id
-                        == policy.pack_id
+                    && (certificate.certification_pack_id == policy.pack_id
+                        || (certificate.model_capability == "Neural-Inference-3B"
+                            && certificate.certification_pack_id
+                                == crate::core::certification_workload::LEGACY_NEURAL_REALWORLD_PACK_ID_V1))
             })
             .collect();
 
@@ -177,24 +170,19 @@ pub fn resolve_per_model_states(
             continue;
         }
 
-        let fingerprint = match resolve_model_fingerprint(
-            model.selected_model,
-            &model.path,
-            false,
-        ) {
+        let fingerprint = match resolve_model_fingerprint(model.selected_model, &model.path, false)
+        {
             Ok(value) => value,
             Err(_) => {
                 state.status = "revalidation_required".into();
-                state.capacity_status =
-                    CapacityStatus::RevalidationRequired;
+                state.capacity_status = CapacityStatus::RevalidationRequired;
                 states.push(state);
                 continue;
             }
         };
 
         state.fingerprint_resolved = true;
-        state.fingerprint_cache_hit =
-            Some(fingerprint.cache_hit);
+        state.fingerprint_cache_hit = Some(fingerprint.cache_hit);
 
         let mut relevant_certificate_seen = false;
 
@@ -215,51 +203,53 @@ pub fn resolve_per_model_states(
                 runtime: model.runtime,
                 runtime_version: &runtime_version,
                 acceleration,
-                certification_pack_id: policy.pack_id,
+                certification_pack_id: certificate.certification_pack_id.as_str(),
                 benchmark_mode: "no_cache_prompt",
-                capacity_policy_version:
-                    policy.capacity_policy_version,
-                output_limit_policy_version:
-                    OUTPUT_LIMIT_POLICY_VERSION,
+                capacity_policy_version: policy.capacity_policy_version,
+                output_limit_policy_version: OUTPUT_LIMIT_POLICY_VERSION,
             };
 
-            let failures =
-                certificate_match_failures(
-                    certificate,
-                    &context,
-                );
+            let failures = certificate_match_failures(certificate, &context);
 
             if failures.is_empty() {
                 state.status = "ready".into();
-                state.capacity_status =
-                    CapacityStatus::Certified;
-                state.certified_concurrency =
-                    Some(certificate.certified_concurrency);
+                state.capacity_status = CapacityStatus::Certified;
+                state.certified_concurrency = Some(certificate.certified_concurrency);
 
                 break;
             }
 
-            state.status =
-                "revalidation_required".into();
+            state.status = "revalidation_required".into();
 
-            state.capacity_status =
-                CapacityStatus::RevalidationRequired;
+            state.capacity_status = CapacityStatus::RevalidationRequired;
         }
 
         if !relevant_certificate_seen {
-            state.status =
-                "revalidation_required".into();
+            state.status = "revalidation_required".into();
 
-            state.capacity_status =
-                CapacityStatus::RevalidationRequired;
+            state.capacity_status = CapacityStatus::RevalidationRequired;
         }
 
         states.push(state);
     }
 
+    states.sort_by(|left, right| {
+        left.selected_model
+            .cmp(&right.selected_model)
+            .then_with(|| {
+                let left_rank = if left.status == "ready" { 0 } else { 1 };
+                let right_rank = if right.status == "ready" { 0 } else { 1 };
+
+                left_rank
+                    .cmp(&right_rank)
+                    .then_with(|| left.artifact_path.cmp(&right.artifact_path))
+            })
+    });
+
+    states.dedup_by(|left, right| left.selected_model == right.selected_model);
+
     Ok(states)
 }
-
 
 impl From<&PerModelStateV1> for ModelState {
     fn from(state: &PerModelStateV1) -> Self {

@@ -15,24 +15,21 @@ const NODE_SYSTEM_PROMPT: &str =
 pub fn compile_certification_prompt(
     workload: &CertificationWorkload,
 ) -> Result<ProductionPrompt, String> {
-    if workload.expected_required_model != "Neural-Inference-3B" {
-        return Ok(ProductionPrompt {
-            system_text: NODE_SYSTEM_PROMPT.into(),
-            user_text: workload.prompt.clone(),
-            required_model: workload.expected_required_model.clone(),
-            adapter_lane: workload.adapter_lane.clone(),
-            policy_version: workload.production_policy_version.clone(),
-        });
+    if !workload
+        .expected_required_model
+        .starts_with("Neural-Inference-")
+    {
+        return Err(format!(
+            "unsupported_certification_capability:{}",
+            workload.expected_required_model
+        ));
     }
 
-    let adapted = build_level2_adapter_prompt(
-        &workload.adapter_lane,
-        &workload.prompt,
-    )?;
+    let adapted = build_level2_adapter_prompt(&workload.adapter_lane, &workload.prompt)?;
 
     Ok(ProductionPrompt {
         system_text: NODE_SYSTEM_PROMPT.into(),
-        user_text: format_level2_3b_prompt(&adapted),
+        user_text: format_level2_neural_prompt(&adapted),
         required_model: workload.expected_required_model.clone(),
         adapter_lane: workload.adapter_lane.clone(),
         policy_version: workload.production_policy_version.clone(),
@@ -60,10 +57,7 @@ fn common(original: &str) -> Vec<String> {
     .collect()
 }
 
-fn build_level2_adapter_prompt(
-    lane: &str,
-    original: &str,
-) -> Result<String, String> {
+fn build_level2_adapter_prompt(lane: &str, original: &str) -> Result<String, String> {
     let mut lines = common(original);
 
     let extra: &[&str] = match lane {
@@ -135,7 +129,7 @@ fn build_level2_adapter_prompt(
 
         other => {
             return Err(format!(
-                "unsupported_3b_certification_adapter_lane:{other}"
+                "unsupported_neural_certification_adapter_lane:{other}"
             ))
         }
     };
@@ -148,7 +142,7 @@ fn build_level2_adapter_prompt(
     ))
 }
 
-fn format_level2_3b_prompt(adapted: &str) -> String {
+fn format_level2_neural_prompt(adapted: &str) -> String {
     [
         "Answer the user directly and concisely.",
         "Treat the USER section as the authoritative source for this task.",
@@ -184,12 +178,12 @@ mod tests {
 
             assert_eq!(compiled.required_model, "Neural-Inference-3B");
             assert_eq!(compiled.system_text, NODE_SYSTEM_PROMPT);
-            assert!(compiled.user_text.contains(
-                "LEVEL2_CUSTOMER_TASK_ADAPTER_V1"
-            ));
-            assert!(compiled.user_text.contains(
-                "Treat the USER section as the authoritative source"
-            ));
+            assert!(compiled
+                .user_text
+                .contains("LEVEL2_CUSTOMER_TASK_ADAPTER_V1"));
+            assert!(compiled
+                .user_text
+                .contains("Treat the USER section as the authoritative source"));
             assert!(compiled.user_text.contains(&workload.prompt));
         }
     }

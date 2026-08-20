@@ -126,6 +126,34 @@ pub fn built_in_3b_realworld_v1() -> Result<CertificationPack, String> {
     Ok(pack)
 }
 
+pub const NEURAL_REALWORLD_PACK_ID_V1: &str = "edgeswarm-neural-realworld-v1";
+
+pub const LEGACY_NEURAL_REALWORLD_PACK_ID_V1: &str = "edgeswarm-3b-realworld-v2";
+
+pub fn built_in_neural_realworld_v1() -> Result<CertificationPack, String> {
+    let raw = include_str!("../certification_packs/neural-realworld-v1.json");
+    let pack: CertificationPack =
+        serde_json::from_str(raw).map_err(|e| format!("pack_parse_failed:{e}"))?;
+    pack.validate()?;
+    Ok(pack)
+}
+
+pub fn bind_neural_realworld_pack_v1(
+    pack: &mut CertificationPack,
+    capability: &str,
+) -> Result<(), String> {
+    if !capability.starts_with("Neural-Inference-") {
+        return Err(format!(
+            "unsupported_neural_certification_capability:{capability}"
+        ));
+    }
+
+    for workload in &mut pack.workloads {
+        workload.expected_required_model = capability.to_string();
+    }
+
+    pack.validate()
+}
 
 pub fn built_in_3b_realworld_v2() -> Result<CertificationPack, String> {
     let raw = include_str!("../certification_packs/3b-realworld-v2.json");

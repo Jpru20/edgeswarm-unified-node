@@ -5,7 +5,7 @@ use edgeswarm_unified_node_lib::{
         capacity_store::{load_certificate, save_certificate},
         certificate_match::sha256_file,
         certification_runner::CertificationRunner,
-        certification_workload::built_in_3b_realworld_v2,
+        certification_workload::{bind_neural_realworld_pack_v1, built_in_neural_realworld_v1},
         model_registry::OUTPUT_LIMIT_POLICY_VERSION,
         NodeState,
     },
@@ -20,8 +20,17 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const MODEL_ID: &str = "Qwen2.5-3B-Instruct-Q4_K_M";
-const MODEL_SHA256: &str = "9c9f56a391a3abbd5b89d0245bf6106081bcc3173119d4229235dd9d23253f94";
+fn approved_model_from_sha(model_sha: &str) -> Option<(&'static str, &'static str)> {
+    match model_sha {
+        "9c9f56a391a3abbd5b89d0245bf6106081bcc3173119d4229235dd9d23253f94" => {
+            Some(("Qwen2.5-3B-Instruct-Q4_K_M", "Neural-Inference-3B"))
+        }
+        "65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423" => {
+            Some(("Qwen2.5-7B-Instruct-Q4_K_M", "Neural-Inference-7B"))
+        }
+        _ => None,
+    }
+}
 
 fn runtime_version(path: &Path) -> Result<String, String> {
     let output = Command::new(path)
@@ -67,23 +76,27 @@ fn run() -> Result<(), String> {
 
     let model_sha = sha256_file(model_path)?;
 
-    if model_sha != MODEL_SHA256 {
-        return Err(format!(
-            "model_sha_mismatch:expected={MODEL_SHA256}:actual={model_sha}"
-        ));
-    }
+    let (model_id, model_capability) = approved_model_from_sha(&model_sha)
+        .ok_or_else(|| format!("model_not_approved_for_real_certification:{model_sha}"))?;
 
     let runtime_version = runtime_version(runtime_path)?;
 
     let state = NodeState::detect();
-    let pack = built_in_3b_realworld_v2()?;
+    let mut pack = built_in_neural_realworld_v1()?;
+    bind_neural_realworld_pack_v1(&mut pack, model_capability)?;
 
     let mut policy = CapacityPolicy::default();
     policy.maximum_concurrency = 2;
 
     let runner = CertificationRunner::new(policy);
 
-    let runtime_config = LlamaProcessConfig::for_model(model_path_string)?;
+    let mut runtime_config = LlamaProcessConfig::for_model(model_path_string)?;
+    runtime_config.executable = runtime_path.to_path_buf();
+
+    println!("MODEL_ID={model_id}");
+    println!("MODEL_CAPABILITY={model_capability}");
+    println!("GPU_LAYERS={}", runtime_config.gpu_layers);
+
     let managed_runtime = ManagedLlamaProcess::start(&runtime_config)?;
     let runtime_base_url = managed_runtime.base_url().to_string();
 
@@ -149,9 +162,9 @@ fn run() -> Result<(), String> {
         certificate_version: "edgeswarm-capacity-certificate-v1".into(),
         certification_pack_id: report.certification_pack_id.clone(),
         installation_id: state.identity.installation_id.clone(),
-        model_id: MODEL_ID.into(),
+        model_id: model_id.into(),
         model_sha256: model_sha,
-        model_capability: "Neural-Inference-3B".into(),
+        model_capability: model_capability.into(),
         quantization: "Q4_K_M".into(),
         runtime: "llama.cpp".into(),
         runtime_version,

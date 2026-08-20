@@ -34,7 +34,16 @@ impl LlamaProcessConfig {
             port: LLAMA_DEFAULT_PORT,
             context_tokens: 4096,
             threads: 8,
-            gpu_layers: 0,
+            gpu_layers: std::env::var("EDGESWARM_LLAMA_GPU_LAYERS")
+                .ok()
+                .and_then(|value| value.parse::<i32>().ok())
+                .unwrap_or_else(|| {
+                    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+                        999
+                    } else {
+                        0
+                    }
+                }),
             startup_timeout: Duration::from_secs(180),
         })
     }
