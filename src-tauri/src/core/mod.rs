@@ -74,15 +74,13 @@ impl NodeState {
         let acceleration = adapters::detect_acceleration();
 
         let (models, capacity) = match (
-            std::env::var("EDGESWARM_MODEL_ROOT").ok(),
-            std::env::var("EDGESWARM_RUNTIME_PATH").ok(),
+            crate::runtime::llama_process::resolve_model_root_v1(),
+            crate::runtime::llama_process::resolve_llama_server_path_v1(),
         ) {
-            (Some(model_root), Some(runtime_path))
-                if !model_root.trim().is_empty() && !runtime_path.trim().is_empty() =>
-            {
+            (Ok(model_root), Ok(runtime_path)) => {
                 match per_model_state::resolve_per_model_states(
-                    std::path::Path::new(&model_root),
-                    std::path::Path::new(&runtime_path),
+                    &model_root,
+                    &runtime_path,
                     &identity.installation_id,
                     &acceleration.backend,
                 ) {

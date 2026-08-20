@@ -13,7 +13,9 @@ use edgeswarm_unified_node_lib::core::{
     wallet_public_identity::WalletPublicIdentity,
     wallet_vault, NodeState,
 };
-use edgeswarm_unified_node_lib::runtime::llama_process::{LlamaProcessConfig, ManagedLlamaProcess};
+use edgeswarm_unified_node_lib::runtime::llama_process::{
+    resolve_model_root_v1, LlamaProcessConfig, ManagedLlamaProcess,
+};
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -32,10 +34,9 @@ fn first_task(mut r: GetJobsResponse) -> Option<TaskEnvelope> {
 }
 
 fn resolve_active_model_path_v1(selected_model: &str) -> Result<String, String> {
-    let root = env::var("EDGESWARM_MODEL_ROOT")
-        .map_err(|_| "EDGESWARM_MODEL_ROOT_required".to_string())?;
+    let root = resolve_model_root_v1()?;
 
-    let mut matches = discover_models(std::path::Path::new(&root))
+    let mut matches = discover_models(&root)
         .into_iter()
         .filter(|model| model.selected_model == selected_model)
         .collect::<Vec<_>>();

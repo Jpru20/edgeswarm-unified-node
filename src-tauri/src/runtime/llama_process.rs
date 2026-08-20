@@ -169,6 +169,70 @@ impl Drop for ManagedLlamaProcess {
     }
 }
 
+pub fn resolve_model_root_v1() -> Result<PathBuf, String> {
+    if let Some(path) = env::var_os("EDGESWARM_MODEL_ROOT") {
+        let path = PathBuf::from(path);
+
+        if path.is_dir() {
+            return Ok(path);
+        }
+
+        return Err("configured_model_root_not_directory".into());
+    }
+
+    let app_data = adapters::app_data_dir();
+    let mut candidates = Vec::new();
+
+    if let Some(parent) = app_data.parent() {
+        candidates.push(parent.join("models"));
+    }
+
+    candidates.push(app_data.join("models"));
+
+    candidates
+        .into_iter()
+        .find(|path| path.is_dir())
+        .ok_or_else(|| "model_root_not_installed".into())
+}
+
+fn find_runtime_executable_v1(
+    root: &std::path::Path,
+    filename: &str,
+    depth: u8,
+) -> Option<PathBuf> {
+    if depth == 0 {
+        return None;
+    }
+
+    let mut entries = std::fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+
+    entries.sort();
+
+    for path in &entries {
+        if path.is_file()
+            && path.file_name().and_then(|value| value.to_str()) == Some(filename)
+        {
+            return Some(path.clone());
+        }
+    }
+
+    for path in entries {
+        if path.is_dir() {
+            if let Some(found) =
+                find_runtime_executable_v1(&path, filename, depth - 1)
+            {
+                return Some(found);
+            }
+        }
+    }
+
+    None
+}
+
 pub fn resolve_llama_server_path_v1() -> Result<PathBuf, String> {
     if let Some(path) = env::var_os("EDGESWARM_LLAMA_SERVER_PATH") {
         let path = PathBuf::from(path);
@@ -181,17 +245,18 @@ pub fn resolve_llama_server_path_v1() -> Result<PathBuf, String> {
     }
 
     let filename = runtime_executable_filename_v1();
+    let runtime_root = adapters::app_data_dir().join("runtime");
+
     let candidates = [
-        adapters::app_data_dir()
-            .join("runtime")
-            .join("current")
-            .join(filename),
-        adapters::app_data_dir().join("runtime").join(filename),
+        runtime_root.join("current").join(filename),
+        runtime_root.join(filename),
     ];
 
-    candidates
-        .into_iter()
-        .find(|path| path.is_file())
+    if let Some(path) = candidates.into_iter().find(|path| path.is_file()) {
+        return Ok(path);
+    }
+
+    find_runtime_executable_v1(&runtime_root, filename, 4)
         .ok_or_else(|| "llama_server_not_installed".into())
 }
 
