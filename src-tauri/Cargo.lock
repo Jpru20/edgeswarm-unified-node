@@ -1018,7 +1018,7 @@ dependencies = [
 
 [[package]]
 name = "edgeswarm-unified-node"
-version = "0.1.0"
+version = "1.5.15"
 dependencies = [
  "base64 0.22.1",
  "k256",

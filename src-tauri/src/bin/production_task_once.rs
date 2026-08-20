@@ -145,7 +145,7 @@ fn run() -> Result<(), String> {
 
     let base_heartbeat =
         ProductionHeartbeatV1::from_node_state(
-            &state, "0.1.0", "laptop", &[],
+            &state, env!("CARGO_PKG_VERSION"), "laptop", &[],
         );
 
     if base_heartbeat.concurrency_limit != 1
@@ -209,7 +209,7 @@ fn run() -> Result<(), String> {
 
     let mut active =
         ProductionHeartbeatV1::from_node_state(
-            &state, "0.1.0", "laptop", &[],
+            &state, env!("CARGO_PKG_VERSION"), "laptop", &[],
         );
 
     active.current_task_ids = vec![task_id.clone()];
@@ -385,7 +385,7 @@ fn run() -> Result<(), String> {
 
     let clear =
         ProductionHeartbeatV1::from_node_state(
-            &state, "0.1.0", "laptop", &[],
+            &state, env!("CARGO_PKG_VERSION"), "laptop", &[],
         );
 
     match send_heartbeat(

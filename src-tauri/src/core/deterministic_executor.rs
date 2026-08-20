@@ -518,7 +518,7 @@ fn scrape(prompt: &str) -> String {
 
     let result = Client::builder()
         .timeout(Duration::from_secs(15))
-        .user_agent("Mozilla/5.0 EdgeSwarmNode/0.1.0")
+        .user_agent(concat!("Mozilla/5.0 EdgeSwarmNode/", env!("CARGO_PKG_VERSION")))
         .build()
         .and_then(|c| c.get(url).send());
 

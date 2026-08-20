@@ -1,4 +1,4 @@
-﻿import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
@@ -294,7 +294,7 @@ function App() {
         Logged in as: {providerEmail}
       </div>
 
-      <div className="version">Unified Node v0.1.0</div>
+      <div className="version">Unified Node v1.5.15</div>
 
       <section className="model-panel">
         <div className="panel-heading">Device Capability Profile</div>

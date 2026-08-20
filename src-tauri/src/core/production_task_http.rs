@@ -146,7 +146,7 @@ pub fn poll_once(
         hardware_id,
         &auth.provider_email,
         capabilities,
-        "0.1.0",
+        env!("CARGO_PKG_VERSION"),
         adapters::platform_name(),
     )?;
 

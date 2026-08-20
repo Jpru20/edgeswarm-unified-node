@@ -1,6 +1,7 @@
 [package]
+default-run = "edgeswarm-unified-node"
 name = "edgeswarm-unified-node"
-version = "0.1.0"
+version = "1.5.15"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"

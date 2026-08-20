@@ -230,7 +230,7 @@ pub fn run_node_service(
     // actually validated/certified, then exits before wallet unlock,
     // runtime startup, or /get-jobs.
     if heartbeat_only {
-        let heartbeat = ProductionHeartbeatV1::from_node_state(&state, "0.1.0", "laptop", &[]);
+        let heartbeat = ProductionHeartbeatV1::from_node_state(&state, env!("CARGO_PKG_VERSION"), "laptop", &[]);
 
         let capability_mode = if heartbeat.eligible_model_capabilities.is_empty() {
             "deterministic_only"
@@ -298,7 +298,7 @@ pub fn run_node_service(
 
     println!("WALLET_UNLOCKED=true");
 
-    let base_heartbeat = ProductionHeartbeatV1::from_node_state(&state, "0.1.0", "laptop", &[]);
+    let base_heartbeat = ProductionHeartbeatV1::from_node_state(&state, env!("CARGO_PKG_VERSION"), "laptop", &[]);
 
     if base_heartbeat.concurrency_limit != 1 {
         return Err("runner_capacity_gate_failed".into());
@@ -410,6 +410,8 @@ pub fn run_node_service(
         if poll.blocked {
             println!("TASK_CLAIMED=false");
             println!("POLL_BLOCKED=true");
+            println!("POLL_BLOCK_REASON={}", poll.block_reason.as_deref().unwrap_or("unspecified"));
+            println!("POLL_BLOCK_MESSAGE={}", poll.message.as_deref().unwrap_or(""));
             return Ok(());
         }
 
@@ -440,7 +442,7 @@ pub fn run_node_service(
         println!("TASK_CLAIMED=true");
         println!("TASK_ID={task_id}");
 
-        let mut active = ProductionHeartbeatV1::from_node_state(&state, "0.1.0", "laptop", &[]);
+        let mut active = ProductionHeartbeatV1::from_node_state(&state, env!("CARGO_PKG_VERSION"), "laptop", &[]);
 
         active.current_task_ids = vec![task_id.clone()];
 
@@ -529,7 +531,7 @@ pub fn run_node_service(
             println!("CORRECTION_REQUESTED=false");
         }
 
-        let clear = ProductionHeartbeatV1::from_node_state(&state, "0.1.0", "laptop", &[]);
+        let clear = ProductionHeartbeatV1::from_node_state(&state, env!("CARGO_PKG_VERSION"), "laptop", &[]);
 
         match send_heartbeat(&http, &auth_client, &mut auth, &clear) {
             Ok(status) => {
