@@ -17,6 +17,7 @@ type NodeServiceStatus = {
   running: boolean;
   stopping: boolean;
   lastError?: string | null;
+  logs: string[];
 };
 
 type ModelState = {
@@ -60,6 +61,7 @@ function App() {
       running: false,
       stopping: false,
       lastError: null,
+      logs: [],
     });
   const [nodeActionBusy, setNodeActionBusy] = useState(false);
 
@@ -364,6 +366,11 @@ function App() {
               : "stopped"}
         </div>
 
+        {serviceStatus.logs.map((line, index) => (
+          <div key={`${index}-${line}`}>
+            &gt; {line}
+          </div>
+        ))}
         {serviceStatus.lastError && (
           <div>
             &gt; Node service error: {serviceStatus.lastError}

@@ -6,7 +6,7 @@ use crate::core::{
     auth_login_client::SupabaseLoginClient,
     auth_login_contract::{jwt_aal, verified_totp_factor},
     auth_session::AuthSession,
-    node_service::run_node_service,
+    node_service::{clear_node_service_logs, node_service_logs, run_node_service},
     NodeState,
 };
 use serde::Serialize;
@@ -59,6 +59,7 @@ struct NodeServiceStatus {
     running: bool,
     stopping: bool,
     last_error: Option<String>,
+    logs: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -250,10 +251,13 @@ fn current_node_service_status(
         .map_err(|_| "node_service_error_lock_failed".to_string())?
         .clone();
 
+    let logs = node_service_logs();
+
     Ok(NodeServiceStatus {
         running,
         stopping,
         last_error,
+        logs,
     })
 }
 
@@ -310,6 +314,7 @@ fn start_node(
         Zeroizing::new(password.as_str().to_owned())
     };
 
+    clear_node_service_logs();
     runtime.stop.store(false, Ordering::Release);
 
     {

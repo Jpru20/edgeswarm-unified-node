@@ -24,11 +24,51 @@ use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
+        Mutex,
+        OnceLock,
     },
     thread,
     time::{Duration, Instant},
 };
 use zeroize::{Zeroize, Zeroizing};
+
+static NODE_SERVICE_LOGS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+
+fn node_service_log_buffer() -> &'static Mutex<Vec<String>> {
+    NODE_SERVICE_LOGS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn push_node_service_log(line: String) {
+    if let Ok(mut logs) = node_service_log_buffer().lock() {
+        logs.push(line);
+
+        if logs.len() > 200 {
+            let excess = logs.len() - 200;
+            logs.drain(0..excess);
+        }
+    }
+}
+
+pub fn clear_node_service_logs() {
+    if let Ok(mut logs) = node_service_log_buffer().lock() {
+        logs.clear();
+    }
+}
+
+pub fn node_service_logs() -> Vec<String> {
+    node_service_log_buffer()
+        .lock()
+        .map(|logs| logs.clone())
+        .unwrap_or_default()
+}
+
+macro_rules! println {
+    ($($arg:tt)*) => {{
+        let line = format!($($arg)*);
+        std::println!("{}", line);
+        push_node_service_log(line);
+    }};
+}
 
 fn first_task(mut r: GetJobsResponse) -> Option<TaskEnvelope> {
     if !r.tasks.is_empty() {
