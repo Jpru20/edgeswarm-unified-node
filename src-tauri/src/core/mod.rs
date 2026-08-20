@@ -3,7 +3,6 @@ pub mod auth_login_client;
 pub mod auth_login_contract;
 pub mod auth_session;
 pub mod backend_client;
-pub mod capability_discovery;
 pub mod capacity;
 pub mod capacity_policy;
 pub mod capacity_store;
@@ -133,10 +132,7 @@ impl NodeState {
                 }
             }
 
-            _ => capability_discovery::detect_installed_capability(
-                &identity.installation_id,
-                &acceleration.backend,
-            ),
+            _ => (Vec::new(), CapacityState::default()),
         };
 
         Self {
