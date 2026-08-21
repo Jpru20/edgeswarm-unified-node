@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
@@ -11,6 +11,11 @@ type AuthBeginResult = {
 
 type AuthVerifyResult = {
   email: string;
+};
+
+type ProviderLedgerSummary = {
+  totalEarnedUsd: number;
+  syncedAt?: string | null;
 };
 
 type NodeServiceStatus = {
@@ -30,6 +35,7 @@ type ModelState = {
   status: string;
   capacityStatus: string;
   certifiedConcurrency?: number | null;
+  downloadProgressPct?: number | null;
 };
 
 type NodeState = {
@@ -73,12 +79,46 @@ function App() {
       logs: [],
     });
   const [nodeActionBusy, setNodeActionBusy] = useState(false);
+
+  // PROVIDER_LEDGER_UI_V1
+  const [totalEarnedUsd, setTotalEarnedUsd] = useState(0);
+  const [ledgerBusy, setLedgerBusy] = useState(false);
+  const ledgerSyncInFlightRef = useRef(false);
+  const lastLedgerTriggerRef = useRef("");
   const consoleRef = useRef<HTMLElement | null>(null);
 
   async function loadNodeState() {
     const state = await invoke<NodeState>("get_node_state");
     setNodeState(state);
   }
+
+  const syncLedger = useCallback(async () => {
+    if (ledgerSyncInFlightRef.current) {
+      return;
+    }
+
+    ledgerSyncInFlightRef.current = true;
+    setLedgerBusy(true);
+
+    try {
+      const ledger =
+        await invoke<ProviderLedgerSummary>(
+          "provider_ledger_sync",
+        );
+
+      if (
+        Number.isFinite(ledger.totalEarnedUsd) &&
+        ledger.totalEarnedUsd >= 0
+      ) {
+        setTotalEarnedUsd(ledger.totalEarnedUsd);
+      }
+    } catch {
+      // Keep the last verified balance if a refresh temporarily fails.
+    } finally {
+      ledgerSyncInFlightRef.current = false;
+      setLedgerBusy(false);
+    }
+  }, []);
 
   async function toggleNode() {
     setNodeActionBusy(true);
@@ -138,6 +178,52 @@ function App() {
       window.clearInterval(timer);
     };
   }, [screen]);
+
+  useEffect(() => {
+    if (screen !== "dashboard") {
+      return;
+    }
+
+    void syncLedger();
+
+    const timer = window.setInterval(
+      () => void syncLedger(),
+      30000,
+    );
+
+    return () => window.clearInterval(timer);
+  }, [screen, syncLedger]);
+
+  useEffect(() => {
+    if (screen !== "dashboard") {
+      return;
+    }
+
+    const resultLine = [...serviceStatus.logs]
+      .reverse()
+      .find((line) => {
+        const value = line.toLowerCase();
+
+        return (
+          value.includes("result") &&
+          (
+            value.includes("submit") ||
+            value.includes("accepted") ||
+            value.includes("completed")
+          )
+        );
+      });
+
+    if (
+      !resultLine ||
+      resultLine === lastLedgerTriggerRef.current
+    ) {
+      return;
+    }
+
+    lastLedgerTriggerRef.current = resultLine;
+    void syncLedger();
+  }, [screen, serviceStatus.logs, syncLedger]);
 
   useEffect(() => {
     if (consoleRef.current) {
@@ -212,8 +298,11 @@ function App() {
 
           <form onSubmit={handleLogin}>
             <input
-              type="email"
+              type="text"
+              inputMode="email"
               autoComplete="email"
+              autoCapitalize="none"
+              spellCheck={false}
               placeholder="Provider Email"
               value={email}
               onChange={(event) => setEmail(event.currentTarget.value)}
@@ -311,13 +400,16 @@ function App() {
       ? `${visibleModel.status} - ${visibleModel.capability}`
       : "Configuring device capabilities...";
 
+  const earningsText =
+    totalEarnedUsd === 0
+      ? "$0.00 USD"
+      : `$${totalEarnedUsd.toFixed(8)} USD`;
+
   return (
     <main className="app dashboard">
       <h1>Edge Swarm Provider Node</h1>
 
-      <div className="attestation">
-        🔒 Hardware Attestation: Valid [{hardwareShort}]
-      </div>
+      <div className="attestation">Hardware Attestation: Valid [{hardwareShort}]</div>
 
       <div className="account">
         Logged in as: {providerEmail}
@@ -336,18 +428,18 @@ function App() {
           {capabilityText}
         </div>
 
-        <div className="progress-track">
-          <div className={readyModel ? "progress-fill complete" : "progress-fill"} />
-        </div>
-
-        <div className="progress-label">
-          {readyModel
-            ? "Managed model ready"
-            : "Configuring"}
-        </div>
+        {/* MODEL_DOWNLOAD_PROGRESS_UI_V1 */}
+        {visibleModel && (visibleModel.status ?? "").toLowerCase().includes("download") && (
+          <>
+            <div className="progress-track">
+              <div className="progress-fill download-indeterminate" />
+            </div>
+            <div className="progress-label">Downloading model...</div>
+          </>
+        )}
       </section>
 
-      <div className="earnings">$0.00 USD</div>
+      <div className="earnings">{earningsText}</div>
       <div className="earnings-label">Total Earnings</div>
 
       <button
@@ -385,7 +477,12 @@ function App() {
         )}
       </section>
 
-      <button className="ledger-button" type="button" disabled>
+      <button
+        className="ledger-button"
+        type="button"
+        onClick={() => void syncLedger()}
+        disabled={ledgerBusy}
+      >
         SYNC LEDGER DATA
       </button>
     </main>

@@ -274,9 +274,12 @@ button:disabled { cursor: default; }
 }
 
 .ledger-button {
-  height: 28px;
-  padding: 9px 16px;
-  background: #1e2329;
+  width: 260px;
+  min-width: 250px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
 }
 
 @media (max-width: 640px) {
@@ -288,4 +291,86 @@ button:disabled { cursor: default; }
   .auth-card {
     width: calc(100% - 40px);
   }
+}
+
+
+/* COMPACT_PROVIDER_DASHBOARD_V3 */
+.auth-card form > input,
+.auth-card .password-row {
+  width: 360px;
+  max-width: calc(100vw - 120px);
+  margin-left: auto;
+  margin-right: auto;
+}
+.auth-card .password-row input { width: auto; flex: 1; }
+.dashboard { padding-bottom: 10px; }
+.dashboard h1 { margin-top: 12px; margin-bottom: 5px; }
+.model-panel { margin-top: 8px; margin-bottom: 7px; padding-top: 9px; padding-bottom: 9px; }
+.earnings { margin-top: 7px; }
+.earnings-label { margin-bottom: 7px; }
+.start-button { margin-top: 5px; margin-bottom: 7px; }
+.console { height: 185px; min-height: 185px; margin-top: 5px; margin-bottom: 7px; }
+.ledger-button {
+  width: 260px;
+  min-width: 250px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+.ledger-button:not(:disabled) { cursor: pointer; transition: transform 90ms ease, filter 90ms ease; }
+.ledger-button:not(:disabled):hover { filter: brightness(1.06); }
+.ledger-button:not(:disabled):active { transform: translateY(2px) scale(0.985); filter: brightness(0.9); }
+.progress-fill.download-indeterminate { width: 35%; animation: model-download-progress 1.2s ease-in-out infinite alternate; }
+@keyframes model-download-progress { from { transform: translateX(0); } to { transform: translateX(185%); } }
+
+/* FINAL_UI_POLISH_V1 */
+.auth-card .primary-button {
+  display: block;
+  width: 260px;
+  margin: 18px auto 0;
+}
+
+.ledger-button {
+  width: 260px;
+  min-width: 250px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.ledger-button:not(:disabled):hover {
+  background: #185149;
+  border-color: #22f0cf;
+}
+
+.ledger-button:not(:disabled):active {
+  transform: translateY(2px) scale(0.985);
+  filter: brightness(0.9);
+}
+
+/* LEDGER_BUTTON_FINAL_POSITION_V1 */
+.ledger-button {
+  width: 312px !important;
+  min-width: 312px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  align-self: center !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+  padding: 9px 18px !important;
+  background: #123b38 !important;
+  border: 1px solid #00e6c3 !important;
+  border-radius: 7px !important;
+  color: #ffffff !important;
+  font-weight: 600 !important;
+  text-align: center !important;
+}
+
+.ledger-button:disabled {
+  background: #123b38 !important;
+  border-color: #00e6c3 !important;
+  color: #ffffff !important;
 }

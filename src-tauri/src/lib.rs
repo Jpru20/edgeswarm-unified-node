@@ -3,21 +3,24 @@ pub mod core;
 pub mod runtime;
 
 use crate::core::{
+    auth_client::SupabaseAuthClient,
     auth_login_client::SupabaseLoginClient,
     auth_login_contract::{jwt_aal, verified_totp_factor},
     auth_session::AuthSession,
     node_service::{clear_node_service_logs, node_service_logs, run_node_service},
     NodeState,
 };
-use serde::Serialize;
+use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize};
 use std::{
+    env,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
         Mutex,
     },
     thread::{self, JoinHandle},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use zeroize::Zeroizing;
 
@@ -75,13 +78,100 @@ struct AuthVerifyResult {
     email: String,
 }
 
+// PROVIDER_LEDGER_SYNC_COMMAND_V1
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderLedgerApiResponse {
+    total_earned_usd: f64,
+    synced_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderLedgerSummary {
+    total_earned_usd: f64,
+    synced_at: Option<String>,
+}
+
+fn provider_api_base_v1() -> String {
+    env::var("GCP_BASE_URL")
+        .unwrap_or_else(|_| "https://api.edgeswarm.io".into())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn fetch_provider_ledger_v1(
+    access_token: &str,
+) -> Result<ProviderLedgerApiResponse, String> {
+    let response = Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(8))
+        .build()
+        .map_err(|_| "provider_ledger_http_client_failed".to_string())?
+        .get(format!(
+            "{}/v1/provider/ledger/me",
+            provider_api_base_v1()
+        ))
+        .bearer_auth(access_token)
+        .send()
+        .map_err(|_| "provider_ledger_network_failed".to_string())?;
+
+    let status = response.status().as_u16();
+
+    if !(200..300).contains(&status) {
+        return Err(format!("provider_ledger_http_{status}"));
+    }
+
+    response
+        .json::<ProviderLedgerApiResponse>()
+        .map_err(|_| "provider_ledger_response_invalid".to_string())
+}
+
+#[tauri::command]
+fn provider_ledger_sync() -> Result<ProviderLedgerSummary, String> {
+    let auth_client = SupabaseAuthClient::from_env()?;
+    let ensured = auth_client.ensure_valid_session(true)?;
+
+    let access_token = ensured
+        .session
+        .access_token()
+        .ok_or_else(|| "provider_ledger_access_token_missing".to_string())?;
+
+    let response = match fetch_provider_ledger_v1(access_token) {
+        Err(error) if error == "provider_ledger_http_401" => {
+            let refreshed = auth_client.force_refresh_session()?;
+            let token = refreshed
+                .session
+                .access_token()
+                .ok_or_else(|| {
+                    "provider_ledger_refreshed_token_missing".to_string()
+                })?;
+
+            fetch_provider_ledger_v1(token)?
+        }
+        Err(error) => return Err(error),
+        Ok(response) => response,
+    };
+
+    if !response.total_earned_usd.is_finite()
+        || response.total_earned_usd < 0.0
+    {
+        return Err("provider_ledger_usd_invalid".into());
+    }
+
+    Ok(ProviderLedgerSummary {
+        total_earned_usd: response.total_earned_usd,
+        synced_at: response.synced_at,
+    })
+}
+
 #[tauri::command]
 fn set_window_layout(
     window: tauri::Window,
     screen: String,
 ) -> Result<(), String> {
     let (width, height) = if screen == "dashboard" {
-        (600.0, 640.0)
+        (560.0, 560.0)
     } else {
         (600.0, 360.0)
     };
@@ -398,6 +488,7 @@ pub fn run() {
             set_window_layout,
             auth_begin,
             auth_verify,
+            provider_ledger_sync,
             node_service_status,
             start_node,
             stop_node
