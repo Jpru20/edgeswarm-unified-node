@@ -39,3 +39,167 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 
 rpassword = "7"
 zeroize = "1"
+
+# EDGESWARM_DEV_BIN_GATING_V1
+[features]
+dev-tools = []
+
+[[bin]]
+name = "auth_client_probe"
+path = "src/bin/auth_client_probe.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "auth_interactive_login"
+path = "src/bin/auth_interactive_login.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "auth_login_transport_probe"
+path = "src/bin/auth_login_transport_probe.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "auth_refresh_probe"
+path = "src/bin/auth_refresh_probe.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "auth_session_probe"
+path = "src/bin/auth_session_probe.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "auth_wallet_bootstrap"
+path = "src/bin/auth_wallet_bootstrap.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "backend_client_probe"
+path = "src/bin/backend_client_probe.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "baseline_qualification_probe"
+path = "src/bin/baseline_qualification_probe.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "capacity_level_probe"
+path = "src/bin/capacity_level_probe.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "certificate_match_probe"
+path = "src/bin/certificate_match_probe.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "certification_pack_probe"
+path = "src/bin/certification_pack_probe.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "hardware_identity_probe"
+path = "src/bin/hardware_identity_probe.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "heartbeat_probe"
+path = "src/bin/heartbeat_probe.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "local_runtime_smoke"
+path = "src/bin/local_runtime_smoke.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "model_discovery_probe"
+path = "src/bin/model_discovery_probe.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "model_fingerprint_probe"
+path = "src/bin/model_fingerprint_probe.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "node_hardware_identity_probe"
+path = "src/bin/node_hardware_identity_probe.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "node_probe"
+path = "src/bin/node_probe.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "output_retry_probe"
+path = "src/bin/output_retry_probe.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "per_model_state_probe"
+path = "src/bin/per_model_state_probe.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "persist_capacity_certificate"
+path = "src/bin/persist_capacity_certificate.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "persist_public_wallet"
+path = "src/bin/persist_public_wallet.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "production_heartbeat_client_probe"
+path = "src/bin/production_heartbeat_client_probe.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "production_heartbeat_probe"
+path = "src/bin/production_heartbeat_probe.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "production_heartbeat_send_probe"
+path = "src/bin/production_heartbeat_send_probe.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "production_node_loop"
+path = "src/bin/production_node_loop.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "production_prompt_probe"
+path = "src/bin/production_prompt_probe.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "production_task_once"
+path = "src/bin/production_task_once.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "real_capacity_certificate"
+path = "src/bin/real_capacity_certificate.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "single_certification_probe"
+path = "src/bin/single_certification_probe.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "task_client_dry_run"
+path = "src/bin/task_client_dry_run.rs"
+required-features = ["dev-tools"]
+
+[[bin]]
+name = "wallet_heartbeat_probe"
+path = "src/bin/wallet_heartbeat_probe.rs"
+required-features = ["dev-tools"]

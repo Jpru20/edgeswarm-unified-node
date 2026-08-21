@@ -55,7 +55,16 @@ fn certification_policy(capability: &str) -> Option<CertificationPolicyV1> {
 }
 
 fn runtime_version(path: &Path) -> Result<String, String> {
-    let output = Command::new(path)
+    let mut command = Command::new(path);
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let output = command
         .arg("--version")
         .output()
         .map_err(|e| format!("runtime_version_failed:{e}"))?;

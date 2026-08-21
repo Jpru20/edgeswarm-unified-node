@@ -14,15 +14,9 @@ pub struct WorkerWalletClient {
 
 impl WorkerWalletClient {
     pub fn from_env() -> Result<Self, String> {
-        let supabase_url = env::var("SUPABASE_URL")
-            .or_else(|_| env::var("EDGESWARM_SUPABASE_URL"))
-            .map_err(|_| "supabase_url_missing".to_string())?
-            .trim_end_matches('/')
-            .to_string();
+        let supabase_url = crate::core::production_config::supabase_url_v1()?;
 
-        let anon_key = env::var("SUPABASE_ANON_KEY")
-            .or_else(|_| env::var("EDGESWARM_SUPABASE_ANON_KEY"))
-            .map_err(|_| "supabase_anon_key_missing".to_string())?;
+        let anon_key = crate::core::production_config::supabase_anon_key_v1()?;
 
         Ok(Self {
             supabase_url,

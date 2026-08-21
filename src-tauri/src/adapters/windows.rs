@@ -1,8 +1,17 @@
+fn hidden_windows_command(program: &str) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let mut command = std::process::Command::new(program);
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
 use crate::core::hardware::AccelerationInfo;
 use sha2::{Digest, Sha256};
 
 pub fn detect() -> AccelerationInfo {
-    if let Ok(output) = std::process::Command::new("nvidia-smi")
+    if let Ok(output) = hidden_windows_command("nvidia-smi")
         .args([
             "--query-gpu=name,memory.total",
             "--format=csv,noheader,nounits",
@@ -63,7 +72,7 @@ pub fn app_data_dir() -> std::path::PathBuf {
 pub fn hardware_identity_override() -> Option<(String, String)> {
     let script = r#"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;$u=(Get-CimInstance Win32_ComputerSystemProduct -ErrorAction Stop).UUID.Trim();$p=(Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1).ProcessorId.Trim();if($u -and $p){Write-Output ($u+'_'+$p)}"#;
 
-    let output = std::process::Command::new("powershell.exe")
+    let output = hidden_windows_command("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .output()
         .ok()?;
@@ -88,7 +97,7 @@ pub fn hardware_identity_override() -> Option<(String, String)> {
 }
 
 pub fn hardware_identity_material() -> Option<(String, String)> {
-    let output = std::process::Command::new("reg")
+    let output = hidden_windows_command("reg")
         .args([
             "query",
             r"HKLM\SOFTWARE\Microsoft\Cryptography",

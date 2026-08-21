@@ -25,6 +25,7 @@ pub mod platform;
 pub mod production_heartbeat;
 pub mod production_heartbeat_client;
 pub mod production_inference;
+pub mod production_config;
 pub mod production_prompt;
 pub mod production_task_http;
 pub mod result_signing;
