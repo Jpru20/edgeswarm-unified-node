@@ -12,7 +12,17 @@ fn main() -> Result<(), String> {
 
     println!("LLAMA_EXECUTABLE={}", config.executable.display());
     println!("MODEL_PATH={}", config.model_path.display());
-    println!("RUNTIME_ACCELERATION=cpu");
+
+    let runtime_acceleration =
+        if cfg!(all(target_os = "macos", target_arch = "aarch64"))
+            && config.gpu_layers > 0
+        {
+            "metal"
+        } else {
+            "cpu"
+        };
+
+    println!("RUNTIME_ACCELERATION={runtime_acceleration}");
 
     let mut runtime = ManagedLlamaProcess::start(&config)?;
 

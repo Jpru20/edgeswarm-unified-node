@@ -1,12 +1,45 @@
 use crate::core::hardware::AccelerationInfo;
+use std::process::Command;
 
 pub fn detect() -> AccelerationInfo {
+    if let Ok(output) = Command::new("system_profiler").arg("SPDisplaysDataType").output() {
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout);
+
+            let device_name = text.lines().find_map(|line| {
+                line.trim()
+                    .strip_prefix("Chipset Model:")
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            });
+
+            let metal_available = text.lines().any(|line| {
+                line.trim()
+                    .strip_prefix("Metal Support:")
+                    .map(str::trim)
+                    .map(|value| !value.is_empty() && !value.eq_ignore_ascii_case("unsupported"))
+                    .unwrap_or(false)
+            });
+
+            if metal_available {
+                return AccelerationInfo {
+                    backend: "metal".into(),
+                    device_name,
+                    vram_bytes: None,
+                    available: true,
+                    detection_status: "detected".into(),
+                };
+            }
+        }
+    }
+
     AccelerationInfo {
-        backend: "unprobed".into(),
+        backend: "cpu".into(),
         device_name: None,
         vram_bytes: None,
         available: false,
-        detection_status: "macos_adapter_pending".into(),
+        detection_status: "cpu_fallback".into(),
     }
 }
 

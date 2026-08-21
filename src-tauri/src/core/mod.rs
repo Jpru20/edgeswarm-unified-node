@@ -152,3 +152,4 @@ impl NodeState {
 
 pub mod deterministic_executor;
 pub mod execution_model;
+pub mod power_guard;

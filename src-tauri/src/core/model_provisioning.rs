@@ -31,7 +31,16 @@ pub fn model_root_v1() -> PathBuf {
     env::var_os("EDGESWARM_MODEL_ROOT")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| adapters::app_data_dir().join("models"))
+        .unwrap_or_else(|| {
+            let app_data = adapters::app_data_dir();
+
+            #[cfg(target_os = "macos")]
+            if let Some(parent) = app_data.parent() {
+                return parent.join("models");
+            }
+
+            app_data.join("models")
+        })
 }
 
 fn artifact_from_value(value: &Value) -> Result<ModelArtifactV1, String> {

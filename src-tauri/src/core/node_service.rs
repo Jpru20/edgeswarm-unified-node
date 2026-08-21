@@ -101,7 +101,7 @@ fn execution_acceleration_v1() -> String {
         let layers = env::var("EDGESWARM_LLAMA_GPU_LAYERS")
             .ok()
             .and_then(|value| value.parse::<i32>().ok())
-            .unwrap_or(0);
+            .unwrap_or(999);
 
         if layers > 0 {
             return "metal".into();

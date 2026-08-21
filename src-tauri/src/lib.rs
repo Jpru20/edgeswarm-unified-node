@@ -171,7 +171,11 @@ fn set_window_layout(
     screen: String,
 ) -> Result<(), String> {
     let (width, height) = if screen == "dashboard" {
-        (560.0, 560.0)
+        if cfg!(target_os = "macos") {
+            (560.0, 680.0)
+        } else {
+            (560.0, 560.0)
+        }
     } else {
         (600.0, 360.0)
     };
@@ -440,6 +444,19 @@ fn start_node(
     let last_error = Arc::clone(&runtime.last_error);
 
     let handle = thread::spawn(move || {
+        let _power_guard =
+            match crate::core::power_guard::PowerGuard::acquire() {
+                Ok(guard) => guard,
+                Err(error) => {
+                    if let Ok(mut slot) = last_error.lock() {
+                        *slot = Some(error);
+                    }
+
+                    running.store(false, Ordering::Release);
+                    return;
+                }
+            };
+
         let result = run_node_service(
             Arc::clone(&stop),
             wallet_password,

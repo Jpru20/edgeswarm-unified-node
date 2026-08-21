@@ -112,6 +112,15 @@ fn candidate_files(root: &Path) -> Vec<PathBuf> {
             continue;
         }
 
+        if path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(|value| value.eq_ignore_ascii_case("_downloads"))
+            == Some(true)
+        {
+            continue;
+        }
+
         if let Ok(children) = fs::read_dir(&path) {
             for child in children.flatten() {
                 let child_path = child.path();
