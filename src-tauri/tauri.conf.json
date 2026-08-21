@@ -12,9 +12,9 @@
   "app": {
     "windows": [
       {
-        "title": "edgeswarm-unified-node",
-        "width": 800,
-        "height": 600
+        "title": "Edge Swarm Provider Node",
+        "width": 600,
+        "height": 360
       }
     ],
     "security": {

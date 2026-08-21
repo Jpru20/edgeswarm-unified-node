@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
@@ -40,8 +40,17 @@ type NodeState = {
   platform: {
     os: string;
   };
+  hardware: {
+    logicalCpuCount: number;
+    physicalCpuCount?: number | null;
+    cpuBrand: string;
+    cpuVendor: string;
+    totalMemoryBytes: number;
+    availableMemoryBytes: number;
+  };
   acceleration: {
     backend: string;
+    deviceName?: string | null;
   };
   models: ModelState[];
 };
@@ -64,6 +73,7 @@ function App() {
       logs: [],
     });
   const [nodeActionBusy, setNodeActionBusy] = useState(false);
+  const consoleRef = useRef<HTMLElement | null>(null);
 
   async function loadNodeState() {
     const state = await invoke<NodeState>("get_node_state");
@@ -89,6 +99,10 @@ function App() {
       setNodeActionBusy(false);
     }
   }
+
+  useEffect(() => {
+    void invoke("set_window_layout", { screen });
+  }, [screen]);
 
   useEffect(() => {
     if (screen !== "dashboard") {
@@ -124,6 +138,12 @@ function App() {
       window.clearInterval(timer);
     };
   }, [screen]);
+
+  useEffect(() => {
+    if (consoleRef.current) {
+      consoleRef.current.scrollTop = consoleRef.current.scrollHeight;
+    }
+  }, [serviceStatus.logs, serviceStatus.lastError]);
 
   async function handleLogin(event: FormEvent) {
     event.preventDefault();
@@ -222,7 +242,7 @@ function App() {
             </button>
           </form>
 
-          <div className="status-message">{status}</div>
+          <div className={`status-message ${busy ? "working" : ""}`}>{status}</div>
         </section>
       </main>
     );
@@ -255,7 +275,7 @@ function App() {
             </button>
           </form>
 
-          <div className="status-message">{status}</div>
+          <div className={`status-message ${busy ? "working" : ""}`}>{status}</div>
         </section>
       </main>
     );
@@ -278,6 +298,13 @@ function App() {
   const hardwareShort =
     hardwareId.length >= 8 ? hardwareId.slice(0, 8) : hardwareId;
 
+  const ramGb = nodeState?.hardware
+    ? Math.round(nodeState.hardware.totalMemoryBytes / (1024 ** 3))
+    : null;
+
+  const cpuName = nodeState?.hardware?.cpuBrand || "Unknown CPU";
+  const gpuName = nodeState?.acceleration?.deviceName || "None";
+
   const capabilityText = readyModel
     ? `Ready - ${readyModel.capability} - ${readyModel.runtime} / ${readyModel.acceleration}`
     : visibleModel
@@ -289,14 +316,14 @@ function App() {
       <h1>Edge Swarm Provider Node</h1>
 
       <div className="attestation">
-        Hardware Identity: Valid [{hardwareShort}]
+        🔒 Hardware Attestation: Valid [{hardwareShort}]
       </div>
 
       <div className="account">
         Logged in as: {providerEmail}
       </div>
 
-      <div className="version">Unified Node v1.5.15</div>
+      <div className="version">Node Version: v1.5.15</div>
 
       <section className="model-panel">
         <div className="panel-heading">Device Capability Profile</div>
@@ -315,7 +342,7 @@ function App() {
 
         <div className="progress-label">
           {readyModel
-            ? `Certified concurrency: ${readyModel.certifiedConcurrency ?? 1}`
+            ? "Managed model ready"
             : "Configuring"}
         </div>
       </section>
@@ -338,32 +365,11 @@ function App() {
             : "START NODE"}
       </button>
 
-      <section className="console">
-        <div>&gt; System Initialized. Unified identity verified.</div>
-
+      <section className="console" ref={consoleRef}>
+        <div>&gt; System Initialized. Identity Verified via Supabase Auth.</div>
+        <div>&gt; Running Edge Swarm Provider Node v1.5.15</div>
         <div>
-          &gt; Platform: {nodeState?.platform?.os ?? "unknown"} | Acceleration:{" "}
-          {nodeState?.acceleration?.backend ?? "unknown"}
-        </div>
-
-        <div>&gt; Hardware ID: {hardwareShort}</div>
-
-        {readyModel ? (
-          <div>
-            &gt; Certified model: {readyModel.selectedModel} |{" "}
-            {readyModel.capability}
-          </div>
-        ) : (
-          <div>&gt; No certified neural model currently active.</div>
-        )}
-
-        <div>
-          &gt; Node service:{" "}
-          {serviceStatus.stopping
-            ? "stopping after current lifecycle"
-            : serviceStatus.running
-              ? "running"
-              : "stopped"}
+          &gt; Hardware: {cpuName} | RAM: {ramGb ?? "Unknown"}GB | GPU: {gpuName}
         </div>
 
         {serviceStatus.logs.map((line, index) => (
@@ -371,6 +377,7 @@ function App() {
             &gt; {line}
           </div>
         ))}
+
         {serviceStatus.lastError && (
           <div>
             &gt; Node service error: {serviceStatus.lastError}
@@ -379,7 +386,7 @@ function App() {
       </section>
 
       <button className="ledger-button" type="button" disabled>
-        SYNC EARNINGS
+        SYNC LEDGER DATA
       </button>
     </main>
   );

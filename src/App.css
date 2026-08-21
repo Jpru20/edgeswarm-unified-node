@@ -1,4 +1,4 @@
-﻿:root {
+:root {
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   color: #ffffff;
   background: #242424;
@@ -57,11 +57,11 @@ input { font: inherit; }
 
 input {
   width: 100%;
-  height: 38px;
+  height: 28px;
   padding: 0 12px;
   color: #ffffff;
-  background: #343434;
-  border: 1px solid #454545;
+  background: #343638;
+  border: 1px solid #565b5e;
   border-radius: 6px;
   outline: none;
 }
@@ -92,7 +92,7 @@ button:disabled { cursor: default; }
 .show-button:hover { background: #555555; }
 
 .primary-button {
-  height: 38px;
+  height: 28px;
   margin-top: 2px;
   background: #4f46e5;
 }
@@ -101,7 +101,7 @@ button:disabled { cursor: default; }
 
 .verify-button {
   width: 200px;
-  height: 38px;
+  height: 28px;
   margin: 8px auto 0;
   background: #10b981;
 }
@@ -120,6 +120,10 @@ button:disabled { cursor: default; }
   text-align: center;
   font-size: 24px;
   letter-spacing: 4px;
+}
+
+.status-message.working {
+  color: #00ffcc;
 }
 
 .status-message {
@@ -206,7 +210,7 @@ button:disabled { cursor: default; }
 
 .progress-fill.complete {
   width: 100%;
-  background: #00ffcc;
+  background: #1f6aa5;
 }
 
 .progress-label {
@@ -228,23 +232,24 @@ button:disabled { cursor: default; }
 
 .start-button {
   min-width: 150px;
-  padding: 10px 18px;
+  height: 32px;
+  padding: 0 18px;
   margin: 6px 0 8px;
-  background: #15803d;
+  background: green;
   font-size: 16px;
   font-weight: 700;
 }
 
 .start-button:hover:not(:disabled) {
-  background: #166534;
+  background: darkgreen;
 }
 
 .start-button.running {
-  background: #b91c1c;
+  background: red;
 }
 
 .start-button.running:hover:not(:disabled) {
-  background: #991b1b;
+  background: darkred;
 }
 
 .start-button:disabled {
@@ -260,8 +265,8 @@ button:disabled { cursor: default; }
   overflow-y: auto;
   text-align: left;
   color: #d4d4d4;
-  background: #171717;
-  border: 1px solid #333333;
+  background: #1d1e1e;
+  border: 0;
   border-radius: 6px;
   font-family: Consolas, "Courier New", monospace;
   font-size: 11px;
@@ -269,6 +274,7 @@ button:disabled { cursor: default; }
 }
 
 .ledger-button {
+  height: 28px;
   padding: 9px 16px;
   background: #1e2329;
 }

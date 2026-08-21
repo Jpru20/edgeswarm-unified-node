@@ -76,6 +76,23 @@ struct AuthVerifyResult {
 }
 
 #[tauri::command]
+fn set_window_layout(
+    window: tauri::Window,
+    screen: String,
+) -> Result<(), String> {
+    let (width, height) = if screen == "dashboard" {
+        (600.0, 640.0)
+    } else {
+        (600.0, 360.0)
+    };
+
+    window
+        .set_size(tauri::Size::Logical(
+            tauri::LogicalSize::new(width, height),
+        ))
+        .map_err(|error| format!("window_resize_failed:{error}"))
+}
+#[tauri::command]
 fn get_node_state() -> NodeState {
     NodeState::detect()
 }
@@ -378,6 +395,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             get_node_state,
+            set_window_layout,
             auth_begin,
             auth_verify,
             node_service_status,
