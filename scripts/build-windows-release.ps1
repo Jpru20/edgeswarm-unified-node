@@ -36,5 +36,7 @@ $BinaryText = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($Exe))
 if (!$BinaryText.Contains($Url)) { throw 'compiled_supabase_url_not_found' }
 if (!$BinaryText.Contains($Key)) { throw 'compiled_supabase_anon_key_not_found' }
 Write-Host 'COMPILED_CONFIG_VERIFIED=PASS'
+& (Join-Path $PSScriptRoot 'verify-windows-msi-payload.ps1') -Msi $Msi.FullName -TargetDir $TargetDir
 foreach ($File in @($Exe,$Msi.FullName,$Nsis.FullName)) { $Item = Get-Item $File; $Hash = (Get-FileHash $File -Algorithm SHA256).Hash; $Sig = (Get-AuthenticodeSignature $File).Status; Write-Host "ARTIFACT=$($Item.FullName)"; Write-Host "BYTES=$($Item.Length)"; Write-Host "SHA256=$Hash"; Write-Host "SIGNATURE=$Sig" }
 Write-Host 'RELEASE_BUILD_COMPLETE=PASS'
+
