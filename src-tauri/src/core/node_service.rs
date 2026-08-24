@@ -301,6 +301,89 @@ fn transient_node_transport_errors_are_classified_v1() {
     ));
 }
 
+
+#[derive(Debug)]
+struct NodeServiceInstanceLockV1 {
+    _file: std::fs::File,
+}
+
+fn acquire_node_service_instance_lock_at_v1(
+    data_dir: &std::path::Path,
+) -> Result<NodeServiceInstanceLockV1, String> {
+    use fs2::FileExt;
+
+    std::fs::create_dir_all(data_dir)
+        .map_err(|_| "node_service_lock_directory_failed".to_string())?;
+
+    let lock_path = data_dir.join("node-service.lock");
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&lock_path)
+        .map_err(|_| "node_service_lock_open_failed".to_string())?;
+
+    match FileExt::try_lock_exclusive(&file) {
+        Ok(()) => Ok(NodeServiceInstanceLockV1 {
+            _file: file,
+        }),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::WouldBlock =>
+        {
+            Err("node_service_already_running".to_string())
+        }
+        Err(_) => Err("node_service_lock_failed".to_string()),
+    }
+}
+
+fn acquire_node_service_instance_lock_v1(
+) -> Result<NodeServiceInstanceLockV1, String> {
+    acquire_node_service_instance_lock_at_v1(
+        &crate::adapters::app_data_dir(),
+    )
+}
+
+#[cfg(test)]
+#[test]
+fn node_service_instance_lock_v1_rejects_second_holder() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or(0);
+
+    let dir = std::env::temp_dir().join(format!(
+        "edgeswarm-node-lock-test-{}-{}",
+        std::process::id(),
+        nonce
+    ));
+
+    let first =
+        acquire_node_service_instance_lock_at_v1(&dir)
+            .expect("first lock should succeed");
+
+    let second =
+        acquire_node_service_instance_lock_at_v1(&dir);
+
+    assert_eq!(
+        second.err().as_deref(),
+        Some("node_service_already_running")
+    );
+
+    drop(first);
+
+    let third =
+        acquire_node_service_instance_lock_at_v1(&dir);
+
+    assert!(
+        third.is_ok(),
+        "lock should release when first holder exits"
+    );
+
+    drop(third);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 pub fn run_node_service(
     stop: Arc<AtomicBool>,
     mut wallet_password: Zeroizing<String>,
@@ -363,6 +446,11 @@ pub fn run_node_service(
 
         return Ok(());
     }
+
+    let _node_service_instance_lock =
+        acquire_node_service_instance_lock_v1()?;
+
+    println!("NODE_SERVICE_INSTANCE_LOCK_ACQUIRED=true");
 
     let wallet_client = WorkerWalletClient::from_env()?;
     let rows = wallet_client.rows_for_email(&auth.access_token, &auth.provider_email)?;

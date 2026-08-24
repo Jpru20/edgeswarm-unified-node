@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=EdgeSwarm Node
+Comment=Provide local compute capacity to the EdgeSwarm network
+Exec=/usr/bin/edgeswarm-node
+Icon=edgeswarm-node
+Terminal=false
+Categories=Utility;Network;

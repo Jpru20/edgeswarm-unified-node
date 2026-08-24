@@ -83,6 +83,13 @@ fn main() {
             error.replace('\n', " ")
         );
 
-        std::process::exit(1);
+        let exit_code =
+            if error == "node_service_already_running" {
+                73
+            } else {
+                1
+            };
+
+        std::process::exit(exit_code);
     }
 }
