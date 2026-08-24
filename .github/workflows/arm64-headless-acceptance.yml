@@ -142,9 +142,9 @@ jobs:
             --branch b10375 \
             --depth 1 \
             https://github.com/ggml-org/llama.cpp.git \
-            "$RUNNER_TEMP/llama.cpp"
+            "/tmp/llama.cpp"
 
-          cd "$RUNNER_TEMP/llama.cpp"
+          cd "/tmp/llama.cpp"
 
           echo "=== LLAMA SOURCE ==="
           git -c core.pager=cat log -1 --oneline
