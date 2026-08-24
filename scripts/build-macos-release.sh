@@ -59,7 +59,7 @@ echo "RELEASE_CONFIG_VALID=PASS"
 echo "SOURCE_COMMIT=$HEAD"
 echo "TARGET_DIR=$TARGET"
 
-npm run tauri build
+npm run tauri build -- --bundles app
 
 APP="$TARGET/release/bundle/macos/EdgeSwarm Node.app"
 APP_EXE="$APP/Contents/MacOS/edgeswarm-unified-node"
@@ -90,11 +90,7 @@ if [ -f "$RAW_EXE" ]; then
   shasum -a 256 "$RAW_EXE" | awk '{print $1}'
 fi
 
-DMG="$(find "$TARGET/release/bundle/dmg" -maxdepth 1 -type f -name '*.dmg' 2>/dev/null | head -1 || true)"
-if [ -n "$DMG" ]; then
-  echo "DMG=$DMG"
-  printf 'DMG_SHA256='
-  shasum -a 256 "$DMG" | awk '{print $1}'
-fi
+DMG="$TARGET/release/bundle/dmg/EdgeSwarm-Node_1.5.15_arm64.dmg"
+"$ROOT/scripts/package-macos-dmg.sh" "$APP" "$DMG"
 
 echo "MACOS_RELEASE_BUILD_COMPLETE=PASS"
