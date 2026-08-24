@@ -275,23 +275,23 @@ jobs:
           )"
 
           cat > "$RUNNER_TEMP/arm64-acceptance-identity.txt" <<IDENTITY
-ARM64_ACCEPTANCE_IDENTITY_V1
-RUN_ID=${{ github.run_id }}
-HEAD_SHA=${{ github.sha }}
-HARDWARE_ID=${{ steps.wallet.outputs.hardware_id }}
-WALLET_ADDRESS=${{ steps.wallet.outputs.wallet_address }}
-APP_VERSION=1.5.15
-ARCHITECTURE=arm64
-PACKAGE_TYPE=unified_binary
-RELEASE_CHANNEL=unified_private_candidate
-UNIFIED_PROTOCOL_VERSION=edgeswarm-unified-heartbeat-v1
-HEADLESS_SHA256=$HEADLESS_SHA
-ARM64_DEB_SHA256=645f19945040b98d55627706a521f512ca9d5f45c4c70efde90ea469e0a96f67
-MODEL_SHA256=$MODEL_SHA
-LLAMA_RUNTIME_SHA256=$LLAMA_SHA
-MODEL_CAPABILITY=Neural-Inference-3B
-REAL_CERTIFICATION=PASS
-IDENTITY
+          ARM64_ACCEPTANCE_IDENTITY_V1
+          RUN_ID=${{ github.run_id }}
+          HEAD_SHA=${{ github.sha }}
+          HARDWARE_ID=${{ steps.wallet.outputs.hardware_id }}
+          WALLET_ADDRESS=${{ steps.wallet.outputs.wallet_address }}
+          APP_VERSION=1.5.15
+          ARCHITECTURE=arm64
+          PACKAGE_TYPE=unified_binary
+          RELEASE_CHANNEL=unified_private_candidate
+          UNIFIED_PROTOCOL_VERSION=edgeswarm-unified-heartbeat-v1
+          HEADLESS_SHA256=$HEADLESS_SHA
+          ARM64_DEB_SHA256=645f19945040b98d55627706a521f512ca9d5f45c4c70efde90ea469e0a96f67
+          MODEL_SHA256=$MODEL_SHA
+          LLAMA_RUNTIME_SHA256=$LLAMA_SHA
+          MODEL_CAPABILITY=Neural-Inference-3B
+          REAL_CERTIFICATION=PASS
+          IDENTITY
 
           cat "$RUNNER_TEMP/arm64-acceptance-identity.txt"
 
