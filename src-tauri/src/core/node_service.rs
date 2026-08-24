@@ -245,6 +245,62 @@ fn build_task_submit_payload(
     }
 }
 
+
+// TRANSIENT_NODE_TRANSPORT_RESILIENCE_V1
+// Temporary infrastructure failures must not tear down an otherwise healthy
+// node/runtime. Authentication, update, trust, and malformed-contract errors
+// remain fail-closed.
+fn transient_node_transport_error_v1(error: &str) -> bool {
+    if matches!(
+        error,
+        "task_poll_network_failed" |
+        "heartbeat_network_failed"
+    ) {
+        return true;
+    }
+
+    for prefix in ["task_poll_http_", "heartbeat_http_"] {
+        if let Some(raw) = error.strip_prefix(prefix) {
+            if let Ok(status) = raw.parse::<u16>() {
+                return matches!(status, 408 | 425 | 429)
+                    || (500..=599).contains(&status);
+            }
+        }
+    }
+
+    false
+}
+
+#[cfg(test)]
+#[test]
+fn transient_node_transport_errors_are_classified_v1() {
+    assert!(transient_node_transport_error_v1(
+        "task_poll_network_failed"
+    ));
+    assert!(transient_node_transport_error_v1(
+        "task_poll_http_502"
+    ));
+    assert!(transient_node_transport_error_v1(
+        "heartbeat_http_503"
+    ));
+    assert!(transient_node_transport_error_v1(
+        "task_poll_http_429"
+    ));
+
+    assert!(!transient_node_transport_error_v1(
+        "task_poll_http_401"
+    ));
+    assert!(!transient_node_transport_error_v1(
+        "task_poll_http_403"
+    ));
+    assert!(!transient_node_transport_error_v1(
+        "node_update_required_http_426"
+    ));
+    assert!(!transient_node_transport_error_v1(
+        "task_poll_response_invalid"
+    ));
+}
+
 pub fn run_node_service(
     stop: Arc<AtomicBool>,
     mut wallet_password: Zeroizing<String>,
@@ -439,13 +495,36 @@ pub fn run_node_service(
             return Ok(());
         }
 
-        let poll = poll_once(
+        let poll = match poll_once(
             &http,
             &auth_client,
             &mut auth,
             &hardware,
             &poll_capabilities,
-        )?;
+        ) {
+            Ok(poll) => poll,
+
+            Err(error)
+                if transient_node_transport_error_v1(&error) =>
+            {
+                println!("POLL_TRANSIENT_ERROR={error}");
+                println!("POLL_RETRYING=true");
+
+                for _ in 0..20 {
+                    if stop.load(Ordering::Acquire) {
+                        println!("NODE_SERVICE_STOP_REQUESTED=true");
+                        println!("NODE_SERVICE_STOPPED=true");
+                        return Ok(());
+                    }
+
+                    thread::sleep(Duration::from_millis(100));
+                }
+
+                continue;
+            }
+
+            Err(error) => return Err(error),
+        };
 
         if poll.blocked {
             println!("TASK_CLAIMED=false");
@@ -457,8 +536,34 @@ pub fn run_node_service(
 
         let Some(task) = first_task(poll) else {
             if last_idle_heartbeat.elapsed() >= Duration::from_secs(15) {
-                let status = send_heartbeat(&http, &auth_client, &mut auth, &base_heartbeat)?;
-                println!("IDLE_HEARTBEAT_HTTP_STATUS={status}");
+                match send_heartbeat(
+                    &http,
+                    &auth_client,
+                    &mut auth,
+                    &base_heartbeat,
+                ) {
+                    Ok(status) => {
+                        println!(
+                            "IDLE_HEARTBEAT_HTTP_STATUS={status}"
+                        );
+                    }
+
+                    Err(error)
+                        if transient_node_transport_error_v1(
+                            &error
+                        ) =>
+                    {
+                        println!(
+                            "IDLE_HEARTBEAT_TRANSIENT_ERROR={error}"
+                        );
+                        println!(
+                            "IDLE_HEARTBEAT_RETRYING=true"
+                        );
+                    }
+
+                    Err(error) => return Err(error),
+                }
+
                 last_idle_heartbeat = Instant::now();
             }
 

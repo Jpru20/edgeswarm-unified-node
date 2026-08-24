@@ -1,6 +1,13 @@
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::process::{Child, Command, Stdio};
 
+#[cfg(target_os = "linux")]
+use std::{
+    io::Read,
+    thread,
+    time::Duration,
+};
+
 #[cfg(target_os = "windows")]
 const ES_CONTINUOUS: u32 = 0x80000000;
 
@@ -71,33 +78,70 @@ impl PowerGuard {
 
         #[cfg(target_os = "linux")]
         {
-            let pid = std::process::id();
+            let desktop_session =
+                std::env::var_os("DISPLAY").is_some() ||
+                std::env::var_os("WAYLAND_DISPLAY").is_some();
 
-            let watcher = format!(
-                "while kill -0 {pid} 2>/dev/null; do sleep 30; done"
-            );
+            if !desktop_session {
+                println!("POWER_GUARD_ACQUIRED=true");
+                println!("POWER_GUARD_PLATFORM=linux");
+                println!("POWER_GUARD_MODE=headless_server");
+                println!("POWER_GUARD_INHIBITOR_REQUIRED=false");
+                println!("POWER_GUARD_INHIBITOR_ACTIVE=false");
 
-            let child = Command::new("systemd-inhibit")
+                return Ok(Self {
+                    child: None,
+                });
+            }
+
+            let mut child = Command::new("systemd-inhibit")
                 .args([
                     "--what=sleep",
                     "--who=EdgeSwarm Node",
                     "--why=EdgeSwarm provider node is running",
                     "--mode=block",
-                    "/bin/sh",
-                    "-c",
-                    &watcher,
+                    "/bin/sleep",
+                    "infinity",
                 ])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stderr(Stdio::piped())
                 .spawn()
                 .map_err(|error| {
                     format!("linux_sleep_inhibitor_start_failed:{error}")
                 })?;
 
+            thread::sleep(Duration::from_millis(300));
+
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|error| {
+                    format!("linux_sleep_inhibitor_status_failed:{error}")
+                })?
+            {
+                let mut detail = String::new();
+
+                if let Some(mut stderr) = child.stderr.take() {
+                    let _ = stderr.read_to_string(&mut detail);
+                }
+
+                let detail = detail.trim().replace('\n', " ");
+
+                return Err(format!(
+                    "linux_sleep_inhibitor_start_failed:status={status}:{}",
+                    if detail.is_empty() {
+                        "no_error_detail"
+                    } else {
+                        detail.as_str()
+                    }
+                ));
+            }
+
             println!("POWER_GUARD_ACQUIRED=true");
             println!("POWER_GUARD_PLATFORM=linux");
             println!("POWER_GUARD_MODE=prevent_system_sleep");
+            println!("POWER_GUARD_INHIBITOR_REQUIRED=true");
+            println!("POWER_GUARD_INHIBITOR_ACTIVE=true");
 
             return Ok(Self {
                 child: Some(child),

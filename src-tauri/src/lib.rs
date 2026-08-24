@@ -171,7 +171,7 @@ fn set_window_layout(
     screen: String,
 ) -> Result<(), String> {
     let (width, height) = if screen == "dashboard" {
-        if cfg!(target_os = "macos") {
+        if cfg!(any(target_os = "macos", target_os = "linux")) {
             (560.0, 680.0)
         } else {
             (560.0, 560.0)

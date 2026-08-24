@@ -39,6 +39,11 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 
 rpassword = "7"
 zeroize = "1"
+ctrlc = "3"
+
+[[bin]]
+name = "edgeswarm-node-headless"
+path = "src/bin/edgeswarm_node_headless.rs"
 
 # EDGESWARM_DEV_BIN_GATING_V1
 [features]
