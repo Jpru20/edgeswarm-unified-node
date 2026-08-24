@@ -20,12 +20,12 @@ jobs:
     timeout-minutes: 70
 
     env:
-      EDGESWARM_DATA_DIR: ${{ runner.temp }}/edgeswarm-data
-      EDGESWARM_AUTH_FILE: ${{ runner.temp }}/edgeswarm-data/auth_session.json
-      EDGESWARM_MODEL_ROOT: ${{ runner.temp }}/edgeswarm-models
-      EDGESWARM_LLAMA_SERVER_PATH: ${{ runner.temp }}/llama.cpp/build/bin/llama-server
+      EDGESWARM_DATA_DIR: /tmp/edgeswarm-data
+      EDGESWARM_AUTH_FILE: /tmp/edgeswarm-data/auth_session.json
+      EDGESWARM_MODEL_ROOT: /tmp/edgeswarm-models
+      EDGESWARM_LLAMA_SERVER_PATH: /tmp/llama.cpp/build/bin/llama-server
       EDGESWARM_EXECUTION_ACCELERATION: cpu
-      EDGESWARM_WALLET_PASSWORD_FILE: ${{ runner.temp }}/wallet-password
+      EDGESWARM_WALLET_PASSWORD_FILE: /tmp/edgeswarm-wallet-password
 
     steps:
       - name: Checkout acceptance source
