@@ -209,8 +209,3 @@ required-features = ["dev-tools"]
 name = "wallet_heartbeat_probe"
 path = "src/bin/wallet_heartbeat_probe.rs"
 required-features = ["dev-tools"]
-
-[[bin]]
-name = "ci_device_wallet_bootstrap"
-path = "src/bin/ci_device_wallet_bootstrap.rs"
-required-features = ["dev-tools"]
