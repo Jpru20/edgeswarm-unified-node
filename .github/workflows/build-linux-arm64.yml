@@ -1,0 +1,115 @@
+name: Build Linux ARM64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-arm64:
+    runs-on: ubuntu-22.04-arm
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Confirm native ARM64 host
+        run: |
+          uname -a
+          test "$(uname -m)" = "aarch64"
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            rpm \
+            cpio \
+            dpkg-dev
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Validate packaging scripts
+        run: |
+          bash -n packaging/linux/install-tar.sh
+          bash -n scripts/build-linux-packages.sh
+          git diff --check
+
+      - name: Build ARM64 packages
+        run: |
+          bash scripts/build-linux-packages.sh
+
+      - name: Validate ARM64 artifacts
+        run: |
+          OUT="release/linux/1.5.15/arm64"
+          DEB="$OUT/EdgeSwarm_Node_Linux_arm64_v1.5.15.deb"
+          RPM="$OUT/EdgeSwarm_Node_Linux_arm64_v1.5.15.rpm"
+          TAR="$OUT/EdgeSwarm_Node_Linux_arm64_v1.5.15.tar.gz"
+
+          test -f "$DEB"
+          test -f "$RPM"
+          test -f "$TAR"
+          test -f "$OUT/SHA256SUMS.txt"
+
+          echo "=== CHECKSUMS ==="
+          (
+            cd "$OUT"
+            sha256sum -c SHA256SUMS.txt
+          )
+
+          echo "=== DEB ==="
+          test "$(dpkg-deb -f "$DEB" Version)" = "1.5.15"
+          test "$(dpkg-deb -f "$DEB" Architecture)" = "arm64"
+          dpkg-deb -f "$DEB" Package Version Architecture Depends
+
+          echo "=== RPM ==="
+          test "$(rpm -qp --queryformat '%{VERSION}' "$RPM")" = "1.5.15"
+          test "$(rpm -qp --queryformat '%{ARCH}' "$RPM")" = "aarch64"
+          rpm -qp --queryformat 'NAME=%{NAME}\nVERSION=%{VERSION}\nARCH=%{ARCH}\n' "$RPM"
+
+          echo "=== PACKAGE BINARIES ==="
+          TMP="$(mktemp -d)"
+          dpkg-deb -x "$DEB" "$TMP"
+
+          file \
+            "$TMP/usr/lib/edgeswarm-node/edgeswarm-unified-node" \
+            "$TMP/usr/lib/edgeswarm-node/edgeswarm-node-headless"
+
+          file "$TMP/usr/lib/edgeswarm-node/edgeswarm-unified-node" |
+            grep -Ei 'ARM aarch64|aarch64'
+
+          file "$TMP/usr/lib/edgeswarm-node/edgeswarm-node-headless" |
+            grep -Ei 'ARM aarch64|aarch64'
+
+          sha256sum \
+            "$TMP/usr/lib/edgeswarm-node/edgeswarm-unified-node" \
+            "$TMP/usr/lib/edgeswarm-node/edgeswarm-node-headless"
+
+          rm -rf "$TMP"
+
+          echo "ARM64_PACKAGE_VALIDATION=PASS"
+
+      - name: Upload ARM64 release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: EdgeSwarm-Linux-ARM64-v1.5.15
+          path: release/linux/1.5.15/arm64/*
+          if-no-files-found: error

@@ -36,3 +36,6 @@ node_identity.json
 # Python generated files
 __pycache__/
 *.py[cod]
+
+# Generated Linux release artifacts
+release/
