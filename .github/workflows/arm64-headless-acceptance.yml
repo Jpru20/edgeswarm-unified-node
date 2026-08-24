@@ -1,0 +1,359 @@
+name: ARM64 Headless Acceptance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  SUPABASE_URL: ${{ secrets.EDGESWARM_CI_SUPABASE_URL }}
+  SUPABASE_ANON_KEY: ${{ secrets.EDGESWARM_CI_SUPABASE_ANON_KEY }}
+  GCP_BASE_URL: ${{ secrets.EDGESWARM_CI_GCP_BASE_URL }}
+  EDGESWARM_CI_AUTH_SESSION_JSON: ${{ secrets.EDGESWARM_CI_AUTH_SESSION_JSON }}
+  EDGESWARM_CI_WALLET_PASSWORD: ${{ secrets.EDGESWARM_CI_WALLET_PASSWORD }}
+
+jobs:
+  arm64-acceptance:
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 70
+
+    env:
+      EDGESWARM_DATA_DIR: ${{ runner.temp }}/edgeswarm-data
+      EDGESWARM_AUTH_FILE: ${{ runner.temp }}/edgeswarm-data/auth_session.json
+      EDGESWARM_MODEL_ROOT: ${{ runner.temp }}/edgeswarm-models
+      EDGESWARM_LLAMA_SERVER_PATH: ${{ runner.temp }}/llama.cpp/build/bin/llama-server
+      EDGESWARM_EXECUTION_ACCELERATION: cpu
+      EDGESWARM_WALLET_PASSWORD_FILE: ${{ runner.temp }}/wallet-password
+
+    steps:
+      - name: Checkout acceptance source
+        uses: actions/checkout@v4
+
+      - name: Confirm native ARM64 runner
+        run: |
+          echo "=== ARM64 HOST ==="
+          uname -a
+          echo "ARCH=$(uname -m)"
+          test "$(uname -m)" = "aarch64"
+          nproc
+          free -h
+          df -h /
+
+      - name: Install acceptance dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            curl \
+            file \
+            git \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            rpm \
+            cpio \
+            dpkg-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Download exact accepted ARM64 package
+        uses: actions/download-artifact@v4
+        with:
+          name: EdgeSwarm-Linux-ARM64-v1.5.15
+          path: ${{ runner.temp }}/arm64-release
+          github-token: ${{ github.token }}
+          run-id: 32708390645
+
+      - name: Verify and install exact ARM64 DEB
+        run: |
+          DEB="$RUNNER_TEMP/arm64-release/EdgeSwarm_Node_Linux_arm64_v1.5.15.deb"
+
+          echo "=== PACKAGE HASH ==="
+          echo "645f19945040b98d55627706a521f512ca9d5f45c4c70efde90ea469e0a96f67  $DEB" |
+            sha256sum -c -
+
+          echo
+          echo "=== PACKAGE METADATA ==="
+          dpkg-deb -f "$DEB" Package Version Architecture Depends
+
+          test "$(dpkg-deb -f "$DEB" Version)" = "1.5.15"
+          test "$(dpkg-deb -f "$DEB" Architecture)" = "arm64"
+
+          sudo dpkg -i "$DEB"
+
+          echo
+          echo "=== INSTALLED HEADLESS BINARY ==="
+          file /usr/lib/edgeswarm-node/edgeswarm-node-headless
+          sha256sum /usr/lib/edgeswarm-node/edgeswarm-node-headless
+
+          test "$(
+            sha256sum /usr/lib/edgeswarm-node/edgeswarm-node-headless |
+            awk '{print $1}'
+          )" = "7d4af8b7034d223be463f976ba1834f2cddfd04757ba544c16cf97c560bf6cf0"
+
+          echo "EXACT_ARM64_PACKAGE_INSTALLED=true"
+
+      - name: Build acceptance-only bootstrap and certification tools
+        run: |
+          cd src-tauri
+
+          cargo build \
+            --release \
+            --features dev-tools \
+            --bin ci_device_wallet_bootstrap \
+            --bin real_capacity_certificate \
+            --bin node_hardware_identity_probe
+
+          echo "ACCEPTANCE_TOOLS_BUILD=PASS"
+
+      - name: Download approved 3B model
+        run: |
+          mkdir -p "$EDGESWARM_MODEL_ROOT"
+
+          MODEL="$EDGESWARM_MODEL_ROOT/Qwen2.5-3B-Instruct-Q4_K_M.gguf"
+
+          curl \
+            -fL \
+            --retry 5 \
+            --retry-delay 3 \
+            --retry-all-errors \
+            -o "$MODEL" \
+            "https://api.edgeswarm.io/models/qwen2.5_3b/Qwen2.5-3B-Instruct-Q4_K_M.gguf"
+
+          echo
+          echo "=== MODEL HASH ==="
+
+          echo "9c9f56a391a3abbd5b89d0245bf6106081bcc3173119d4229235dd9d23253f94  $MODEL" |
+            sha256sum -c -
+
+          ls -lh "$MODEL"
+
+          echo "ARM64_3B_MODEL_READY=true"
+
+      - name: Build pinned ARM64 llama.cpp runtime
+        run: |
+          git clone \
+            --branch b10375 \
+            --depth 1 \
+            https://github.com/ggml-org/llama.cpp.git \
+            "$RUNNER_TEMP/llama.cpp"
+
+          cd "$RUNNER_TEMP/llama.cpp"
+
+          echo "=== LLAMA SOURCE ==="
+          git -c core.pager=cat log -1 --oneline
+
+          COMMIT="$(git rev-parse --short=9 HEAD)"
+          echo "LLAMA_COMMIT=$COMMIT"
+          test "$COMMIT" = "ba360efe1"
+
+          cmake \
+            -S . \
+            -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_NATIVE=ON \
+            -DLLAMA_CURL=OFF
+
+          cmake \
+            --build build \
+            --config Release \
+            --target llama-server \
+            -j2
+
+          echo
+          echo "=== ARM64 LLAMA RUNTIME ==="
+          file "$EDGESWARM_LLAMA_SERVER_PATH"
+          sha256sum "$EDGESWARM_LLAMA_SERVER_PATH"
+          "$EDGESWARM_LLAMA_SERVER_PATH" --version | head -n 4
+
+          echo "ARM64_LLAMA_RUNTIME_READY=true"
+
+      - name: Create isolated CI state
+        run: |
+          mkdir -p "$EDGESWARM_DATA_DIR"
+
+          printf '%s' "$EDGESWARM_CI_AUTH_SESSION_JSON" \
+            > "$EDGESWARM_AUTH_FILE"
+
+          chmod 600 "$EDGESWARM_AUTH_FILE"
+
+          printf '%s' "$EDGESWARM_CI_WALLET_PASSWORD" \
+            > "$EDGESWARM_WALLET_PASSWORD_FILE"
+
+          chmod 600 "$EDGESWARM_WALLET_PASSWORD_FILE"
+
+          echo "CI_STATE_READY=true"
+          echo "AUTH_TOKEN_PRINTED=false"
+          echo "WALLET_PASSWORD_PRINTED=false"
+
+      - name: Run real ARM64 3B certification
+        run: |
+          MODEL="$EDGESWARM_MODEL_ROOT/Qwen2.5-3B-Instruct-Q4_K_M.gguf"
+
+          echo "=== REAL ARM64 CERTIFICATION ==="
+
+          src-tauri/target/release/real_capacity_certificate \
+            "$MODEL" \
+            "$EDGESWARM_LLAMA_SERVER_PATH"
+
+          echo
+          echo "=== CAPACITY CERTIFICATE FILES ==="
+
+          find "$EDGESWARM_DATA_DIR" \
+            -maxdepth 3 \
+            -type f \
+            -name '*.json' \
+            -not -name 'auth_session.json' \
+            -printf '%P\n' |
+            sort
+
+          echo "ARM64_REAL_CERTIFICATION=PASS"
+
+      - name: Create ARM64 device wallet
+        id: wallet
+        run: |
+          echo "=== DEVICE WALLET BOOTSTRAP ==="
+
+          OUTPUT="$(
+            src-tauri/target/release/ci_device_wallet_bootstrap
+          )"
+
+          printf '%s\n' "$OUTPUT"
+
+          HARDWARE_ID="$(
+            printf '%s\n' "$OUTPUT" |
+            sed -n 's/^HARDWARE_ID=//p' |
+            tail -n 1
+          )"
+
+          WALLET_ADDRESS="$(
+            printf '%s\n' "$OUTPUT" |
+            sed -n 's/^WALLET_ADDRESS=//p' |
+            tail -n 1
+          )"
+
+          test "${#HARDWARE_ID}" -eq 64
+          test -n "$WALLET_ADDRESS"
+
+          echo "hardware_id=$HARDWARE_ID" >> "$GITHUB_OUTPUT"
+          echo "wallet_address=$WALLET_ADDRESS" >> "$GITHUB_OUTPUT"
+
+          echo "ARM64_DEVICE_WALLET_READY=true"
+
+      - name: Verify node identity consistency
+        run: |
+          echo "=== HARDWARE IDENTITY ==="
+
+          src-tauri/target/release/node_hardware_identity_probe
+
+          echo
+          echo "EXPECTED_HARDWARE_ID=${{ steps.wallet.outputs.hardware_id }}"
+
+          echo "ARM64_IDENTITY_VALIDATION=PASS"
+
+      - name: Write acceptance identity artifact
+        run: |
+          HEADLESS_SHA="$(
+            sha256sum /usr/lib/edgeswarm-node/edgeswarm-node-headless |
+            awk '{print $1}'
+          )"
+
+          LLAMA_SHA="$(
+            sha256sum "$EDGESWARM_LLAMA_SERVER_PATH" |
+            awk '{print $1}'
+          )"
+
+          MODEL_SHA="$(
+            sha256sum "$EDGESWARM_MODEL_ROOT/Qwen2.5-3B-Instruct-Q4_K_M.gguf" |
+            awk '{print $1}'
+          )"
+
+          cat > "$RUNNER_TEMP/arm64-acceptance-identity.txt" <<IDENTITY
+ARM64_ACCEPTANCE_IDENTITY_V1
+RUN_ID=${{ github.run_id }}
+HEAD_SHA=${{ github.sha }}
+HARDWARE_ID=${{ steps.wallet.outputs.hardware_id }}
+WALLET_ADDRESS=${{ steps.wallet.outputs.wallet_address }}
+APP_VERSION=1.5.15
+ARCHITECTURE=arm64
+PACKAGE_TYPE=unified_binary
+RELEASE_CHANNEL=unified_private_candidate
+UNIFIED_PROTOCOL_VERSION=edgeswarm-unified-heartbeat-v1
+HEADLESS_SHA256=$HEADLESS_SHA
+ARM64_DEB_SHA256=645f19945040b98d55627706a521f512ca9d5f45c4c70efde90ea469e0a96f67
+MODEL_SHA256=$MODEL_SHA
+LLAMA_RUNTIME_SHA256=$LLAMA_SHA
+MODEL_CAPABILITY=Neural-Inference-3B
+REAL_CERTIFICATION=PASS
+IDENTITY
+
+          cat "$RUNNER_TEMP/arm64-acceptance-identity.txt"
+
+      - name: Upload ARM64 acceptance identity
+        uses: actions/upload-artifact@v4
+        with:
+          name: EdgeSwarm-ARM64-Acceptance-Identity
+          path: ${{ runner.temp }}/arm64-acceptance-identity.txt
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Keep packaged headless node online for acceptance
+        run: |
+          LOG="$RUNNER_TEMP/edgeswarm-arm64-node.log"
+          END_TIME=$(( $(date +%s) + 2100 ))
+
+          echo "============================================================"
+          echo " ARM64 ACCEPTANCE WINDOW OPEN"
+          echo " HARDWARE_ID=${{ steps.wallet.outputs.hardware_id }}"
+          echo " WINDOW_SECONDS=2100"
+          echo "============================================================"
+
+          while [ "$(date +%s)" -lt "$END_TIME" ]; do
+            echo
+            echo "=== NODE START ATTEMPT $(date -u +%FT%TZ) ==="
+
+            /usr/lib/edgeswarm-node/edgeswarm-node-headless \
+              >> "$LOG" 2>&1 &
+
+            NODE_PID=$!
+            echo "NODE_PID=$NODE_PID"
+
+            while kill -0 "$NODE_PID" 2>/dev/null &&
+                  [ "$(date +%s)" -lt "$END_TIME" ]; do
+              sleep 30
+
+              echo "--- recent node log ---"
+              tail -n 16 "$LOG" || true
+            done
+
+            if kill -0 "$NODE_PID" 2>/dev/null; then
+              kill "$NODE_PID" 2>/dev/null || true
+              wait "$NODE_PID" 2>/dev/null || true
+              break
+            fi
+
+            set +e
+            wait "$NODE_PID"
+            EXIT_CODE=$?
+            set -e
+
+            echo "NODE_EXIT_CODE=$EXIT_CODE"
+            tail -n 30 "$LOG" || true
+
+            if [ "$(date +%s)" -lt "$END_TIME" ]; then
+              echo "RETRYING_NODE_IN_20_SECONDS=true"
+              sleep 20
+            fi
+          done
+
+          echo
+          echo "=== FINAL NODE LOG ==="
+          tail -n 100 "$LOG" || true
+
+          echo "ARM64_ACCEPTANCE_WINDOW_COMPLETE=true"
