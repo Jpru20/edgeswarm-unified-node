@@ -11,12 +11,8 @@ fi
 EXPECTED_ARCH="$(tr -d '[:space:]' < "$ROOT/ARCH")"
 
 case "$(uname -m)" in
-    x86_64)
-        HOST_ARCH="x64"
-        ;;
-    aarch64|arm64)
-        HOST_ARCH="arm64"
-        ;;
+    x86_64) HOST_ARCH="x64" ;;
+    aarch64|arm64) HOST_ARCH="arm64" ;;
     *)
         echo "Unsupported Linux architecture: $(uname -m)"
         exit 1
@@ -31,51 +27,52 @@ if [[ "$HOST_ARCH" != "$EXPECTED_ARCH" ]]; then
 fi
 
 MISSING="$(
-    {
-        ldd "$ROOT/bin/edgeswarm-unified-node"
-        ldd "$ROOT/bin/edgeswarm-node-headless"
-    } 2>&1 |
+    ldd "$ROOT/bin/edgeswarm-node-headless" 2>&1 |
     grep 'not found' || true
 )"
 
 if [[ -n "$MISSING" ]]; then
     echo "Required Linux shared libraries are missing:"
     echo "$MISSING"
-    echo
-    echo "Install the missing GUI/runtime dependencies before continuing."
     exit 1
 fi
 
 install -d -m 0755 /usr/lib/edgeswarm-node
-install -m 0755 "$ROOT/bin/edgeswarm-unified-node" /usr/lib/edgeswarm-node/edgeswarm-unified-node
-install -m 0755 "$ROOT/bin/edgeswarm-node-headless" /usr/lib/edgeswarm-node/edgeswarm-node-headless
+install -m 0755 \
+    "$ROOT/bin/edgeswarm-node-headless" \
+    /usr/lib/edgeswarm-node/edgeswarm-node-headless
 
-ln -sfn /usr/lib/edgeswarm-node/edgeswarm-unified-node /usr/bin/edgeswarm-node
-ln -sfn /usr/lib/edgeswarm-node/edgeswarm-node-headless /usr/bin/edgeswarm-node-headless
+ln -sfn \
+    /usr/lib/edgeswarm-node/edgeswarm-node-headless \
+    /usr/bin/edgeswarm-node
 
-install -d -m 0755 /usr/share/applications
-install -m 0644 "$ROOT/share/edgeswarm-node.desktop" /usr/share/applications/com.edgeswarm.node.desktop
-
-install -d -m 0755 /usr/share/icons/hicolor/128x128/apps
-install -m 0644 "$ROOT/share/edgeswarm-node.png" /usr/share/icons/hicolor/128x128/apps/edgeswarm-node.png
+ln -sfn \
+    /usr/lib/edgeswarm-node/edgeswarm-node-headless \
+    /usr/bin/edgeswarm-node-headless
 
 install -d -m 0755 /usr/lib/systemd/system
-install -m 0644 "$ROOT/share/edgeswarm-node-headless@.service" /usr/lib/systemd/system/edgeswarm-node-headless@.service
+install -m 0644 \
+    "$ROOT/share/edgeswarm-node-headless@.service" \
+    /usr/lib/systemd/system/edgeswarm-node-headless@.service
 
 install -d -m 0755 /usr/share/doc/edgeswarm-node
-install -m 0644 "$ROOT/share/node.env.example" /usr/share/doc/edgeswarm-node/node.env.example
-install -m 0644 "$ROOT/share/README-headless.txt" /usr/share/doc/edgeswarm-node/README-headless.txt
+install -m 0644 \
+    "$ROOT/share/node.env.example" \
+    /usr/share/doc/edgeswarm-node/node.env.example
+install -m 0644 \
+    "$ROOT/share/README-headless.txt" \
+    /usr/share/doc/edgeswarm-node/README-headless.txt
 
 systemctl daemon-reload 2>/dev/null || true
 
 echo
-echo "EdgeSwarm Node installed."
+echo "EdgeSwarm Headless Node installed."
 echo "Version: $(cat "$ROOT/VERSION")"
 echo "Architecture: $EXPECTED_ARCH"
 echo
-echo "Desktop:"
+echo "Command:"
 echo "  edgeswarm-node"
 echo
-echo "Headless mode is NOT enabled automatically."
+echo "The systemd service is NOT enabled automatically."
 echo "See:"
 echo "  /usr/share/doc/edgeswarm-node/README-headless.txt"

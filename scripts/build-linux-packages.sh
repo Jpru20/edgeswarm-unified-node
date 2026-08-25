@@ -27,30 +27,48 @@ esac
 NAME="EdgeSwarm_Node_Linux_${ARCH}_v${VERSION}"
 OUT="$ROOT/release/linux/${VERSION}/${ARCH}"
 BUILD_TARGET="${EDGESWARM_LINUX_BUILD_TARGET_DIR:-/tmp/edgeswarm-unified-node-build-${ARCH}-${VERSION}}"
+PREBUILT="${EDGESWARM_PREBUILT_HEADLESS:-}"
+EXPECTED_SHA="${EDGESWARM_EXPECTED_RUNTIME_SHA256:-}"
 
-rm -rf "$OUT" "$BUILD_TARGET"
-mkdir -p "$OUT" "$BUILD_TARGET"
+rm -rf "$OUT"
+mkdir -p "$OUT"
 
 echo "VERSION=$VERSION"
 echo "ARCH=$ARCH"
 echo "DEB_ARCH=$DEB_ARCH"
 echo "RPM_ARCH=$RPM_ARCH"
 
-npm run build
+if [[ -n "$PREBUILT" ]]; then
+    HEADLESS="$(cd "$(dirname "$PREBUILT")" && pwd)/$(basename "$PREBUILT")"
+    test -x "$HEADLESS"
+    echo "BUILD_MODE=prebuilt_headless"
+else
+    rm -rf "$BUILD_TARGET"
+    mkdir -p "$BUILD_TARGET"
 
-(
-    cd src-tauri
-    CARGO_TARGET_DIR="$BUILD_TARGET" \
-        cargo build --release \
-        --bin edgeswarm-unified-node \
-        --bin edgeswarm-node-headless
-)
+    (
+        cd src-tauri
+        CARGO_TARGET_DIR="$BUILD_TARGET" \
+            cargo build --release \
+            --bin edgeswarm-node-headless
+    )
 
-GUI="$BUILD_TARGET/release/edgeswarm-unified-node"
-HEADLESS="$BUILD_TARGET/release/edgeswarm-node-headless"
+    HEADLESS="$BUILD_TARGET/release/edgeswarm-node-headless"
+    test -x "$HEADLESS"
+    echo "BUILD_MODE=native_headless"
+fi
 
-test -x "$GUI"
-test -x "$HEADLESS"
+RUNTIME_SHA="$(sha256sum "$HEADLESS" | awk '{print $1}')"
+
+echo "HEADLESS=$HEADLESS"
+echo "RUNTIME_SHA256=$RUNTIME_SHA"
+
+if [[ -n "$EXPECTED_SHA" && "$RUNTIME_SHA" != "$EXPECTED_SHA" ]]; then
+    echo "ERROR=runtime_sha_mismatch"
+    echo "EXPECTED=$EXPECTED_SHA"
+    echo "ACTUAL=$RUNTIME_SHA"
+    exit 1
+fi
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -58,20 +76,14 @@ trap 'rm -rf "$TMP"' EXIT
 PAYLOAD="$TMP/payload"
 
 install -d "$PAYLOAD/usr/lib/edgeswarm-node"
-install -m 0755 "$GUI" "$PAYLOAD/usr/lib/edgeswarm-node/edgeswarm-unified-node"
-install -m 0755 "$HEADLESS" "$PAYLOAD/usr/lib/edgeswarm-node/edgeswarm-node-headless"
+install -m 0755 "$HEADLESS" \
+    "$PAYLOAD/usr/lib/edgeswarm-node/edgeswarm-node-headless"
 
 install -d "$PAYLOAD/usr/bin"
-ln -s ../lib/edgeswarm-node/edgeswarm-unified-node "$PAYLOAD/usr/bin/edgeswarm-node"
-ln -s ../lib/edgeswarm-node/edgeswarm-node-headless "$PAYLOAD/usr/bin/edgeswarm-node-headless"
-
-install -d "$PAYLOAD/usr/share/applications"
-install -m 0644 packaging/linux/edgeswarm-node.desktop \
-    "$PAYLOAD/usr/share/applications/com.edgeswarm.node.desktop"
-
-install -d "$PAYLOAD/usr/share/icons/hicolor/128x128/apps"
-install -m 0644 src-tauri/icons/128x128.png \
-    "$PAYLOAD/usr/share/icons/hicolor/128x128/apps/edgeswarm-node.png"
+ln -s ../lib/edgeswarm-node/edgeswarm-node-headless \
+    "$PAYLOAD/usr/bin/edgeswarm-node"
+ln -s ../lib/edgeswarm-node/edgeswarm-node-headless \
+    "$PAYLOAD/usr/bin/edgeswarm-node-headless"
 
 install -d "$PAYLOAD/usr/lib/systemd/system"
 install -m 0644 packaging/linux/edgeswarm-node-headless@.service \
@@ -92,15 +104,16 @@ mkdir -p "$TARROOT/bin" "$TARROOT/share"
 printf '%s\n' "$ARCH" > "$TARROOT/ARCH"
 printf '%s\n' "$VERSION" > "$TARROOT/VERSION"
 
-install -m 0755 "$GUI" "$TARROOT/bin/edgeswarm-unified-node"
-install -m 0755 "$HEADLESS" "$TARROOT/bin/edgeswarm-node-headless"
-install -m 0755 packaging/linux/install-tar.sh "$TARROOT/install.sh"
-
-install -m 0644 packaging/linux/edgeswarm-node.desktop "$TARROOT/share/edgeswarm-node.desktop"
-install -m 0644 packaging/linux/edgeswarm-node-headless@.service "$TARROOT/share/edgeswarm-node-headless@.service"
-install -m 0644 packaging/linux/node.env.example "$TARROOT/share/node.env.example"
-install -m 0644 packaging/linux/README-headless.txt "$TARROOT/share/README-headless.txt"
-install -m 0644 src-tauri/icons/128x128.png "$TARROOT/share/edgeswarm-node.png"
+install -m 0755 "$HEADLESS" \
+    "$TARROOT/bin/edgeswarm-node-headless"
+install -m 0755 packaging/linux/install-tar.sh \
+    "$TARROOT/install.sh"
+install -m 0644 packaging/linux/edgeswarm-node-headless@.service \
+    "$TARROOT/share/edgeswarm-node-headless@.service"
+install -m 0644 packaging/linux/node.env.example \
+    "$TARROOT/share/node.env.example"
+install -m 0644 packaging/linux/README-headless.txt \
+    "$TARROOT/share/README-headless.txt"
 
 (
     cd "$TMP"
@@ -117,9 +130,6 @@ mkdir -p "$DEBROOT/DEBIAN"
 DPKG_WORK="$TMP/dpkg-work"
 mkdir -p "$DPKG_WORK/debian/edgeswarm-node/usr/lib/edgeswarm-node"
 
-cp "$GUI" \
-    "$DPKG_WORK/debian/edgeswarm-node/usr/lib/edgeswarm-node/edgeswarm-unified-node"
-
 cp "$HEADLESS" \
     "$DPKG_WORK/debian/edgeswarm-node/usr/lib/edgeswarm-node/edgeswarm-node-headless"
 
@@ -132,20 +142,15 @@ Standards-Version: 4.6.0
 
 Package: edgeswarm-node
 Architecture: $DEB_ARCH
-Description: EdgeSwarm unified provider node
+Description: EdgeSwarm unified headless provider node
 CONTROL
 
-if ! SHLIB_OUTPUT="$(
+SHLIB_OUTPUT="$(
     cd "$DPKG_WORK" &&
     dpkg-shlibdeps -O \
-        -e"debian/edgeswarm-node/usr/lib/edgeswarm-node/edgeswarm-unified-node" \
         -e"debian/edgeswarm-node/usr/lib/edgeswarm-node/edgeswarm-node-headless" \
         2>"$TMP/dpkg-shlibdeps.log"
-)"; then
-    cat "$TMP/dpkg-shlibdeps.log"
-    echo "ERROR: dpkg-shlibdeps failed."
-    exit 1
-fi
+)"
 
 DEB_DEPENDS="$(
     printf '%s\n' "$SHLIB_OUTPUT" |
@@ -155,7 +160,7 @@ DEB_DEPENDS="$(
 
 if [[ -z "$DEB_DEPENDS" ]]; then
     cat "$TMP/dpkg-shlibdeps.log"
-    echo "ERROR: Debian dependencies were not generated."
+    echo "ERROR=debian_dependencies_missing"
     exit 1
 fi
 
@@ -169,8 +174,8 @@ Priority: optional
 Architecture: $DEB_ARCH
 Maintainer: EdgeSwarm <hello@joinswarm.io>
 Depends: $DEB_DEPENDS
-Description: EdgeSwarm unified provider node
- Unified graphical desktop and headless/server EdgeSwarm node.
+Description: EdgeSwarm unified headless provider node
+ Headless EdgeSwarm provider node for Linux servers, desktops and laptops.
 CONTROL
 
 cat > "$DEBROOT/DEBIAN/postinst" <<'POST'
@@ -208,13 +213,13 @@ if command -v rpmbuild >/dev/null 2>&1; then
 Name: edgeswarm-node
 Version: $VERSION
 Release: 1
-Summary: EdgeSwarm unified provider node
+Summary: EdgeSwarm unified headless provider node
 License: Proprietary
 BuildArch: $RPM_ARCH
 Source0: edgeswarm-node-payload.tar.gz
 
 %description
-Unified graphical desktop and headless/server EdgeSwarm provider node.
+Headless EdgeSwarm provider node for Linux servers, desktops and laptops.
 
 %prep
 
@@ -228,8 +233,6 @@ tar -xzf %{SOURCE0} -C %{buildroot}
 /usr/lib/edgeswarm-node
 /usr/bin/edgeswarm-node
 /usr/bin/edgeswarm-node-headless
-/usr/share/applications/com.edgeswarm.node.desktop
-/usr/share/icons/hicolor/128x128/apps/edgeswarm-node.png
 /usr/lib/systemd/system/edgeswarm-node-headless@.service
 /usr/share/doc/edgeswarm-node
 
@@ -240,8 +243,8 @@ tar -xzf %{SOURCE0} -C %{buildroot}
 /bin/systemctl daemon-reload >/dev/null 2>&1 || :
 
 %changelog
-* Mon Aug 24 2026 EdgeSwarm <hello@joinswarm.io> - $VERSION-1
-- Unified Linux graphical and headless package
+* Tue Aug 25 2026 EdgeSwarm <hello@joinswarm.io> - $VERSION-1
+- Unified Linux headless beta package
 SPEC
 
     rpmbuild -bb \
@@ -277,10 +280,10 @@ echo "=== PACKAGE CONTENT CHECK ==="
 dpkg-deb -f "$OUT/${NAME}.deb" Package Version Architecture
 
 dpkg-deb -c "$OUT/${NAME}.deb" |
-    grep -E 'edgeswarm-unified-node|edgeswarm-node-headless|\.desktop|systemd'
+    grep -E 'edgeswarm-node-headless|systemd'
 
 tar -tzf "$OUT/${NAME}.tar.gz" |
-    grep -E 'edgeswarm-unified-node|edgeswarm-node-headless|install\.sh'
+    grep -E 'edgeswarm-node-headless|install\.sh'
 
 echo
 echo "LINUX_PACKAGE_BUILD_COMPLETE=true"
