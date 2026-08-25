@@ -76,7 +76,7 @@ impl ProductionLlamaClient {
         let max_tokens =
             generation.max_tokens.max(1).min(4096);
 
-        let body = json!({
+        let mut body = json!({
             "model": "local-model",
             "messages": [
                 {
@@ -90,6 +90,15 @@ impl ProductionLlamaClient {
             "stop": generation.stop,
             "stream": false
         });
+
+        // JSON_CONSTRAINED_GENERATION_V1
+        // Keep live customer execution aligned with certification:
+        // JSON-mode tasks use llama.cpp constrained JSON generation.
+        if generation.mode == "json" {
+            body["json_schema"] = json!({
+                "type": "object"
+            });
+        }
 
         let started = Instant::now();
 
@@ -130,7 +139,23 @@ impl ProductionLlamaClient {
         }
 
         let ai_output =
-            if output.starts_with('{') {
+            if generation.mode == "json" {
+                match serde_json::from_str::<Value>(output) {
+                    Ok(Value::Object(object)) =>
+                        serde_json::to_string(&Value::Object(object))
+                            .map_err(|_| "production_output_encode_failed".to_string())?,
+                    Ok(_) => {
+                        return Err(
+                            "production_json_output_not_object".into()
+                        );
+                    }
+                    Err(_) => {
+                        return Err(
+                            "production_json_output_invalid".into()
+                        );
+                    }
+                }
+            } else if output.starts_with('{') {
                 match serde_json::from_str::<Value>(output) {
                     Ok(Value::Object(object)) =>
                         serde_json::to_string(&Value::Object(object))

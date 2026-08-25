@@ -112,7 +112,7 @@ impl LlamaCppHttpExecutor {
         generation: &GenerationSettings,
         max_tokens: u32,
     ) -> Result<LlamaAttempt, String> {
-        let body = json!({
+        let mut body = json!({
             "model": "local-model",
             "messages": [
                 {
@@ -130,6 +130,15 @@ impl LlamaCppHttpExecutor {
             "stop": generation.stop,
             "stream": false
         });
+
+        // JSON_CONSTRAINED_GENERATION_V1
+        // Use llama.cpp grammar-constrained JSON generation whenever the
+        // shared production generation policy classifies the task as JSON.
+        if generation.mode == "json" {
+            body["json_schema"] = json!({
+                "type": "object"
+            });
+        }
 
         let started = Instant::now();
 
