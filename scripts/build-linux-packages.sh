@@ -218,6 +218,8 @@ License: Proprietary
 BuildArch: $RPM_ARCH
 Source0: edgeswarm-node-payload.tar.gz
 
+%global __strip /bin/true
+
 %description
 Headless EdgeSwarm provider node for Linux servers, desktops and laptops.
 
