@@ -71,7 +71,7 @@
       "packageType": "rpm",
       "filename": "EdgeSwarm_Node_Linux_arm64_v1.5.15.rpm",
       "packageSha256": "102d8ba37f86486198362f8135ff6ff74c409ac9c9b2876975bc0edb9b2a211e",
-      "runtimeSha256": "72fcb49aa971ac548e16f86e1146c1b3c0537d062bcfe23ca3d3f9d0106b673d",
+      "runtimeSha256": "72fcb49aa971ac548e16f86e1146c1b3c0537d062bc662a6428812b4fc9b673d",
       "downloadUrl": "https://github.com/Jpru20/edgeswarm-unified-node/releases/download/v1.5.15-beta.1/EdgeSwarm_Node_Linux_arm64_v1.5.15.rpm",
       "paidAssignmentSafe": true
     },
