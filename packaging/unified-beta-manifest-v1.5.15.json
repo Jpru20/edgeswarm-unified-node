@@ -1,0 +1,96 @@
+{
+  "manifestVersion": "edgeswarm-unified-beta-v1",
+  "version": "1.5.15",
+  "tag": "v1.5.15-beta.1",
+  "releaseChannel": "unified_private_beta",
+  "publicReleaseSafe": false,
+  "artifacts": [
+    {
+      "platform": "windows",
+      "architecture": "x64",
+      "packageType": "msi",
+      "filename": "EdgeSwarm.Node_1.5.15_x64_en-US.msi",
+      "packageSha256": "1c1e8d12f24ff915a9e30bc6e7d6515223c9ab1c0843e5cfa787cd948e55214c",
+      "runtimeSha256": "75f3273a3bf3d0820b80a52c2eb5061e985c1881cbf630501dfe219199ea215c",
+      "downloadUrl": "https://github.com/Jpru20/edgeswarm-unified-node/releases/download/v1.5.15-beta.1/EdgeSwarm.Node_1.5.15_x64_en-US.msi",
+      "paidAssignmentSafe": true
+    },
+    {
+      "platform": "macos",
+      "architecture": "arm64",
+      "packageType": "dmg",
+      "filename": "EdgeSwarm_Node_macOS_arm64_v1.5.15.dmg",
+      "packageSha256": "d113eeb32073f8700dde15c14d94a51bf937099d35fa5e325b44eb0164eef15b",
+      "runtimeSha256": "7fdf04d19124a002ba61eeb55720f241336b63981895ccaa233bb80c02cfcc0f",
+      "downloadUrl": "https://github.com/Jpru20/edgeswarm-unified-node/releases/download/v1.5.15-beta.1/EdgeSwarm_Node_macOS_arm64_v1.5.15.dmg",
+      "paidAssignmentSafe": true
+    },
+    {
+      "platform": "linux",
+      "architecture": "x64",
+      "packageType": "deb",
+      "filename": "EdgeSwarm_Node_Linux_x64_v1.5.15.deb",
+      "packageSha256": "d28a8b8e86542e645edb5c36be03ca2813d99b772ddcac114a68ae25285d4df7",
+      "runtimeSha256": "3e7e5c249ba7594b78b2a1463698e3a4de33403b2eb962f90631c079a56651b1",
+      "downloadUrl": "https://github.com/Jpru20/edgeswarm-unified-node/releases/download/v1.5.15-beta.1/EdgeSwarm_Node_Linux_x64_v1.5.15.deb",
+      "paidAssignmentSafe": true
+    },
+    {
+      "platform": "linux",
+      "architecture": "x64",
+      "packageType": "rpm",
+      "filename": "EdgeSwarm_Node_Linux_x64_v1.5.15.rpm",
+      "packageSha256": "ec093c5dbd35cb74c02d45cfdffc711fcdbf851942e1ae1972554261619d3540",
+      "runtimeSha256": "3e7e5c249ba7594b78b2a1463698e3a4de33403b2eb962f90631c079a56651b1",
+      "downloadUrl": "https://github.com/Jpru20/edgeswarm-unified-node/releases/download/v1.5.15-beta.1/EdgeSwarm_Node_Linux_x64_v1.5.15.rpm",
+      "paidAssignmentSafe": true
+    },
+    {
+      "platform": "linux",
+      "architecture": "x64",
+      "packageType": "tar.gz",
+      "filename": "EdgeSwarm_Node_Linux_x64_v1.5.15.tar.gz",
+      "packageSha256": "7d677fcdb67580f4b17818acb1c48a0900a69b9df86063833dabb478170de479",
+      "runtimeSha256": "3e7e5c249ba7594b78b2a1463698e3a4de33403b2eb962f90631c079a56651b1",
+      "downloadUrl": "https://github.com/Jpru20/edgeswarm-unified-node/releases/download/v1.5.15-beta.1/EdgeSwarm_Node_Linux_x64_v1.5.15.tar.gz",
+      "paidAssignmentSafe": true
+    },
+    {
+      "platform": "linux",
+      "architecture": "arm64",
+      "packageType": "deb",
+      "filename": "EdgeSwarm_Node_Linux_arm64_v1.5.15.deb",
+      "packageSha256": "d72e91093fbb648e84e1d71c05a622939e67949046e22c3681ed601b132dc5dc",
+      "runtimeSha256": "72fcb49aa971ac548e16f86e1146c1b3c0537d062bc662a6428812b4fc9b673d",
+      "downloadUrl": "https://github.com/Jpru20/edgeswarm-unified-node/releases/download/v1.5.15-beta.1/EdgeSwarm_Node_Linux_arm64_v1.5.15.deb",
+      "paidAssignmentSafe": true
+    },
+    {
+      "platform": "linux",
+      "architecture": "arm64",
+      "packageType": "rpm",
+      "filename": "EdgeSwarm_Node_Linux_arm64_v1.5.15.rpm",
+      "packageSha256": "102d8ba37f86486198362f8135ff6ff74c409ac9c9b2876975bc0edb9b2a211e",
+      "runtimeSha256": "72fcb49aa971ac548e16f86e1146c1b3c0537d062bcfe23ca3d3f9d0106b673d",
+      "downloadUrl": "https://github.com/Jpru20/edgeswarm-unified-node/releases/download/v1.5.15-beta.1/EdgeSwarm_Node_Linux_arm64_v1.5.15.rpm",
+      "paidAssignmentSafe": true
+    },
+    {
+      "platform": "linux",
+      "architecture": "arm64",
+      "packageType": "tar.gz",
+      "filename": "EdgeSwarm_Node_Linux_arm64_v1.5.15.tar.gz",
+      "packageSha256": "43e61742d5ae8547f341798cd835d25099efe7440685bd67c9f6d08dc54dfe57",
+      "runtimeSha256": "72fcb49aa971ac548e16f86e1146c1b3c0537d062bc662a6428812b4fc9b673d",
+      "downloadUrl": "https://github.com/Jpru20/edgeswarm-unified-node/releases/download/v1.5.15-beta.1/EdgeSwarm_Node_Linux_arm64_v1.5.15.tar.gz",
+      "paidAssignmentSafe": true
+    }
+  ],
+  "unsupported": [
+    {
+      "platform": "macos",
+      "architecture": "x64",
+      "reason": "Apple Intel intentionally unsupported"
+    }
+  ]
+}
