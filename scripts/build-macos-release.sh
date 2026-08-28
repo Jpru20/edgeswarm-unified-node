@@ -90,7 +90,8 @@ if [ -f "$RAW_EXE" ]; then
   shasum -a 256 "$RAW_EXE" | awk '{print $1}'
 fi
 
-DMG="$TARGET/release/bundle/dmg/EdgeSwarm-Node_1.5.15_arm64.dmg"
+VERSION="$(awk -F'"' '/^version = "/ {print $2; exit}' src-tauri/Cargo.toml)"
+DMG="$TARGET/release/bundle/dmg/EdgeSwarm-Node_${VERSION}_arm64.dmg"
 "$ROOT/scripts/package-macos-dmg.sh" "$APP" "$DMG"
 
 echo "MACOS_RELEASE_BUILD_COMPLETE=PASS"
