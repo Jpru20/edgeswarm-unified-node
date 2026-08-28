@@ -82,6 +82,23 @@ LC_ALL=C grep -aFq -- "$KEY" "$APP_EXE" || {
 
 echo "APP_PAYLOAD_CONFIG_VERIFIED=PASS"
 echo "CANONICAL_RUNTIME_PATH=$APP_EXE"
+
+# Seal the completed beta app bundle before hashing/packaging.
+# This is ad-hoc signing only; Developer ID/notarization remains future work.
+APP_HELPER="$APP/Contents/MacOS/edgeswarm-node-headless"
+
+if [ -x "$APP_HELPER" ]; then
+    codesign --force --sign - --timestamp=none "$APP_HELPER"
+fi
+
+codesign --force --sign - --timestamp=none "$APP"
+
+codesign --verify --deep --strict --verbose=2 "$APP"
+
+test -f "$APP/Contents/_CodeSignature/CodeResources"
+
+echo "MACOS_APP_BUNDLE_SIGNATURE=PASS"
+
 printf 'CANONICAL_RUNTIME_SHA256='
 shasum -a 256 "$APP_EXE" | awk '{print $1}'
 
