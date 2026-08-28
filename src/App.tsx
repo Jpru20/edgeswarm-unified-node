@@ -1,5 +1,6 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import "./App.css";
 
 type Screen = "login" | "mfa" | "dashboard";
@@ -62,6 +63,14 @@ type NodeState = {
 };
 
 function App() {
+  const [appVersion, setAppVersion] = useState("");
+
+  useEffect(() => {
+    getVersion()
+      .then(setAppVersion)
+      .catch(() => setAppVersion("unknown"));
+  }, []);
+
   const [screen, setScreen] = useState<Screen>("login");
   const [email, setEmail] = useState("");
   const [providerEmail, setProviderEmail] = useState("");
@@ -415,7 +424,7 @@ function App() {
         Logged in as: {providerEmail}
       </div>
 
-      <div className="version">Node Version: v1.5.15</div>
+      <div className="version">Node Version: v{appVersion || "..."}</div>
 
       <section className="model-panel">
         <div className="panel-heading">Device Capability Profile</div>
@@ -459,7 +468,7 @@ function App() {
 
       <section className="console" ref={consoleRef}>
         <div>&gt; System Initialized. Identity Verified via Supabase Auth.</div>
-        <div>&gt; Running Edge Swarm Provider Node v1.5.15</div>
+        <div>&gt; Running Edge Swarm Provider Node v{appVersion || "..."}</div>
         <div>
           &gt; Hardware: {cpuName} | RAM: {ramGb ?? "Unknown"}GB | GPU: {gpuName}
         </div>
