@@ -4,7 +4,9 @@ use crate::core::{
     model_discovery::discover_models,
     production_heartbeat::ProductionHeartbeatV1,
     production_inference::ProductionLlamaClient,
-    production_task_http::{poll_once, read_auth, send_heartbeat, submit_with_retry},
+    production_task_http::{
+        poll_once, read_auth, send_heartbeat, send_stream_frame_with_retry, submit_with_retry,
+    },
     result_signing,
     task_client::{build_submit_result, GetJobsResponse, TaskEnvelope},
     wallet_account::DeviceWallet,
@@ -23,9 +25,7 @@ use std::{
     env,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
-        Mutex,
-        OnceLock,
+        mpsc, Arc, Mutex, OnceLock,
     },
     thread,
     time::{Duration, Instant},
@@ -167,6 +167,8 @@ fn build_task_submit_payload(
     active_capability: Option<&str>,
     active_runtime: Option<&str>,
     runtime_acceleration: &str,
+    stream_neural: bool,
+    on_chunk: Option<&mut dyn FnMut(&str)>,
 ) -> Result<Value, String> {
     if let Some(result) = deterministic_executor::execute(task) {
         println!("DETERMINISTIC_EXECUTION_SUCCEEDED=true");
@@ -212,7 +214,19 @@ fn build_task_submit_payload(
 
     let llama = llama.ok_or_else(|| "neural_runtime_unavailable".to_string())?;
 
-    match llama.execute(&task.prompt, task.max_output_tokens) {
+    let inference_result = if stream_neural {
+        if let Some(callback) = on_chunk {
+            llama.execute_streaming(&task.prompt, task.max_output_tokens, |chunk| {
+                callback(chunk)
+            })
+        } else {
+            llama.execute(&task.prompt, task.max_output_tokens)
+        }
+    } else {
+        llama.execute(&task.prompt, task.max_output_tokens)
+    };
+
+    match inference_result {
         Ok(result) => {
             println!("INFERENCE_SUCCEEDED=true");
             println!("INFERENCE_LATENCY_MS={}", result.latency_ms);
@@ -245,6 +259,24 @@ fn build_task_submit_payload(
     }
 }
 
+// REALTIME_NEURAL_STREAM_CONTRACT_V1
+fn task_realtime_neural_streaming_v1(task: &TaskEnvelope) -> bool {
+    let neural = task
+        .required_model
+        .as_deref()
+        .map(|value| value.starts_with("Neural-Inference"))
+        .unwrap_or(false);
+
+    if !neural {
+        return false;
+    }
+
+    task.streaming_contract
+        .as_ref()
+        .and_then(|contract| contract.effective_mode.as_deref())
+        .map(|mode| mode.eq_ignore_ascii_case("realtime"))
+        .unwrap_or(false)
+}
 
 // TRANSIENT_NODE_TRANSPORT_RESILIENCE_V1
 // Temporary infrastructure failures must not tear down an otherwise healthy
@@ -253,8 +285,7 @@ fn build_task_submit_payload(
 fn transient_node_transport_error_v1(error: &str) -> bool {
     if matches!(
         error,
-        "task_poll_network_failed" |
-        "heartbeat_network_failed"
+        "task_poll_network_failed" | "heartbeat_network_failed"
     ) {
         return true;
     }
@@ -262,8 +293,7 @@ fn transient_node_transport_error_v1(error: &str) -> bool {
     for prefix in ["task_poll_http_", "heartbeat_http_"] {
         if let Some(raw) = error.strip_prefix(prefix) {
             if let Ok(status) = raw.parse::<u16>() {
-                return matches!(status, 408 | 425 | 429)
-                    || (500..=599).contains(&status);
+                return matches!(status, 408 | 425 | 429) || (500..=599).contains(&status);
             }
         }
     }
@@ -277,22 +307,12 @@ fn transient_node_transport_errors_are_classified_v1() {
     assert!(transient_node_transport_error_v1(
         "task_poll_network_failed"
     ));
-    assert!(transient_node_transport_error_v1(
-        "task_poll_http_502"
-    ));
-    assert!(transient_node_transport_error_v1(
-        "heartbeat_http_503"
-    ));
-    assert!(transient_node_transport_error_v1(
-        "task_poll_http_429"
-    ));
+    assert!(transient_node_transport_error_v1("task_poll_http_502"));
+    assert!(transient_node_transport_error_v1("heartbeat_http_503"));
+    assert!(transient_node_transport_error_v1("task_poll_http_429"));
 
-    assert!(!transient_node_transport_error_v1(
-        "task_poll_http_401"
-    ));
-    assert!(!transient_node_transport_error_v1(
-        "task_poll_http_403"
-    ));
+    assert!(!transient_node_transport_error_v1("task_poll_http_401"));
+    assert!(!transient_node_transport_error_v1("task_poll_http_403"));
     assert!(!transient_node_transport_error_v1(
         "node_update_required_http_426"
     ));
@@ -300,7 +320,6 @@ fn transient_node_transport_errors_are_classified_v1() {
         "task_poll_response_invalid"
     ));
 }
-
 
 #[derive(Debug)]
 struct NodeServiceInstanceLockV1 {
@@ -325,23 +344,16 @@ fn acquire_node_service_instance_lock_at_v1(
         .map_err(|_| "node_service_lock_open_failed".to_string())?;
 
     match FileExt::try_lock_exclusive(&file) {
-        Ok(()) => Ok(NodeServiceInstanceLockV1 {
-            _file: file,
-        }),
-        Err(error)
-            if error.kind() == std::io::ErrorKind::WouldBlock =>
-        {
+        Ok(()) => Ok(NodeServiceInstanceLockV1 { _file: file }),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
             Err("node_service_already_running".to_string())
         }
         Err(_) => Err("node_service_lock_failed".to_string()),
     }
 }
 
-fn acquire_node_service_instance_lock_v1(
-) -> Result<NodeServiceInstanceLockV1, String> {
-    acquire_node_service_instance_lock_at_v1(
-        &crate::adapters::app_data_dir(),
-    )
+fn acquire_node_service_instance_lock_v1() -> Result<NodeServiceInstanceLockV1, String> {
+    acquire_node_service_instance_lock_at_v1(&crate::adapters::app_data_dir())
 }
 
 #[cfg(test)]
@@ -358,12 +370,9 @@ fn node_service_instance_lock_v1_rejects_second_holder() {
         nonce
     ));
 
-    let first =
-        acquire_node_service_instance_lock_at_v1(&dir)
-            .expect("first lock should succeed");
+    let first = acquire_node_service_instance_lock_at_v1(&dir).expect("first lock should succeed");
 
-    let second =
-        acquire_node_service_instance_lock_at_v1(&dir);
+    let second = acquire_node_service_instance_lock_at_v1(&dir);
 
     assert_eq!(
         second.err().as_deref(),
@@ -372,13 +381,9 @@ fn node_service_instance_lock_v1_rejects_second_holder() {
 
     drop(first);
 
-    let third =
-        acquire_node_service_instance_lock_at_v1(&dir);
+    let third = acquire_node_service_instance_lock_at_v1(&dir);
 
-    assert!(
-        third.is_ok(),
-        "lock should release when first holder exits"
-    );
+    assert!(third.is_ok(), "lock should release when first holder exits");
 
     drop(third);
     let _ = std::fs::remove_dir_all(&dir);
@@ -409,7 +414,12 @@ pub fn run_node_service(
     // actually validated/certified, then exits before wallet unlock,
     // runtime startup, or /get-jobs.
     if heartbeat_only {
-        let heartbeat = ProductionHeartbeatV1::from_node_state(&state, env!("CARGO_PKG_VERSION"), "laptop", &[]);
+        let heartbeat = ProductionHeartbeatV1::from_node_state(
+            &state,
+            env!("CARGO_PKG_VERSION"),
+            "laptop",
+            &[],
+        );
 
         let capability_mode = if heartbeat.eligible_model_capabilities.is_empty() {
             "deterministic_only"
@@ -447,8 +457,7 @@ pub fn run_node_service(
         return Ok(());
     }
 
-    let _node_service_instance_lock =
-        acquire_node_service_instance_lock_v1()?;
+    let _node_service_instance_lock = acquire_node_service_instance_lock_v1()?;
 
     println!("NODE_SERVICE_INSTANCE_LOCK_ACQUIRED=true");
 
@@ -482,7 +491,8 @@ pub fn run_node_service(
 
     println!("WALLET_UNLOCKED=true");
 
-    let base_heartbeat = ProductionHeartbeatV1::from_node_state(&state, env!("CARGO_PKG_VERSION"), "laptop", &[]);
+    let base_heartbeat =
+        ProductionHeartbeatV1::from_node_state(&state, env!("CARGO_PKG_VERSION"), "laptop", &[]);
 
     if base_heartbeat.concurrency_limit != 1 {
         return Err("runner_capacity_gate_failed".into());
@@ -592,9 +602,7 @@ pub fn run_node_service(
         ) {
             Ok(poll) => poll,
 
-            Err(error)
-                if transient_node_transport_error_v1(&error) =>
-            {
+            Err(error) if transient_node_transport_error_v1(&error) => {
                 println!("POLL_TRANSIENT_ERROR={error}");
                 println!("POLL_RETRYING=true");
 
@@ -617,36 +625,27 @@ pub fn run_node_service(
         if poll.blocked {
             println!("TASK_CLAIMED=false");
             println!("POLL_BLOCKED=true");
-            println!("POLL_BLOCK_REASON={}", poll.block_reason.as_deref().unwrap_or("unspecified"));
-            println!("POLL_BLOCK_MESSAGE={}", poll.message.as_deref().unwrap_or(""));
+            println!(
+                "POLL_BLOCK_REASON={}",
+                poll.block_reason.as_deref().unwrap_or("unspecified")
+            );
+            println!(
+                "POLL_BLOCK_MESSAGE={}",
+                poll.message.as_deref().unwrap_or("")
+            );
             return Ok(());
         }
 
         let Some(task) = first_task(poll) else {
             if last_idle_heartbeat.elapsed() >= Duration::from_secs(15) {
-                match send_heartbeat(
-                    &http,
-                    &auth_client,
-                    &mut auth,
-                    &base_heartbeat,
-                ) {
+                match send_heartbeat(&http, &auth_client, &mut auth, &base_heartbeat) {
                     Ok(status) => {
-                        println!(
-                            "IDLE_HEARTBEAT_HTTP_STATUS={status}"
-                        );
+                        println!("IDLE_HEARTBEAT_HTTP_STATUS={status}");
                     }
 
-                    Err(error)
-                        if transient_node_transport_error_v1(
-                            &error
-                        ) =>
-                    {
-                        println!(
-                            "IDLE_HEARTBEAT_TRANSIENT_ERROR={error}"
-                        );
-                        println!(
-                            "IDLE_HEARTBEAT_RETRYING=true"
-                        );
+                    Err(error) if transient_node_transport_error_v1(&error) => {
+                        println!("IDLE_HEARTBEAT_TRANSIENT_ERROR={error}");
+                        println!("IDLE_HEARTBEAT_RETRYING=true");
                     }
 
                     Err(error) => return Err(error),
@@ -675,7 +674,12 @@ pub fn run_node_service(
         println!("TASK_CLAIMED=true");
         println!("TASK_ID={task_id}");
 
-        let mut active = ProductionHeartbeatV1::from_node_state(&state, env!("CARGO_PKG_VERSION"), "laptop", &[]);
+        let mut active = ProductionHeartbeatV1::from_node_state(
+            &state,
+            env!("CARGO_PKG_VERSION"),
+            "laptop",
+            &[],
+        );
 
         active.current_task_ids = vec![task_id.clone()];
 
@@ -702,10 +706,168 @@ pub fn run_node_service(
             }
         }
 
+        let provider_email_for_task_v1 = auth.provider_email.clone();
+
+        let stream_requested_v1 = task_realtime_neural_streaming_v1(&task);
+
+        let mut stream_enabled_v1 = false;
+        let mut stream_sequence_v1 = 0_u64;
+        let mut stream_buffer_v1 = String::new();
+        let mut stream_last_flush_v1 = Instant::now();
+
+        // ASYNC_NODE_STREAM_SENDER_V1
+        //
+        // The llama.cpp SSE reader only queues frames.
+        // A dedicated worker performs authenticated HTTP delivery so
+        // network latency cannot stall local token generation.
+        let mut stream_sender_v1 = None;
+        let mut stream_worker_v1 = None;
+
+        if stream_requested_v1 {
+            let (sender_v1, receiver_v1) = mpsc::channel::<(String, u64, Value)>();
+
+            let task_id_for_stream_v1 = task.task_id.clone();
+
+            let provider_for_stream_v1 = provider_email_for_task_v1.clone();
+
+            let hardware_for_stream_v1 = hardware.clone();
+
+            let mut stream_auth_v1 = auth.clone();
+
+            let stream_http_v1 = Client::builder()
+                // NODE_STREAM_FRAME_TIMEOUT_V2
+                // Stream delivery runs on its own worker and must tolerate
+                // private Realtime subscription/auth setup on the first frame.
+                .timeout(Duration::from_secs(15))
+                .build()
+                .map_err(|_| "stream_http_client_build_failed".to_string())?;
+
+            let worker_v1 = thread::spawn(move || {
+                let stream_auth_client_v1 = match SupabaseAuthClient::from_env() {
+                    Ok(client) => client,
+
+                    Err(error) => {
+                        println!("STREAM_WORKER_AUTH_CLIENT_FAILED={error}");
+                        return;
+                    }
+                };
+
+                for (event_v1, sequence_v1, payload_v1) in receiver_v1 {
+                    match send_stream_frame_with_retry(
+                        &stream_http_v1,
+                        &stream_auth_client_v1,
+                        &mut stream_auth_v1,
+                        &task_id_for_stream_v1,
+                        &provider_for_stream_v1,
+                        &hardware_for_stream_v1,
+                        &event_v1,
+                        sequence_v1,
+                        payload_v1,
+                    ) {
+                        Ok(status) => {
+                            println!(
+                                "STREAM_FRAME_HTTP_STATUS={} EVENT={} SEQUENCE={}",
+                                status, event_v1, sequence_v1
+                            );
+                        }
+
+                        Err(error) => {
+                            println!(
+                                "STREAM_WORKER_FAILED={} EVENT={} SEQUENCE={}",
+                                error, event_v1, sequence_v1
+                            );
+                            println!("STREAMING_NON_FATAL=true");
+                            break;
+                        }
+                    }
+                }
+
+                println!("STREAM_WORKER_STOPPED=true");
+            });
+
+            stream_sender_v1 = Some(sender_v1);
+
+            stream_worker_v1 = Some(worker_v1);
+
+            stream_sequence_v1 = 1;
+
+            let queued_v1 = stream_sender_v1
+                .as_ref()
+                .map(|sender| {
+                    sender
+                        .send((
+                            "generation.started".into(),
+                            stream_sequence_v1,
+                            json!({
+                                "modelIdUsed":
+                                    active_selected_model,
+                                "requiredModel":
+                                    task.required_model
+                            }),
+                        ))
+                        .is_ok()
+                })
+                .unwrap_or(false);
+
+            if queued_v1 {
+                stream_enabled_v1 = true;
+
+                println!("STREAM_GENERATION_STARTED_QUEUED=true");
+            } else {
+                println!("STREAM_GENERATION_STARTED_QUEUED=false");
+            }
+        }
+
+        let use_streaming_execution_v1 = stream_enabled_v1;
+
+        let mut stream_callback_v1 = |delta: &str| {
+            if !stream_enabled_v1 {
+                return;
+            }
+
+            stream_buffer_v1.push_str(delta);
+
+            let should_flush_v1 = stream_buffer_v1.chars().count() >= 96
+                || stream_last_flush_v1.elapsed() >= Duration::from_millis(250)
+                || delta.contains('\n');
+
+            if !should_flush_v1 {
+                return;
+            }
+
+            let text_v1 = std::mem::take(&mut stream_buffer_v1);
+
+            stream_sequence_v1 += 1;
+
+            let queued_v1 = stream_sender_v1
+                .as_ref()
+                .map(|sender| {
+                    sender
+                        .send((
+                            "chunk".into(),
+                            stream_sequence_v1,
+                            json!({
+                                "text": text_v1
+                            }),
+                        ))
+                        .is_ok()
+                })
+                .unwrap_or(false);
+
+            if queued_v1 {
+                stream_last_flush_v1 = Instant::now();
+            } else {
+                println!("STREAM_CHUNK_QUEUE_FAILED=true");
+
+                stream_enabled_v1 = false;
+                stream_buffer_v1.clear();
+            }
+        };
+
         let submit_payload = build_task_submit_payload(
             &task,
             llama.as_ref(),
-            &auth.provider_email,
+            &provider_email_for_task_v1,
             &public_wallet.wallet_address,
             &hardware,
             private_key.as_str(),
@@ -713,7 +875,97 @@ pub fn run_node_service(
             active_capability.as_deref(),
             active_runtime.as_deref(),
             &runtime_acceleration,
+            use_streaming_execution_v1,
+            if use_streaming_execution_v1 {
+                Some(&mut stream_callback_v1 as &mut dyn FnMut(&str))
+            } else {
+                None
+            },
         )?;
+
+        drop(stream_callback_v1);
+
+        if (stream_enabled_v1 && !stream_buffer_v1.is_empty()) {
+            let text_v1 = std::mem::take(&mut stream_buffer_v1);
+
+            stream_sequence_v1 += 1;
+
+            let queued_v1 = stream_sender_v1
+                .as_ref()
+                .map(|sender| {
+                    sender
+                        .send((
+                            "chunk".into(),
+                            stream_sequence_v1,
+                            json!({
+                                "text": text_v1
+                            }),
+                        ))
+                        .is_ok()
+                })
+                .unwrap_or(false);
+
+            if !queued_v1 {
+                println!("STREAM_FINAL_CHUNK_QUEUE_FAILED=true");
+
+                stream_enabled_v1 = false;
+            }
+        }
+
+        if stream_enabled_v1 {
+            let inference_succeeded_v1 = submit_payload
+                .pointer("/payload/status")
+                .and_then(Value::as_str)
+                == Some("success");
+
+            stream_sequence_v1 += 1;
+
+            let terminal_event_v1 = if inference_succeeded_v1 {
+                "generation.completed"
+            } else {
+                "generation.error"
+            };
+
+            let terminal_payload_v1 = if inference_succeeded_v1 {
+                json!({
+                    "outputComplete": true
+                })
+            } else {
+                json!({
+                    "code":
+                        "neural_inference_failed"
+                })
+            };
+
+            let queued_v1 = stream_sender_v1
+                .as_ref()
+                .map(|sender| {
+                    sender
+                        .send((
+                            terminal_event_v1.into(),
+                            stream_sequence_v1,
+                            terminal_payload_v1,
+                        ))
+                        .is_ok()
+                })
+                .unwrap_or(false);
+
+            if !queued_v1 {
+                println!("STREAM_TERMINAL_QUEUE_FAILED=true");
+            }
+        }
+
+        // Closing the sender drains the queue and stops the worker.
+        // Join before submit-result so generation.completed cannot
+        // arrive after the backend has already emitted verified ready.
+        drop(stream_sender_v1);
+
+        if let Some(worker_v1) = stream_worker_v1 {
+            if worker_v1.join().is_err() {
+                println!("STREAM_WORKER_JOIN_FAILED=true");
+                println!("STREAMING_NON_FATAL=true");
+            }
+        }
 
         let outcome = submit_with_retry(&http, &auth_client, &mut auth, &submit_payload)?;
 
@@ -752,6 +1004,8 @@ pub fn run_node_service(
                 active_capability.as_deref(),
                 active_runtime.as_deref(),
                 &runtime_acceleration,
+                false,
+                None,
             )?;
 
             let correction_outcome = submit_with_retry(&http, &auth_client, &mut auth, &payload)?;
@@ -764,7 +1018,12 @@ pub fn run_node_service(
             println!("CORRECTION_REQUESTED=false");
         }
 
-        let clear = ProductionHeartbeatV1::from_node_state(&state, env!("CARGO_PKG_VERSION"), "laptop", &[]);
+        let clear = ProductionHeartbeatV1::from_node_state(
+            &state,
+            env!("CARGO_PKG_VERSION"),
+            "laptop",
+            &[],
+        );
 
         match send_heartbeat(&http, &auth_client, &mut auth, &clear) {
             Ok(status) => {

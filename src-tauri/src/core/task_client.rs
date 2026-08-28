@@ -7,6 +7,25 @@ use std::env;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct StreamingContract {
+    #[serde(default)]
+    pub version: Option<String>,
+
+    #[serde(default)]
+    pub requested_mode: Option<String>,
+
+    #[serde(default)]
+    pub effective_mode: Option<String>,
+
+    #[serde(default)]
+    pub transport: Option<String>,
+
+    #[serde(default)]
+    pub raw_chunks_persisted: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskEnvelope {
     pub task_id: Value,
 
@@ -39,6 +58,9 @@ pub struct TaskEnvelope {
 
     #[serde(default)]
     pub max_output_tokens: Option<u64>,
+
+    #[serde(default)]
+    pub streaming_contract: Option<StreamingContract>,
 }
 
 impl TaskEnvelope {
@@ -120,10 +142,8 @@ pub fn build_poll_url(
         .trim_end_matches('/')
         .to_string();
 
-    let mut url = Url::parse(
-        &format!("{base}/swarm/get-jobs")
-    )
-    .map_err(|_| "get_jobs_url_invalid".to_string())?;
+    let mut url = Url::parse(&format!("{base}/swarm/get-jobs"))
+        .map_err(|_| "get_jobs_url_invalid".to_string())?;
 
     url.query_pairs_mut()
         .append_pair("hardwareId", hardware_id)
@@ -157,13 +177,8 @@ pub fn build_submit_result(
     let score = 100;
     let task_id = task.task_id_text();
 
-    let signature = result_signing::sign_result(
-        &task_id,
-        score,
-        &file_hash,
-        hardware_id,
-        private_key,
-    )?;
+    let signature =
+        result_signing::sign_result(&task_id, score, &file_hash, hardware_id, private_key)?;
 
     Ok(SubmitResultEnvelope {
         file_hash,
@@ -178,14 +193,10 @@ pub fn build_submit_result(
             ai_translation: None,
             status: "success".into(),
             latency_ms,
-            required_model: task
-                .required_model
-                .clone()
-                .unwrap_or_default(),
+            required_model: task.required_model.clone().unwrap_or_default(),
             model_id_used: model_id_used.to_string(),
             runtime: runtime.to_string(),
-            runtime_acceleration:
-                runtime_acceleration.to_string(),
+            runtime_acceleration: runtime_acceleration.to_string(),
         },
     })
 }
@@ -196,9 +207,8 @@ mod tests {
 
     #[test]
     fn parses_production_task_envelope() {
-        let parsed: GetJobsResponse =
-            serde_json::from_str(
-                r#"{
+        let parsed: GetJobsResponse = serde_json::from_str(
+            r#"{
                     "task":{
                         "taskId":2001,
                         "prompt":"Say hello",
@@ -214,8 +224,8 @@ mod tests {
                         "maxOutputTokens":128
                     }]
                 }"#,
-            )
-            .unwrap();
+        )
+        .unwrap();
 
         assert_eq!(parsed.tasks.len(), 1);
         assert_eq!(parsed.tasks[0].task_id_text(), "2001");
@@ -227,16 +237,15 @@ mod tests {
             task_id: Value::from(2001),
             client_name: None,
             prompt: "Say hello".into(),
-            required_model:
-                Some("Neural-Inference-3B".into()),
-            selected_model:
-                Some("qwen2.5:3b".into()),
+            required_model: Some("Neural-Inference-3B".into()),
+            selected_model: Some("qwen2.5:3b".into()),
             model_route_reason: None,
             model_routing_version: None,
             verification_seed: None,
             checkpoint_indices: vec![],
             verification_method: None,
             max_output_tokens: Some(128),
+            streaming_contract: None,
         };
 
         let result = build_submit_result(

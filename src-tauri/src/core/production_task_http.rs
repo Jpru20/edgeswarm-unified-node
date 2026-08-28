@@ -9,13 +9,7 @@ use reqwest::{
     header::{HeaderValue, AUTHORIZATION},
 };
 use serde_json::Value;
-use std::{
-    env,
-    fs,
-    path::PathBuf,
-    thread,
-    time::Duration,
-};
+use std::{env, fs, path::PathBuf, thread, time::Duration};
 
 #[derive(Clone)]
 pub struct LocalAuth {
@@ -35,19 +29,15 @@ fn auth_path() -> Result<PathBuf, String> {
         }
     }
 
-    Ok(
-        adapters::app_data_dir()
-            .join("auth_session.json")
-    )
+    Ok(adapters::app_data_dir().join("auth_session.json"))
 }
 
 pub fn read_auth() -> Result<LocalAuth, String> {
-    let raw = fs::read_to_string(auth_path()?)
-        .map_err(|_| "auth_session_read_failed".to_string())?;
+    let raw =
+        fs::read_to_string(auth_path()?).map_err(|_| "auth_session_read_failed".to_string())?;
 
     let value: Value =
-        serde_json::from_str(&raw)
-            .map_err(|_| "auth_session_parse_failed".to_string())?;
+        serde_json::from_str(&raw).map_err(|_| "auth_session_parse_failed".to_string())?;
 
     if value.get("mfaVerified").and_then(Value::as_bool) != Some(true) {
         return Err("auth_session_mfa_not_verified".into());
@@ -78,9 +68,8 @@ pub fn read_auth() -> Result<LocalAuth, String> {
 }
 
 fn bearer(token: &str) -> Result<HeaderValue, String> {
-    let mut value =
-        HeaderValue::from_str(&format!("Bearer {token}"))
-            .map_err(|_| "bearer_header_invalid".to_string())?;
+    let mut value = HeaderValue::from_str(&format!("Bearer {token}"))
+        .map_err(|_| "bearer_header_invalid".to_string())?;
 
     value.set_sensitive(true);
     Ok(value)
@@ -93,9 +82,7 @@ fn api_base() -> String {
         .to_string()
 }
 
-pub fn refresh_auth(
-    client: &SupabaseAuthClient,
-) -> Result<LocalAuth, String> {
+pub fn refresh_auth(client: &SupabaseAuthClient) -> Result<LocalAuth, String> {
     client.force_refresh_session()?;
     read_auth()
 }
@@ -180,6 +167,101 @@ pub fn poll_once(
     Err("task_poll_auth_failed_after_refresh".into())
 }
 
+// NODE_STREAM_FRAME_HTTP_V1
+// Sends transient generation frames using the same authenticated
+// provider session as get-jobs and submit-result.
+pub fn send_stream_frame_with_retry(
+    http: &Client,
+    auth_client: &SupabaseAuthClient,
+    auth: &mut LocalAuth,
+    task_id: &Value,
+    provider_email: &str,
+    hardware_id: &str,
+    event: &str,
+    sequence: u64,
+    payload: Value,
+) -> Result<u16, String> {
+    let body = serde_json::json!({
+        "taskId": task_id,
+        "providerEmail": provider_email,
+        "hardwareId": hardware_id,
+        "event": event,
+        "sequence": sequence,
+        "payload": payload
+    });
+
+    let mut auth_refreshed = false;
+
+    for attempt in 1..=2 {
+        let response = match http
+            .post(format!("{}/enterprise/task-stream-frame", api_base()))
+            .header(AUTHORIZATION, bearer(&auth.access_token)?)
+            .json(&body)
+            .send()
+        {
+            Ok(response) => response,
+
+            Err(error) if attempt < 2 => {
+                println!(
+                    "STREAM_FRAME_SEND_RETRY={} ATTEMPT={}",
+                    if error.is_timeout() {
+                        "timeout"
+                    } else {
+                        "network"
+                    },
+                    attempt
+                );
+
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+
+            Err(error) => {
+                return Err(if error.is_timeout() {
+                    "stream_frame_timeout"
+                } else {
+                    "stream_frame_network_failed"
+                }
+                .into());
+            }
+        };
+
+        let status = response.status().as_u16();
+
+        if (status == 401 && !auth_refreshed) {
+            *auth = refresh_auth(auth_client)?;
+
+            auth_refreshed = true;
+            continue;
+        }
+
+        if status == 426 {
+            return Err("node_update_required_http_426".into());
+        }
+
+        if matches!(status, 200 | 201 | 202) {
+            return Ok(status);
+        }
+
+        let retryable = matches!(status, 408 | 425 | 429) || (500..=599).contains(&status);
+
+        if retryable && attempt < 2 {
+            thread::sleep(Duration::from_millis(100));
+            continue;
+        }
+
+        let raw = response.text().unwrap_or_default();
+
+        return Err(format!(
+            "stream_frame_http_{}:{}",
+            status,
+            raw.chars().take(240).collect::<String>()
+        ));
+    }
+
+    Err("stream_frame_retry_exhausted".into())
+}
+
 pub fn submit_with_retry(
     http: &Client,
     auth_client: &SupabaseAuthClient,
@@ -190,10 +272,7 @@ pub fn submit_with_retry(
 
     for attempt in 1..=3 {
         let response = match http
-            .post(format!(
-                "{}/enterprise/submit-result",
-                api_base()
-            ))
+            .post(format!("{}/enterprise/submit-result", api_base()))
             .header(AUTHORIZATION, bearer(&auth.access_token)?)
             .json(payload)
             .send()
@@ -206,9 +285,7 @@ pub fn submit_with_retry(
             }
 
             Err(_) => {
-                return Err(
-                    "result_submit_network_failed_after_retries".into()
-                );
+                return Err("result_submit_network_failed_after_retries".into());
             }
         };
 
@@ -226,17 +303,13 @@ pub fn submit_with_retry(
 
         let raw = response.text().unwrap_or_default();
 
-        let body =
-            serde_json::from_str::<Value>(&raw)
-                .unwrap_or(Value::Null);
+        let body = serde_json::from_str::<Value>(&raw).unwrap_or(Value::Null);
 
         if matches!(status, 200 | 201 | 202) {
             return Ok(SubmitOutcome { status, body });
         }
 
-        let retryable =
-            matches!(status, 408 | 425 | 429)
-            || (500..=599).contains(&status);
+        let retryable = matches!(status, 408 | 425 | 429) || (500..=599).contains(&status);
 
         if retryable && attempt < 3 {
             thread::sleep(Duration::from_secs(attempt));
