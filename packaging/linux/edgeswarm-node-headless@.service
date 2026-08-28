@@ -8,8 +8,7 @@ ConditionPathExists=/etc/edgeswarm-node/%i/wallet-password
 [Service]
 Type=simple
 User=%i
-WorkingDirectory=%h
-Environment=HOME=%h
+WorkingDirectory=~
 EnvironmentFile=/etc/edgeswarm-node/%i/node.env
 LoadCredential=edgeswarm-wallet-password:/etc/edgeswarm-node/%i/wallet-password
 ExecStart=/usr/lib/edgeswarm-node/edgeswarm-node-headless
