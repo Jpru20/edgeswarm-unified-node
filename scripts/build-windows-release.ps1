@@ -1,4 +1,4 @@
-﻿param([string]$ConfigPath = '',[string]$TargetDir = '')
+param([string]$ConfigPath = '',[string]$TargetDir = '')
 $ErrorActionPreference = 'Stop'
 $Repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $Repo
@@ -26,7 +26,34 @@ $env:CARGO_TARGET_DIR = $TargetDir
 Write-Host 'RELEASE_CONFIG_VALID=PASS'
 Write-Host "SOURCE_COMMIT=$Head"
 Write-Host "TARGET_DIR=$TargetDir"
-npm.cmd run tauri build
+$RuntimeSource = Join-Path $env:USERPROFILE "edgeswarm-runtime-build\release\windows-x64\current"
+$RuntimeExe = Join-Path $RuntimeSource "llama-server.exe"
+$RuntimeManifest = Get-Content (Join-Path $Repo "packaging\runtime\llama-runtime-v1.json") -Raw | ConvertFrom-Json
+$ExpectedRuntimeSha = [string]$RuntimeManifest.targets.'windows-x64'.validatedRuntimeSha256
+
+if (!(Test-Path $RuntimeExe)) { throw "windows_llama_runtime_missing" }
+if ([string]::IsNullOrWhiteSpace($ExpectedRuntimeSha)) { throw "windows_llama_manifest_sha_missing" }
+
+$ActualRuntimeSha = (Get-FileHash $RuntimeExe -Algorithm SHA256).Hash.ToLower()
+if ($ActualRuntimeSha -ne $ExpectedRuntimeSha.ToLower()) {
+    throw "windows_llama_runtime_sha_mismatch"
+}
+
+$RuntimeConfig = Join-Path $TargetDir "tauri.runtime.config.json"
+$SourceJson = ($RuntimeSource -replace '\\','/') + '/*'
+
+@{
+    bundle = @{
+        resources = @{
+            $SourceJson = "runtime/current/"
+        }
+    }
+} | ConvertTo-Json -Depth 8 | Set-Content $RuntimeConfig
+
+Write-Host "WINDOWS_LLAMA_RUNTIME_SHA256=$ActualRuntimeSha"
+Write-Host "WINDOWS_LLAMA_RUNTIME_STAGED=PASS"
+
+npm.cmd run tauri build -- --config $RuntimeConfig
 if ($LASTEXITCODE -ne 0) { throw "tauri_build_failed_$LASTEXITCODE" }
 $Exe = Join-Path $TargetDir 'release\edgeswarm-unified-node.exe'
 $Msi = Get-ChildItem (Join-Path $TargetDir 'release\bundle\msi') -Filter '*.msi' | Select-Object -First 1
@@ -39,4 +66,3 @@ Write-Host 'COMPILED_CONFIG_VERIFIED=PASS'
 & (Join-Path $PSScriptRoot 'verify-windows-msi-payload.ps1') -Msi $Msi.FullName -TargetDir $TargetDir
 foreach ($File in @($Exe,$Msi.FullName,$Nsis.FullName)) { $Item = Get-Item $File; $Hash = (Get-FileHash $File -Algorithm SHA256).Hash; $Sig = (Get-AuthenticodeSignature $File).Status; Write-Host "ARTIFACT=$($Item.FullName)"; Write-Host "BYTES=$($Item.Length)"; Write-Host "SHA256=$Hash"; Write-Host "SIGNATURE=$Sig" }
 Write-Host 'RELEASE_BUILD_COMPLETE=PASS'
-

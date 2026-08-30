@@ -259,6 +259,11 @@ pub fn resolve_llama_server_path_v1() -> Result<PathBuf, String> {
                 executable_dir
                     .join("runtime")
                     .join(filename),
+                executable_dir
+                    .join("resources")
+                    .join("runtime")
+                    .join("current")
+                    .join(filename),
             ];
 
             if let Some(path) =
