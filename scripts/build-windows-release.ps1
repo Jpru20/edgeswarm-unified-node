@@ -22,6 +22,7 @@ Remove-Item Env:SUPABASE_ANON_KEY -ErrorAction SilentlyContinue
 Remove-Item Env:EDGESWARM_SUPABASE_URL -ErrorAction SilentlyContinue
 Remove-Item Env:EDGESWARM_SUPABASE_ANON_KEY -ErrorAction SilentlyContinue
 if ([string]::IsNullOrWhiteSpace($TargetDir)) { $Short = (git rev-parse --short=7 HEAD).Trim(); $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'; $TargetDir = Join-Path $env:USERPROFILE "edgeswarm-release-build-$Short-$Stamp" }
+New-Item -ItemType Directory -Force -Path $TargetDir | Out-Null
 $env:CARGO_TARGET_DIR = $TargetDir
 Write-Host 'RELEASE_CONFIG_VALID=PASS'
 Write-Host "SOURCE_COMMIT=$Head"
