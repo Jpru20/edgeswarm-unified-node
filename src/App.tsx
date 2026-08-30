@@ -95,6 +95,7 @@ function App() {
   const ledgerSyncInFlightRef = useRef(false);
   const lastLedgerTriggerRef = useRef("");
   const consoleRef = useRef<HTMLElement | null>(null);
+  const shouldFollowConsoleRef = useRef(true);
 
   async function loadNodeState() {
     const state = await invoke<NodeState>("get_node_state");
@@ -235,8 +236,10 @@ function App() {
   }, [screen, serviceStatus.logs, syncLedger]);
 
   useEffect(() => {
-    if (consoleRef.current) {
-      consoleRef.current.scrollTop = consoleRef.current.scrollHeight;
+    const consoleElement = consoleRef.current;
+
+    if (consoleElement && shouldFollowConsoleRef.current) {
+      consoleElement.scrollTop = consoleElement.scrollHeight;
     }
   }, [serviceStatus.logs, serviceStatus.lastError]);
 
@@ -466,7 +469,17 @@ function App() {
             : "START NODE"}
       </button>
 
-      <section className="console" ref={consoleRef}>
+      <section
+        className="console"
+        ref={consoleRef}
+        onScroll={(event) => {
+          const element = event.currentTarget;
+          const distanceFromBottom =
+            element.scrollHeight - element.scrollTop - element.clientHeight;
+
+          shouldFollowConsoleRef.current = distanceFromBottom < 32;
+        }}
+      >
         <div>&gt; System Initialized. Identity Verified via Supabase Auth.</div>
         <div>&gt; Running Edge Swarm Provider Node v{appVersion || "..."}</div>
         <div>
