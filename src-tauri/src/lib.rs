@@ -153,10 +153,12 @@ fn bootstrap_authenticated_device_wallet_v1(
                 return Err("wallet_public_identity_hardware_mismatch".into());
             }
         }
-        WalletRowDecision::ClaimLegacy { .. } => {
-            return Err("legacy_wallet_claim_requires_separate_review".into());
-        }
-        WalletRowDecision::CreateDevice => {
+        // LEGACY_WALLET_PRESERVE_AND_CREATE_DEVICE_V1
+        // A blank-hardware legacy/Android wallet remains attached to
+        // its existing device. Create a separate wallet for this
+        // authenticated desktop hardware instead of claiming it.
+        WalletRowDecision::ClaimLegacy { .. }
+        | WalletRowDecision::CreateDevice => {
             let wallet = DeviceWallet::generate()?;
             let encrypted = wallet_vault::encrypt(
                 wallet.private_key(), password, email,
