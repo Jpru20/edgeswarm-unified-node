@@ -245,6 +245,31 @@ pub fn resolve_llama_server_path_v1() -> Result<PathBuf, String> {
     }
 
     let filename = runtime_executable_filename_v1();
+
+    // UNIFIED_BUNDLED_LLAMA_RUNTIME_V1
+    // Each supported release ships its native llama runtime under
+    // runtime/current beside the EdgeSwarm executable.
+    if let Ok(executable) = env::current_exe() {
+        if let Some(executable_dir) = executable.parent() {
+            let packaged = [
+                executable_dir
+                    .join("runtime")
+                    .join("current")
+                    .join(filename),
+                executable_dir
+                    .join("runtime")
+                    .join(filename),
+            ];
+
+            if let Some(path) =
+                packaged.into_iter().find(|path| path.is_file())
+            {
+                return Ok(path);
+            }
+        }
+    }
+
+    // Preserve the existing locally provisioned runtime fallback.
     let runtime_root = adapters::app_data_dir().join("runtime");
 
     let candidates = [

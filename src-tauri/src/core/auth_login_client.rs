@@ -187,9 +187,23 @@ impl SupabaseLoginClient {
             .map_err(|_| "mfa_verify_request_failed".to_string())?;
 
         if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let body = response.text().unwrap_or_default();
+
+            let detail = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|value| {
+                    value.get("error_code")
+                        .or_else(|| value.get("code"))
+                        .or_else(|| value.get("msg"))
+                        .or_else(|| value.get("message"))
+                        .and_then(|item| item.as_str())
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| "verification_rejected".to_string());
+
             return Err(format!(
-                "mfa_verify_http_{}",
-                response.status().as_u16()
+                "mfa_verify_http_{status}:{detail}"
             ));
         }
 

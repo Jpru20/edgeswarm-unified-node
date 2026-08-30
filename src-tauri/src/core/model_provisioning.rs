@@ -1,14 +1,43 @@
 use crate::{adapters, core::certificate_match::sha256_file};
-use reqwest::{blocking::Client, header::RANGE, StatusCode};
+use reqwest::{blocking::Client, header::{CONTENT_RANGE, RANGE}, StatusCode};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::fs::File;
+use std::io::copy;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::{
     env,
     fs::{self, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelDownloadProgressV1 {
+    pub status: String,
+    pub filename: String,
+    pub downloaded_bytes: u64,
+    pub total_bytes: u64,
+    pub percent: f64,
+    pub bytes_per_second: f64,
+    pub eta_seconds: Option<u64>,
+}
+
+static MODEL_DOWNLOAD_PROGRESS: OnceLock<Mutex<Option<ModelDownloadProgressV1>>> =
+    OnceLock::new();
+
+fn progress_store_v1() -> &'static Mutex<Option<ModelDownloadProgressV1>> {
+    MODEL_DOWNLOAD_PROGRESS.get_or_init(|| Mutex::new(None))
+}
+
+pub fn model_download_progress_v1() -> Option<ModelDownloadProgressV1> {
+    progress_store_v1().lock().ok().and_then(|v| v.clone())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelArtifactV1 {
@@ -112,7 +141,18 @@ pub fn parse_model_recommendation_v1(value: &Value) -> Result<ModelRecommendatio
         files.push(artifact_from_value(model)?);
     }
 
-    if files.is_empty() {
+    let should_download = value
+        .get("shouldDownload")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let deterministic_only = model
+        .get("capability")
+        .and_then(Value::as_str)
+        .map(|v| v.eq_ignore_ascii_case("Deterministic-Only"))
+        .unwrap_or(false);
+
+    if files.is_empty() && !(deterministic_only && !should_download) {
         return Err("recommended_model_files_missing".into());
     }
 
@@ -128,10 +168,7 @@ pub fn parse_model_recommendation_v1(value: &Value) -> Result<ModelRecommendatio
             .unwrap_or("llama.cpp")
             .to_string(),
         level: model.get("level").and_then(Value::as_u64).unwrap_or(0),
-        should_download: value
-            .get("shouldDownload")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
+        should_download,
         files,
     })
 }
@@ -181,6 +218,59 @@ pub fn verify_model_artifact_v1(root: &Path, artifact: &ModelArtifactV1) -> bool
         .unwrap_or(false)
 }
 
+fn update_download_progress_v1(filename: &str, downloaded: u64, total: u64, started: Instant, session_start: u64, status: &str) {
+    let elapsed = started.elapsed().as_secs_f64().max(0.001);
+    let speed = downloaded.saturating_sub(session_start) as f64 / elapsed;
+    let percent = if total == 0 { 0.0 } else { downloaded as f64 * 100.0 / total as f64 };
+    let eta = if speed > 1.0 { Some((total.saturating_sub(downloaded) as f64 / speed).ceil() as u64) } else { None };
+    if let Ok(mut slot) = progress_store_v1().lock() {
+        *slot = Some(ModelDownloadProgressV1 { status: status.into(), filename: filename.into(), downloaded_bytes: downloaded, total_bytes: total, percent, bytes_per_second: speed, eta_seconds: eta });
+    }
+}
+
+fn remote_artifact_size_v1(
+    client: &Client,
+    artifact: &ModelArtifactV1,
+) -> Result<u64, String> {
+    let response = client
+        .get(&artifact.download_url)
+        .header(RANGE, "bytes=0-0")
+        .send()
+        .map_err(|e| format!("model_download_size_probe_failed:{e}"))?;
+
+    if response.status() != StatusCode::PARTIAL_CONTENT {
+        return Err(format!(
+            "model_download_size_probe_http_{}",
+            response.status().as_u16()
+        ));
+    }
+
+    let raw = response
+        .headers()
+        .get(CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| "model_download_size_content_range_missing".to_string())?;
+
+    let total = raw
+        .strip_prefix("bytes 0-0/")
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| format!("model_download_size_content_range_invalid:{raw}"))?;
+
+    if total == 0 {
+        return Err("model_download_size_zero".into());
+    }
+
+    Ok(total)
+}
+
+pub fn set_model_download_stage_v1(status: &str) {
+    if let Ok(mut slot) = progress_store_v1().lock() {
+        if let Some(progress) = slot.as_mut() {
+            progress.status = status.to_string();
+        }
+    }
+}
+
 fn blocked_large_model_v1(recommendation: &ModelRecommendationV1) -> bool {
     recommendation.level >= 6
         || recommendation.model_id.to_ascii_lowercase().contains("70b")
@@ -192,113 +282,193 @@ fn blocked_large_model_v1(recommendation: &ModelRecommendationV1) -> bool {
             .contains("70b")
 }
 
+fn validate_content_range_v1(
+    response: &reqwest::blocking::Response,
+    start: u64,
+    end: u64,
+    total: u64,
+) -> Result<(), String> {
+    let actual = response.headers()
+        .get(CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| "model_range_content_range_missing".to_string())?;
+    let expected = format!("bytes {start}-{end}/{total}");
+    if actual.trim() != expected {
+        return Err(format!(
+            "model_range_content_range_mismatch:expected={expected}:actual={actual}"
+        ));
+    }
+    let expected_len = end - start + 1;
+    if response.content_length() != Some(expected_len) {
+        return Err("model_range_content_length_mismatch".into());
+    }
+    Ok(())
+}
+
+fn download_range_part_v1(
+    client: Client, artifact: ModelArtifactV1, path: PathBuf,
+    start: u64, end: u64, progress: Arc<AtomicU64>,
+    total: u64, session_start: u64, started: Instant,
+) -> Result<(), String> {
+    let expected = end - start + 1;
+    for attempt in 1..=5u64 {
+        let existing = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        if existing == expected { return Ok(()); }
+        if existing > expected {
+            let _ = fs::remove_file(&path);
+            continue;
+        }
+        let from = start + existing;
+        let result = (|| -> Result<(), String> {
+            let mut response = client.get(&artifact.download_url)
+                .header(RANGE, format!("bytes={from}-{end}")).send()
+                .map_err(|e| format!("model_range_request_failed:{e}"))?;
+            if response.status() != StatusCode::PARTIAL_CONTENT {
+                return Err(format!("model_range_http_{}", response.status().as_u16()));
+            }
+            validate_content_range_v1(&response, from, end, total)?;
+            let mut out = OpenOptions::new().create(true).append(true).open(&path)
+                .map_err(|e| format!("model_range_open_failed:{e}"))?;
+            let mut written = existing;
+            let mut buffer = vec![0u8; 1024 * 1024];
+            while written < expected {
+                let n = response.read(&mut buffer)
+                    .map_err(|e| format!("model_range_read_failed:{e}"))?;
+                if n == 0 { break; }
+                let take = n.min((expected - written) as usize);
+                out.write_all(&buffer[..take])
+                    .map_err(|e| format!("model_range_write_failed:{e}"))?;
+                written += take as u64;
+                let done = progress.fetch_add(take as u64, AtomicOrdering::Relaxed) + take as u64;
+                update_download_progress_v1(&artifact.filename, done, total, started, session_start, "downloading");
+            }
+            out.flush().map_err(|e| format!("model_range_flush_failed:{e}"))?;
+            if written != expected { return Err("model_range_incomplete".into()); }
+            Ok(())
+        })();
+        if result.is_ok() { return result; }
+        if attempt < 5 { thread::sleep(Duration::from_secs((attempt * 2).min(10))); }
+    }
+    Err("model_range_retries_exhausted".into())
+}
+
+fn assemble_verified_model_v1(
+    root: &Path, artifact: &ModelArtifactV1, prefix: &Path,
+    parts: &[PathBuf], total: u64, started: Instant, session_start: u64,
+) -> Result<PathBuf, String> {
+    let final_path = root.join(&artifact.filename);
+    let assembly = root.join(format!("{}.download.assembled", artifact.filename));
+    let _ = fs::remove_file(&assembly);
+    let mut out = File::create(&assembly)
+        .map_err(|e| format!("model_assembly_create_failed:{e}"))?;
+    if prefix.is_file() {
+        let mut input = File::open(prefix)
+            .map_err(|e| format!("model_prefix_open_failed:{e}"))?;
+        copy(&mut input, &mut out).map_err(|e| format!("model_prefix_copy_failed:{e}"))?;
+    }
+    for part in parts {
+        let mut input = File::open(part)
+            .map_err(|e| format!("model_part_open_failed:{e}"))?;
+        copy(&mut input, &mut out).map_err(|e| format!("model_part_copy_failed:{e}"))?;
+    }
+    out.flush().map_err(|e| format!("model_assembly_flush_failed:{e}"))?;
+    if fs::metadata(&assembly).map(|m| m.len()).unwrap_or(0) != total {
+        return Err("model_assembly_size_mismatch".into());
+    }
+    update_download_progress_v1(&artifact.filename, total, total, started, session_start, "verifying");
+    let actual = sha256_file(&assembly)?;
+    if !actual.eq_ignore_ascii_case(&artifact.sha256) {
+        set_model_download_stage_v1("error");
+        let _ = fs::remove_file(&assembly);
+        let _ = fs::remove_file(prefix);
+        for part in parts {
+            let _ = fs::remove_file(part);
+        }
+        let manifest = root.join(format!(
+            "{}.download.sha256",
+            artifact.filename
+        ));
+        let _ = fs::remove_file(manifest);
+        return Err(format!(
+            "model_sha256_mismatch:expected={}:actual={}",
+            artifact.sha256,
+            actual
+        ));
+    }
+    fs::rename(&assembly, &final_path)
+        .map_err(|e| format!("model_atomic_install_failed:{e}"))?;
+    let _ = fs::remove_file(prefix);
+    for part in parts { let _ = fs::remove_file(part); }
+    update_download_progress_v1(&artifact.filename, total, total, started, session_start, "installed");
+    Ok(final_path)
+}
+
 fn download_artifact_v1(
-    client: &Client,
-    root: &Path,
-    artifact: &ModelArtifactV1,
+    client: &Client, root: &Path, artifact: &ModelArtifactV1,
 ) -> Result<PathBuf, String> {
     fs::create_dir_all(root).map_err(|e| format!("model_directory_failed:{e}"))?;
+    if verify_model_artifact_v1(root, artifact) { return Ok(root.join(&artifact.filename)); }
 
-    let final_path = root.join(&artifact.filename);
-    let temp_path = root.join(format!("{}.download", artifact.filename));
+    let prefix = root.join(format!("{}.download", artifact.filename));
+    let manifest = root.join(format!("{}.download.sha256", artifact.filename));
+    let assembly = root.join(format!("{}.download.assembled", artifact.filename));
 
-    if verify_model_artifact_v1(root, artifact) {
-        return Ok(final_path);
+    let checkpoint_valid = fs::read_to_string(&manifest).ok()
+        .map(|v| v.trim().eq_ignore_ascii_case(&artifact.sha256)) == Some(true);
+    let legacy_checkpoint = !manifest.exists() && prefix.is_file();
+
+    if legacy_checkpoint {
+        fs::write(&manifest, &artifact.sha256)
+            .map_err(|e| format!("model_checkpoint_manifest_failed:{e}"))?;
+    } else if !checkpoint_valid {
+        let _ = fs::remove_file(&prefix);
+        let _ = fs::remove_file(&assembly);
+        for i in 0..8 { let _ = fs::remove_file(root.join(format!("{}.download.part-{i}", artifact.filename))); }
+        fs::write(&manifest, &artifact.sha256)
+            .map_err(|e| format!("model_checkpoint_manifest_failed:{e}"))?;
     }
 
-    if final_path.exists() {
-        fs::remove_file(&final_path).map_err(|e| format!("invalid_model_remove_failed:{e}"))?;
+    let total = remote_artifact_size_v1(client, artifact)?;
+    if total == 0 {
+        return Err("model_download_size_zero".into());
+    }
+    let mut prefix_len = fs::metadata(&prefix).map(|m| m.len()).unwrap_or(0);
+    if prefix_len > total { let _ = fs::remove_file(&prefix); prefix_len = 0; }
+
+    let remaining = total.saturating_sub(prefix_len);
+    let workers = if remaining == 0 { 0 } else { 4u64.min(remaining) };
+    let chunk = if workers == 0 { 0 } else { (remaining + workers - 1) / workers };
+    let mut parts = Vec::new();
+
+    for i in 0..workers {
+        let start = prefix_len + i * chunk;
+        if start >= total { break; }
+        let end = (start + chunk - 1).min(total - 1);
+        let path = root.join(format!("{}.download.part-{i}", artifact.filename));
+        let expected = end - start + 1;
+        if fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > expected { let _ = fs::remove_file(&path); }
+        parts.push((path, start, end));
     }
 
-    let mut last_error = "model_download_failed".to_string();
+    let session_start = prefix_len + parts.iter()
+        .map(|(p,_,_)| fs::metadata(p).map(|m| m.len()).unwrap_or(0)).sum::<u64>();
+    let progress = Arc::new(AtomicU64::new(session_start));
+    let started = Instant::now();
+    update_download_progress_v1(&artifact.filename, session_start, total, started, session_start, "downloading");
 
-    for attempt in 1..=5u64 {
-        let result = (|| -> Result<PathBuf, String> {
-            let resume_from = fs::metadata(&temp_path).map(|m| m.len()).unwrap_or(0);
-
-            let mut request = client.get(&artifact.download_url);
-
-            if resume_from > 0 {
-                request = request.header(RANGE, format!("bytes={resume_from}-"));
-            }
-
-            let mut response = request
-                .send()
-                .map_err(|e| format!("model_download_request_failed:{e}"))?;
-
-            if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
-                let _ = fs::remove_file(&temp_path);
-                return Err("model_resume_range_rejected".into());
-            }
-
-            if resume_from > 0 && response.status() == StatusCode::OK {
-                let _ = fs::remove_file(&temp_path);
-                return Err("model_resume_ignored_restart".into());
-            }
-
-            if response.status() != StatusCode::OK
-                && response.status() != StatusCode::PARTIAL_CONTENT
-            {
-                return Err(format!(
-                    "model_download_http_{}",
-                    response.status().as_u16()
-                ));
-            }
-
-            let mut output = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .append(resume_from > 0)
-                .truncate(resume_from == 0)
-                .open(&temp_path)
-                .map_err(|e| format!("model_temp_open_failed:{e}"))?;
-
-            let mut buffer = vec![0u8; 1024 * 1024];
-
-            loop {
-                let count = response
-                    .read(&mut buffer)
-                    .map_err(|e| format!("model_download_read_failed:{e}"))?;
-
-                if count == 0 {
-                    break;
-                }
-
-                output
-                    .write_all(&buffer[..count])
-                    .map_err(|e| format!("model_download_write_failed:{e}"))?;
-            }
-
-            output
-                .flush()
-                .map_err(|e| format!("model_download_flush_failed:{e}"))?;
-
-            let actual = sha256_file(&temp_path)?;
-
-            if !actual.eq_ignore_ascii_case(&artifact.sha256) {
-                let _ = fs::remove_file(&temp_path);
-                return Err("model_sha256_mismatch".into());
-            }
-
-            fs::rename(&temp_path, &final_path)
-                .map_err(|e| format!("model_atomic_install_failed:{e}"))?;
-
-            Ok(final_path.clone())
-        })();
-
-        match result {
-            Ok(path) => return Ok(path),
-            Err(error) => {
-                last_error = error;
-
-                if attempt < 5 {
-                    thread::sleep(Duration::from_secs((attempt * 2).min(10)));
-                }
-            }
-        }
+    let mut handles = Vec::new();
+    for (path, start, end) in parts.iter().cloned() {
+        let c=client.clone(); let a=artifact.clone(); let pr=progress.clone();
+        handles.push(thread::spawn(move || download_range_part_v1(c,a,path,start,end,pr,total,session_start,started)));
+    }
+    for handle in handles {
+        handle.join().map_err(|_| "model_range_worker_panicked".to_string())??;
     }
 
-    Err(last_error)
+    let ordered = parts.into_iter().map(|(p,_,_)| p).collect::<Vec<_>>();
+    let installed = assemble_verified_model_v1(root, artifact, &prefix, &ordered, total, started, session_start)?;
+    let _ = fs::remove_file(&manifest);
+    Ok(installed)
 }
 
 pub fn provision_recommendation_v1(
@@ -376,6 +546,23 @@ mod tests {
 
         assert_eq!(parsed.files.len(), 2);
         assert!(parsed.should_download);
+    }
+
+    #[test]
+    fn accepts_deterministic_recommendation_without_files() {
+        let value = json!({
+            "shouldDownload": false,
+            "recommendedModel": {
+                "id": "edgeswarm-level1-deterministic",
+                "capability": "Deterministic-Only",
+                "level": 1,
+                "files": []
+            }
+        });
+
+        let parsed = parse_model_recommendation_v1(&value).unwrap();
+        assert!(parsed.files.is_empty());
+        assert!(!parsed.should_download);
     }
 
     #[test]

@@ -1,7 +1,14 @@
 use crate::core::{
     auth_client::SupabaseAuthClient,
+    backend_client::DEFAULT_BACKEND_URL,
     deterministic_executor,
     model_discovery::discover_models,
+    model_provisioning::{
+        fetch_model_recommendation_v1,
+        provision_recommendation_v1,
+        set_model_download_stage_v1,
+    },
+    real_capacity_certification::certify_model_path_v1,
     production_heartbeat::ProductionHeartbeatV1,
     production_inference::ProductionLlamaClient,
     production_task_http::{
@@ -16,7 +23,8 @@ use crate::core::{
     wallet_vault, NodeState,
 };
 use crate::runtime::llama_process::{
-    resolve_model_root_v1, LlamaProcessConfig, ManagedLlamaProcess,
+    resolve_llama_server_path_v1, resolve_model_root_v1, LlamaProcessConfig,
+    ManagedLlamaProcess,
 };
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
@@ -30,6 +38,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use sysinfo::Disks;
 use zeroize::{Zeroize, Zeroizing};
 
 static NODE_SERVICE_LOGS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
@@ -389,6 +398,82 @@ fn node_service_instance_lock_v1_rejects_second_holder() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn model_disk_free_gb_v1() -> u64 {
+    let root = crate::core::model_provisioning::model_root_v1();
+    let disks = Disks::new_with_refreshed_list();
+
+    let matched = disks.list().iter()
+        .filter(|disk| root.starts_with(disk.mount_point()))
+        .max_by_key(|disk| disk.mount_point().components().count());
+
+    matched
+        .map(|disk| disk.available_space() / 1024 / 1024 / 1024)
+        .or_else(|| {
+            disks.list().iter()
+                .map(|disk| disk.available_space() / 1024 / 1024 / 1024)
+                .max()
+        })
+        .unwrap_or(0)
+}
+
+fn model_recommendation_payload_v1(state: &NodeState) -> Value {
+    let ram_gb = state.hardware.total_memory_bytes as f64
+        / 1024.0 / 1024.0 / 1024.0;
+    let backend = state.acceleration.backend.to_ascii_lowercase();
+    let macos = state.platform.os.eq_ignore_ascii_case("macos");
+
+    json!({
+        "nodeType": "laptop-node",
+        "platform": state.platform.os,
+        "architecture": state.platform.architecture,
+        "ramGb": ram_gb,
+        "diskFreeGb": model_disk_free_gb_v1(),
+        "cpuCores": state.hardware.logical_cpu_count,
+        "gpuVendor": if macos { "Apple" } else { "" },
+        "gpuName": state.acceleration.device_name.clone()
+            .unwrap_or_else(|| state.hardware.cpu_brand.clone()),
+        "cudaAvailable": backend.contains("cuda"),
+        "metalAvailable": backend.contains("metal") || macos
+    })
+}
+
+fn provision_fresh_model_v1(state: &NodeState) -> Result<bool, String> {
+    let payload = model_recommendation_payload_v1(state);
+    let base_url = env::var("GCP_BASE_URL")
+        .unwrap_or_else(|_| DEFAULT_BACKEND_URL.to_string());
+
+    println!("MODEL_RECOMMENDATION_REQUESTED=true");
+    let recommendation =
+        fetch_model_recommendation_v1(&base_url, &payload)?;
+
+    println!("MODEL_RECOMMENDATION={}", recommendation.model_id);
+
+    if recommendation.files.is_empty() {
+        println!("MODEL_PROVISIONING_REQUIRED=false");
+        return Ok(false);
+    }
+
+    println!("MODEL_PROVISIONING_REQUIRED=true");
+    println!("MODEL_PROVISIONING_STARTED=true");
+    let paths = provision_recommendation_v1(&recommendation)?;
+    println!("MODEL_PROVISIONING_COMPLETE=true");
+
+    let model_path = paths.first()
+        .ok_or_else(|| "provisioned_model_path_missing".to_string())?;
+    let runtime_path = resolve_llama_server_path_v1()?;
+
+    println!("MODEL_CERTIFICATION_STARTED=true");
+    set_model_download_stage_v1("certifying");
+    certify_model_path_v1(
+        model_path.to_string_lossy().to_string(),
+        runtime_path.to_string_lossy().to_string(),
+    )?;
+    println!("MODEL_CERTIFICATION_COMPLETE=true");
+    set_model_download_stage_v1("ready");
+
+    Ok(true)
+}
+
 pub fn run_node_service(
     stop: Arc<AtomicBool>,
     mut wallet_password: Zeroizing<String>,
@@ -397,7 +482,7 @@ pub fn run_node_service(
     auth_client.ensure_valid_session(true)?;
 
     let mut auth = read_auth()?;
-    let state = NodeState::detect();
+    let mut state = NodeState::detect();
     let hardware = state.hardware_identity.hardware_id.clone();
 
     let public_wallet = WalletPublicIdentity::load_default()?;
@@ -491,8 +576,21 @@ pub fn run_node_service(
 
     println!("WALLET_UNLOCKED=true");
 
-    let base_heartbeat =
+    let mut base_heartbeat =
         ProductionHeartbeatV1::from_node_state(&state, env!("CARGO_PKG_VERSION"), "laptop", &[]);
+
+    if base_heartbeat.model_id.is_none()
+        && provision_fresh_model_v1(&state)?
+    {
+        state = NodeState::detect();
+        base_heartbeat = ProductionHeartbeatV1::from_node_state(
+            &state,
+            env!("CARGO_PKG_VERSION"),
+            "laptop",
+            &[],
+        );
+        println!("MODEL_STATE_REFRESHED=true");
+    }
 
     if base_heartbeat.concurrency_limit != 1 {
         return Err("runner_capacity_gate_failed".into());

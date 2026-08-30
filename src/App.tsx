@@ -19,11 +19,22 @@ type ProviderLedgerSummary = {
   syncedAt?: string | null;
 };
 
+type ModelDownloadProgress = {
+  status: string;
+  filename: string;
+  downloadedBytes: number;
+  totalBytes: number;
+  percent: number;
+  bytesPerSecond: number;
+  etaSeconds?: number | null;
+};
+
 type NodeServiceStatus = {
   running: boolean;
   stopping: boolean;
   lastError?: string | null;
   logs: string[];
+  modelDownload?: ModelDownloadProgress | null;
 };
 
 type ModelState = {
@@ -86,6 +97,7 @@ function App() {
       stopping: false,
       lastError: null,
       logs: [],
+      modelDownload: null,
     });
   const [nodeActionBusy, setNodeActionBusy] = useState(false);
 
@@ -440,13 +452,31 @@ function App() {
           {capabilityText}
         </div>
 
-        {/* MODEL_DOWNLOAD_PROGRESS_UI_V1 */}
-        {visibleModel && (visibleModel.status ?? "").toLowerCase().includes("download") && (
+        {/* MODEL_DOWNLOAD_PROGRESS_UI_V2 */}
+        {serviceStatus.modelDownload && (
           <>
             <div className="progress-track">
-              <div className="progress-fill download-indeterminate" />
+              <div
+                className="progress-fill"
+                style={{
+                  width: `${Math.max(
+                    0,
+                    Math.min(100, serviceStatus.modelDownload.percent),
+                  )}%`,
+                }}
+              />
             </div>
-            <div className="progress-label">Downloading model...</div>
+            <div className="progress-label">
+              {serviceStatus.modelDownload.status === "downloading"
+                ? `Downloading model — ${serviceStatus.modelDownload.percent.toFixed(1)}% · ${(serviceStatus.modelDownload.downloadedBytes / 1073741824).toFixed(2)} / ${(serviceStatus.modelDownload.totalBytes / 1073741824).toFixed(2)} GiB · ${(serviceStatus.modelDownload.bytesPerSecond / 1048576).toFixed(1)} MB/s${serviceStatus.modelDownload.etaSeconds ? ` · ~${Math.ceil(serviceStatus.modelDownload.etaSeconds / 60)} min remaining` : ""}`
+                : serviceStatus.modelDownload.status === "verifying"
+                  ? "Verifying model integrity..."
+                  : serviceStatus.modelDownload.status === "certifying"
+                    ? "Certifying this device..."
+                    : serviceStatus.modelDownload.status === "ready"
+                      ? "Model ready"
+                      : "Preparing model..."}
+            </div>
           </>
         )}
       </section>

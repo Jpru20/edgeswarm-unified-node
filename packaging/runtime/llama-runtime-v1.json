@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "edgeswarm-llama-runtime-v1",
+  "runtime": "llama.cpp",
+  "sourceRepository": "https://github.com/ggml-org/llama.cpp",
+  "sourceCommit": "a3b1effcda84caeb180427b1346d0212841418f6",
+  "targets": {
+    "macos-arm64": {
+      "executable": "llama-server",
+      "acceleration": "metal",
+      "metalEmbedded": true,
+      "validatedRuntimeSha256": "8a4c0a23355af2ba40c56c2d7b60a441c289fc8b33e2baeda1cc5ff2af126cce"
+    },
+    "windows-x64": {
+      "executable": "llama-server.exe",
+      "acceleration": "platform-certified",
+      "validatedRuntimeSha256": null
+    },
+    "linux-x64": {
+      "executable": "llama-server",
+      "acceleration": "platform-certified",
+      "validatedRuntimeSha256": null
+    },
+    "linux-arm64": {
+      "executable": "llama-server",
+      "acceleration": "platform-certified",
+      "validatedRuntimeSha256": null
+    }
+  }
+}

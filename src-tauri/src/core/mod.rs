@@ -18,6 +18,7 @@ pub mod model;
 pub mod model_discovery;
 pub mod model_fingerprint;
 pub mod model_provisioning;
+pub mod real_capacity_certification;
 pub mod model_registry;
 pub mod node_service;
 pub mod per_model_state;
@@ -36,6 +37,7 @@ pub mod wallet_client;
 pub mod wallet_identity;
 pub mod wallet_public_identity;
 pub mod wallet_vault;
+pub mod wallet_bootstrap;
 pub mod workload_validator;
 
 use crate::adapters;

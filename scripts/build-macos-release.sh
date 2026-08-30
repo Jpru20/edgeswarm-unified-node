@@ -83,6 +83,36 @@ LC_ALL=C grep -aFq -- "$KEY" "$APP_EXE" || {
 echo "APP_PAYLOAD_CONFIG_VERIFIED=PASS"
 echo "CANONICAL_RUNTIME_PATH=$APP_EXE"
 
+# UNIFIED_BUNDLED_LLAMA_RUNTIME_V1
+LLAMA_RUNTIME_SOURCE="${EDGESWARM_MACOS_LLAMA_RUNTIME_DIR:-$HOME/edgeswarm-runtime-build/release/macos-arm64/current}"
+LLAMA_RUNTIME_EXPECTED_SHA="8a4c0a23355af2ba40c56c2d7b60a441c289fc8b33e2baeda1cc5ff2af126cce"
+LLAMA_RUNTIME_DEST="$APP/Contents/MacOS/runtime/current"
+
+test -x "$LLAMA_RUNTIME_SOURCE/llama-server" || {
+    echo "ERROR=macos_llama_runtime_missing" >&2
+    exit 1
+}
+
+ACTUAL_LLAMA_SHA="$(shasum -a 256 "$LLAMA_RUNTIME_SOURCE/llama-server" | awk "{print \$1}")"
+test "$ACTUAL_LLAMA_SHA" = "$LLAMA_RUNTIME_EXPECTED_SHA" || {
+    echo "ERROR=macos_llama_runtime_sha_mismatch" >&2
+    echo "EXPECTED=$LLAMA_RUNTIME_EXPECTED_SHA" >&2
+    echo "ACTUAL=$ACTUAL_LLAMA_SHA" >&2
+    exit 1
+}
+
+rm -rf "$LLAMA_RUNTIME_DEST"
+mkdir -p "$LLAMA_RUNTIME_DEST"
+cp -a "$LLAMA_RUNTIME_SOURCE/." "$LLAMA_RUNTIME_DEST/"
+
+find "$LLAMA_RUNTIME_DEST" -type f \
+    \( -name "llama-server" -o -name "*.dylib" \) \
+    -exec codesign --force --sign - --timestamp=none {} \;
+
+echo "MACOS_LLAMA_RUNTIME_SHA256=$ACTUAL_LLAMA_SHA"
+"$LLAMA_RUNTIME_DEST/llama-server" --version 2>&1 | head -3
+echo "MACOS_BUNDLED_LLAMA_RUNTIME=PASS"
+
 # Seal the completed beta app bundle before hashing/packaging.
 # This is ad-hoc signing only; Developer ID/notarization remains future work.
 APP_HELPER="$APP/Contents/MacOS/edgeswarm-node-headless"
