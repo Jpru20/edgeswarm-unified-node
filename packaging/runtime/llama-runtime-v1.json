@@ -23,7 +23,7 @@
     "linux-arm64": {
       "executable": "llama-server",
       "acceleration": "platform-certified",
-      "validatedRuntimeSha256": null
+      "validatedRuntimeSha256": "714c34bf66886063249e02c23d94cefa3eca9a6d8e7ebf68d0124976daf78a7b"
     }
   }
 }

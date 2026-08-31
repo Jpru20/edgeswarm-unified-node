@@ -27,8 +27,10 @@ if [[ "$HOST_ARCH" != "$EXPECTED_ARCH" ]]; then
 fi
 
 MISSING="$(
-    ldd "$ROOT/bin/edgeswarm-node-headless" 2>&1 |
-    grep 'not found' || true
+    {
+        ldd "$ROOT/bin/edgeswarm-node-headless"
+        ldd "$ROOT/runtime/current/llama-server"
+    } 2>&1 | grep 'not found' || true
 )"
 
 if [[ -n "$MISSING" ]]; then
@@ -42,6 +44,14 @@ install -m 0755 \
     "$ROOT/bin/edgeswarm-node-headless" \
     /usr/lib/edgeswarm-node/edgeswarm-node-headless
 
+install -m 0755 \
+    "$ROOT/bin/edgeswarm-node-setup" \
+    /usr/lib/edgeswarm-node/edgeswarm-node-setup
+
+install -d -m 0755 /usr/lib/edgeswarm-node/runtime/current
+cp -a --no-preserve=ownership "$ROOT/runtime/current/." \
+    /usr/lib/edgeswarm-node/runtime/current/
+
 ln -sfn \
     /usr/lib/edgeswarm-node/edgeswarm-node-headless \
     /usr/bin/edgeswarm-node
@@ -49,6 +59,10 @@ ln -sfn \
 ln -sfn \
     /usr/lib/edgeswarm-node/edgeswarm-node-headless \
     /usr/bin/edgeswarm-node-headless
+
+ln -sfn \
+    /usr/lib/edgeswarm-node/edgeswarm-node-setup \
+    /usr/bin/edgeswarm-node-setup
 
 install -d -m 0755 /usr/lib/systemd/system
 install -m 0644 \

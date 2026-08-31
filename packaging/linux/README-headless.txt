@@ -1,29 +1,21 @@
-EdgeSwarm Node — Linux Headless Mode
-====================================
+EdgeSwarm Node — Linux Headless Provider
+=========================================
 
-The Linux package contains both the graphical desktop application and
-the headless/server node.
+Linux is supported as a headless/provider node only.
 
-Desktop/laptop:
-    Launch: edgeswarm-node
+First-time setup:
+    edgeswarm-node-setup
 
-Server/headless:
-    Binary: edgeswarm-node-headless
-    Unit:   edgeswarm-node-headless@USER.service
+Setup signs in to your provider account, verifies MFA,
+creates or recovers this devices wallet identity, saves
+the authenticated session, prepares the protected systemd
+credential, and starts the provider-node service.
 
-The headless service is deliberately NOT enabled automatically when
-the package is installed.
+Service:
+    edgeswarm-node-headless@USER.service
 
-Before enabling headless mode create:
+Status:
+    systemctl status edgeswarm-node-headless@USER.service
 
-    /etc/edgeswarm-node/USER/node.env
-    /etc/edgeswarm-node/USER/wallet-password
-
-The wallet-password file must be protected from other users.
-
-Then explicitly enable the service for the intended provider account:
-
-    sudo systemctl enable --now edgeswarm-node-headless@USER.service
-
-Do not run the graphical node and the headless service simultaneously
-for the same provider/device identity.
+Logs:
+    journalctl -u edgeswarm-node-headless@USER.service
