@@ -30,6 +30,18 @@
                                 "icons/128x128@2x.png",
                                 "icons/icon.icns",
                                 "icons/icon.ico"
-                            ]
-               }
+                            ],
+                   "createUpdaterArtifacts":  true
+               },
+    "plugins":  {
+                    "updater":  {
+                                    "pubkey":  "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM3ODlENUJFMTgxMzk0MzMKUldRemxCTVl2dFdKeHpSODIrRW1NYzhpMXF6ckxrVTB6aU41d204aE51a0ZGNGVBeVZJU1pEQlQK",
+                                    "endpoints":  [
+                                                      "https://api.edgeswarm.io/node/desktop-update/{{target}}/{{arch}}/{{current_version}}"
+                                                  ],
+                                    "windows":  {
+                                                    "installMode":  "passive"
+                                                }
+                                }
+                }
 }

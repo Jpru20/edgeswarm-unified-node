@@ -469,12 +469,60 @@ mod desktop {
         current_node_service_status(&runtime)
     }
 
+    async fn desktop_update_check_v1(
+        app: tauri::AppHandle,
+    ) -> tauri_plugin_updater::Result<()> {
+        use tauri_plugin_updater::UpdaterExt;
+
+        let Some(update) = app.updater()?.check().await? else {
+            println!("DESKTOP_UPDATE_AVAILABLE=false");
+            return Ok(());
+        };
+
+        let version = update.version.clone();
+        println!("DESKTOP_UPDATE_AVAILABLE=true");
+        println!("DESKTOP_UPDATE_VERSION={version}");
+
+        let mut downloaded = 0usize;
+        update
+            .download_and_install(
+                |chunk_length, content_length| {
+                    downloaded += chunk_length;
+                    println!(
+                        "DESKTOP_UPDATE_PROGRESS_BYTES={downloaded}|TOTAL={content_length:?}"
+                    );
+                },
+                || println!("DESKTOP_UPDATE_DOWNLOAD_COMPLETE=true"),
+            )
+            .await?;
+
+        println!("DESKTOP_UPDATE_INSTALLED={version}");
+        app.restart();
+    }
     #[cfg_attr(mobile, tauri::mobile_entry_point)]
     pub fn run() {
         tauri::Builder::default()
             .manage(Mutex::new(AppAuthState::default()))
             .manage(NodeRuntimeState::default())
             .plugin(tauri_plugin_opener::init())
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            .setup(|app| {
+                let handle = app.handle().clone();
+
+                std::thread::spawn(move || loop {
+                    let check_handle = handle.clone();
+
+                    tauri::async_runtime::block_on(async move {
+                        if let Err(error) = desktop_update_check_v1(check_handle).await {
+                            println!("DESKTOP_UPDATE_ERROR={error}");
+                        }
+                    });
+
+                    std::thread::sleep(std::time::Duration::from_secs(60 * 60));
+                });
+
+                Ok(())
+            })
             .invoke_handler(tauri::generate_handler![
                 get_node_state,
                 set_window_layout,
