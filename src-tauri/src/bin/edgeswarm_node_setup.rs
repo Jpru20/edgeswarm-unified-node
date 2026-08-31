@@ -25,7 +25,6 @@ fn sudo_v1(args: &[&str]) -> Result<(), String> {
 
 fn install_service_config_v1(password: &str) -> Result<u64, String> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
 
     let user = std::env::var("USER").map_err(|_| "provider_user_missing".to_string())?;
     if user == "root" || std::env::var_os("SUDO_USER").is_some() {
@@ -45,11 +44,16 @@ fn install_service_config_v1(password: &str) -> Result<u64, String> {
     std::fs::create_dir_all(data).map_err(|_| "setup_data_dir_create_failed".to_string())?;
 
     let tmp = data.join(".wallet-password.setup");
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(0o600)
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let mut file = options
         .open(&tmp)
         .map_err(|_| "wallet_credential_stage_failed".to_string())?;
     file.write_all(password.as_bytes())
