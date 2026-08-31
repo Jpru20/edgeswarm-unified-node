@@ -64,6 +64,10 @@ ln -sfn \
     /usr/lib/edgeswarm-node/edgeswarm-node-setup \
     /usr/bin/edgeswarm-node-setup
 
+ln -sfn \
+    /usr/lib/edgeswarm-node/edgeswarm-node-setup \
+    /usr/bin/edgeswarm-node-status
+
 install -d -m 0755 /usr/lib/systemd/system
 install -m 0644 \
     "$ROOT/share/edgeswarm-node-headless@.service" \

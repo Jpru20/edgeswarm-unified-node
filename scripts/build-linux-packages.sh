@@ -108,6 +108,8 @@ ln -s ../lib/edgeswarm-node/edgeswarm-node-headless \
     "$PAYLOAD/usr/bin/edgeswarm-node-headless"
 ln -s ../lib/edgeswarm-node/edgeswarm-node-setup \
     "$PAYLOAD/usr/bin/edgeswarm-node-setup"
+ln -s ../lib/edgeswarm-node/edgeswarm-node-setup \
+    "$PAYLOAD/usr/bin/edgeswarm-node-status"
 
 install -d "$PAYLOAD/usr/lib/systemd/system"
 install -m 0644 packaging/linux/edgeswarm-node-headless@.service \
@@ -264,6 +266,7 @@ tar -xzf %{SOURCE0} -C %{buildroot}
 /usr/bin/edgeswarm-node
 /usr/bin/edgeswarm-node-headless
 /usr/bin/edgeswarm-node-setup
+/usr/bin/edgeswarm-node-status
 /usr/lib/systemd/system/edgeswarm-node-headless@.service
 /usr/share/doc/edgeswarm-node
 

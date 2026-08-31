@@ -1,11 +1,15 @@
 use crate::{adapters, core::certificate_match::sha256_file};
-use reqwest::{blocking::Client, header::{CONTENT_RANGE, RANGE}, StatusCode};
+use reqwest::{
+    blocking::Client,
+    header::{CONTENT_RANGE, RANGE},
+    StatusCode,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs::File;
 use std::io::copy;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::Arc;
 use std::{
     env,
     fs::{self, OpenOptions},
@@ -28,8 +32,8 @@ pub struct ModelDownloadProgressV1 {
     pub eta_seconds: Option<u64>,
 }
 
-static MODEL_DOWNLOAD_PROGRESS: OnceLock<Mutex<Option<ModelDownloadProgressV1>>> =
-    OnceLock::new();
+static MODEL_DOWNLOAD_PROGRESS: OnceLock<Mutex<Option<ModelDownloadProgressV1>>> = OnceLock::new();
+static MODEL_DOWNLOAD_LAST_PERCENT: AtomicU64 = AtomicU64::new(u64::MAX);
 
 fn progress_store_v1() -> &'static Mutex<Option<ModelDownloadProgressV1>> {
     MODEL_DOWNLOAD_PROGRESS.get_or_init(|| Mutex::new(None))
@@ -218,20 +222,49 @@ pub fn verify_model_artifact_v1(root: &Path, artifact: &ModelArtifactV1) -> bool
         .unwrap_or(false)
 }
 
-fn update_download_progress_v1(filename: &str, downloaded: u64, total: u64, started: Instant, session_start: u64, status: &str) {
+fn update_download_progress_v1(
+    filename: &str,
+    downloaded: u64,
+    total: u64,
+    started: Instant,
+    session_start: u64,
+    status: &str,
+) {
     let elapsed = started.elapsed().as_secs_f64().max(0.001);
     let speed = downloaded.saturating_sub(session_start) as f64 / elapsed;
-    let percent = if total == 0 { 0.0 } else { downloaded as f64 * 100.0 / total as f64 };
-    let eta = if speed > 1.0 { Some((total.saturating_sub(downloaded) as f64 / speed).ceil() as u64) } else { None };
+    let percent = if total == 0 {
+        0.0
+    } else {
+        downloaded as f64 * 100.0 / total as f64
+    };
+    let eta = if speed > 1.0 {
+        Some((total.saturating_sub(downloaded) as f64 / speed).ceil() as u64)
+    } else {
+        None
+    };
+
     if let Ok(mut slot) = progress_store_v1().lock() {
-        *slot = Some(ModelDownloadProgressV1 { status: status.into(), filename: filename.into(), downloaded_bytes: downloaded, total_bytes: total, percent, bytes_per_second: speed, eta_seconds: eta });
+        *slot = Some(ModelDownloadProgressV1 {
+            status: status.into(),
+            filename: filename.into(),
+            downloaded_bytes: downloaded,
+            total_bytes: total,
+            percent,
+            bytes_per_second: speed,
+            eta_seconds: eta,
+        });
+    }
+
+    let whole = percent.floor().clamp(0.0, 100.0) as u64;
+    if MODEL_DOWNLOAD_LAST_PERCENT.swap(whole, AtomicOrdering::Relaxed) != whole {
+        println!(
+            "MODEL_DOWNLOAD_PROGRESS={filename}|{downloaded}|{total}|{percent:.1}|{speed:.0}|{}",
+            eta.unwrap_or(0)
+        );
     }
 }
 
-fn remote_artifact_size_v1(
-    client: &Client,
-    artifact: &ModelArtifactV1,
-) -> Result<u64, String> {
+fn remote_artifact_size_v1(client: &Client, artifact: &ModelArtifactV1) -> Result<u64, String> {
     let response = client
         .get(&artifact.download_url)
         .header(RANGE, "bytes=0-0")
@@ -288,7 +321,8 @@ fn validate_content_range_v1(
     end: u64,
     total: u64,
 ) -> Result<(), String> {
-    let actual = response.headers()
+    let actual = response
+        .headers()
         .get(CONTENT_RANGE)
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| "model_range_content_range_missing".to_string())?;
@@ -306,76 +340,117 @@ fn validate_content_range_v1(
 }
 
 fn download_range_part_v1(
-    client: Client, artifact: ModelArtifactV1, path: PathBuf,
-    start: u64, end: u64, progress: Arc<AtomicU64>,
-    total: u64, session_start: u64, started: Instant,
+    client: Client,
+    artifact: ModelArtifactV1,
+    path: PathBuf,
+    start: u64,
+    end: u64,
+    progress: Arc<AtomicU64>,
+    total: u64,
+    session_start: u64,
+    started: Instant,
 ) -> Result<(), String> {
     let expected = end - start + 1;
     for attempt in 1..=5u64 {
         let existing = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        if existing == expected { return Ok(()); }
+        if existing == expected {
+            return Ok(());
+        }
         if existing > expected {
             let _ = fs::remove_file(&path);
             continue;
         }
         let from = start + existing;
         let result = (|| -> Result<(), String> {
-            let mut response = client.get(&artifact.download_url)
-                .header(RANGE, format!("bytes={from}-{end}")).send()
+            let mut response = client
+                .get(&artifact.download_url)
+                .header(RANGE, format!("bytes={from}-{end}"))
+                .send()
                 .map_err(|e| format!("model_range_request_failed:{e}"))?;
             if response.status() != StatusCode::PARTIAL_CONTENT {
                 return Err(format!("model_range_http_{}", response.status().as_u16()));
             }
             validate_content_range_v1(&response, from, end, total)?;
-            let mut out = OpenOptions::new().create(true).append(true).open(&path)
+            let mut out = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
                 .map_err(|e| format!("model_range_open_failed:{e}"))?;
             let mut written = existing;
             let mut buffer = vec![0u8; 1024 * 1024];
             while written < expected {
-                let n = response.read(&mut buffer)
+                let n = response
+                    .read(&mut buffer)
                     .map_err(|e| format!("model_range_read_failed:{e}"))?;
-                if n == 0 { break; }
+                if n == 0 {
+                    break;
+                }
                 let take = n.min((expected - written) as usize);
                 out.write_all(&buffer[..take])
                     .map_err(|e| format!("model_range_write_failed:{e}"))?;
                 written += take as u64;
                 let done = progress.fetch_add(take as u64, AtomicOrdering::Relaxed) + take as u64;
-                update_download_progress_v1(&artifact.filename, done, total, started, session_start, "downloading");
+                update_download_progress_v1(
+                    &artifact.filename,
+                    done,
+                    total,
+                    started,
+                    session_start,
+                    "downloading",
+                );
             }
-            out.flush().map_err(|e| format!("model_range_flush_failed:{e}"))?;
-            if written != expected { return Err("model_range_incomplete".into()); }
+            out.flush()
+                .map_err(|e| format!("model_range_flush_failed:{e}"))?;
+            if written != expected {
+                return Err("model_range_incomplete".into());
+            }
             Ok(())
         })();
-        if result.is_ok() { return result; }
-        if attempt < 5 { thread::sleep(Duration::from_secs((attempt * 2).min(10))); }
+        if result.is_ok() {
+            return result;
+        }
+        if attempt < 5 {
+            thread::sleep(Duration::from_secs((attempt * 2).min(10)));
+        }
     }
     Err("model_range_retries_exhausted".into())
 }
 
 fn assemble_verified_model_v1(
-    root: &Path, artifact: &ModelArtifactV1, prefix: &Path,
-    parts: &[PathBuf], total: u64, started: Instant, session_start: u64,
+    root: &Path,
+    artifact: &ModelArtifactV1,
+    prefix: &Path,
+    parts: &[PathBuf],
+    total: u64,
+    started: Instant,
+    session_start: u64,
 ) -> Result<PathBuf, String> {
     let final_path = root.join(&artifact.filename);
     let assembly = root.join(format!("{}.download.assembled", artifact.filename));
     let _ = fs::remove_file(&assembly);
-    let mut out = File::create(&assembly)
-        .map_err(|e| format!("model_assembly_create_failed:{e}"))?;
+    let mut out =
+        File::create(&assembly).map_err(|e| format!("model_assembly_create_failed:{e}"))?;
     if prefix.is_file() {
-        let mut input = File::open(prefix)
-            .map_err(|e| format!("model_prefix_open_failed:{e}"))?;
+        let mut input = File::open(prefix).map_err(|e| format!("model_prefix_open_failed:{e}"))?;
         copy(&mut input, &mut out).map_err(|e| format!("model_prefix_copy_failed:{e}"))?;
     }
     for part in parts {
-        let mut input = File::open(part)
-            .map_err(|e| format!("model_part_open_failed:{e}"))?;
+        let mut input = File::open(part).map_err(|e| format!("model_part_open_failed:{e}"))?;
         copy(&mut input, &mut out).map_err(|e| format!("model_part_copy_failed:{e}"))?;
     }
-    out.flush().map_err(|e| format!("model_assembly_flush_failed:{e}"))?;
+    out.flush()
+        .map_err(|e| format!("model_assembly_flush_failed:{e}"))?;
     if fs::metadata(&assembly).map(|m| m.len()).unwrap_or(0) != total {
         return Err("model_assembly_size_mismatch".into());
     }
-    update_download_progress_v1(&artifact.filename, total, total, started, session_start, "verifying");
+    update_download_progress_v1(
+        &artifact.filename,
+        total,
+        total,
+        started,
+        session_start,
+        "verifying",
+    );
     let actual = sha256_file(&assembly)?;
     if !actual.eq_ignore_ascii_case(&artifact.sha256) {
         set_model_download_stage_v1("error");
@@ -384,37 +459,47 @@ fn assemble_verified_model_v1(
         for part in parts {
             let _ = fs::remove_file(part);
         }
-        let manifest = root.join(format!(
-            "{}.download.sha256",
-            artifact.filename
-        ));
+        let manifest = root.join(format!("{}.download.sha256", artifact.filename));
         let _ = fs::remove_file(manifest);
         return Err(format!(
             "model_sha256_mismatch:expected={}:actual={}",
-            artifact.sha256,
-            actual
+            artifact.sha256, actual
         ));
     }
-    fs::rename(&assembly, &final_path)
-        .map_err(|e| format!("model_atomic_install_failed:{e}"))?;
+    fs::rename(&assembly, &final_path).map_err(|e| format!("model_atomic_install_failed:{e}"))?;
     let _ = fs::remove_file(prefix);
-    for part in parts { let _ = fs::remove_file(part); }
-    update_download_progress_v1(&artifact.filename, total, total, started, session_start, "installed");
+    for part in parts {
+        let _ = fs::remove_file(part);
+    }
+    update_download_progress_v1(
+        &artifact.filename,
+        total,
+        total,
+        started,
+        session_start,
+        "installed",
+    );
     Ok(final_path)
 }
 
 fn download_artifact_v1(
-    client: &Client, root: &Path, artifact: &ModelArtifactV1,
+    client: &Client,
+    root: &Path,
+    artifact: &ModelArtifactV1,
 ) -> Result<PathBuf, String> {
     fs::create_dir_all(root).map_err(|e| format!("model_directory_failed:{e}"))?;
-    if verify_model_artifact_v1(root, artifact) { return Ok(root.join(&artifact.filename)); }
+    if verify_model_artifact_v1(root, artifact) {
+        return Ok(root.join(&artifact.filename));
+    }
 
     let prefix = root.join(format!("{}.download", artifact.filename));
     let manifest = root.join(format!("{}.download.sha256", artifact.filename));
     let assembly = root.join(format!("{}.download.assembled", artifact.filename));
 
-    let checkpoint_valid = fs::read_to_string(&manifest).ok()
-        .map(|v| v.trim().eq_ignore_ascii_case(&artifact.sha256)) == Some(true);
+    let checkpoint_valid = fs::read_to_string(&manifest)
+        .ok()
+        .map(|v| v.trim().eq_ignore_ascii_case(&artifact.sha256))
+        == Some(true);
     let legacy_checkpoint = !manifest.exists() && prefix.is_file();
 
     if legacy_checkpoint {
@@ -423,7 +508,9 @@ fn download_artifact_v1(
     } else if !checkpoint_valid {
         let _ = fs::remove_file(&prefix);
         let _ = fs::remove_file(&assembly);
-        for i in 0..8 { let _ = fs::remove_file(root.join(format!("{}.download.part-{i}", artifact.filename))); }
+        for i in 0..8 {
+            let _ = fs::remove_file(root.join(format!("{}.download.part-{i}", artifact.filename)));
+        }
         fs::write(&manifest, &artifact.sha256)
             .map_err(|e| format!("model_checkpoint_manifest_failed:{e}"))?;
     }
@@ -433,40 +520,79 @@ fn download_artifact_v1(
         return Err("model_download_size_zero".into());
     }
     let mut prefix_len = fs::metadata(&prefix).map(|m| m.len()).unwrap_or(0);
-    if prefix_len > total { let _ = fs::remove_file(&prefix); prefix_len = 0; }
+    if prefix_len > total {
+        let _ = fs::remove_file(&prefix);
+        prefix_len = 0;
+    }
 
     let remaining = total.saturating_sub(prefix_len);
-    let workers = if remaining == 0 { 0 } else { 4u64.min(remaining) };
-    let chunk = if workers == 0 { 0 } else { (remaining + workers - 1) / workers };
+    let workers = if remaining == 0 {
+        0
+    } else {
+        4u64.min(remaining)
+    };
+    let chunk = if workers == 0 {
+        0
+    } else {
+        (remaining + workers - 1) / workers
+    };
     let mut parts = Vec::new();
 
     for i in 0..workers {
         let start = prefix_len + i * chunk;
-        if start >= total { break; }
+        if start >= total {
+            break;
+        }
         let end = (start + chunk - 1).min(total - 1);
         let path = root.join(format!("{}.download.part-{i}", artifact.filename));
         let expected = end - start + 1;
-        if fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > expected { let _ = fs::remove_file(&path); }
+        if fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > expected {
+            let _ = fs::remove_file(&path);
+        }
         parts.push((path, start, end));
     }
 
-    let session_start = prefix_len + parts.iter()
-        .map(|(p,_,_)| fs::metadata(p).map(|m| m.len()).unwrap_or(0)).sum::<u64>();
+    let session_start = prefix_len
+        + parts
+            .iter()
+            .map(|(p, _, _)| fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+            .sum::<u64>();
     let progress = Arc::new(AtomicU64::new(session_start));
     let started = Instant::now();
-    update_download_progress_v1(&artifact.filename, session_start, total, started, session_start, "downloading");
+    update_download_progress_v1(
+        &artifact.filename,
+        session_start,
+        total,
+        started,
+        session_start,
+        "downloading",
+    );
 
     let mut handles = Vec::new();
     for (path, start, end) in parts.iter().cloned() {
-        let c=client.clone(); let a=artifact.clone(); let pr=progress.clone();
-        handles.push(thread::spawn(move || download_range_part_v1(c,a,path,start,end,pr,total,session_start,started)));
+        let c = client.clone();
+        let a = artifact.clone();
+        let pr = progress.clone();
+        handles.push(thread::spawn(move || {
+            download_range_part_v1(c, a, path, start, end, pr, total, session_start, started)
+        }));
     }
     for handle in handles {
-        handle.join().map_err(|_| "model_range_worker_panicked".to_string())??;
+        handle
+            .join()
+            .map_err(|_| "model_range_worker_panicked".to_string())??;
     }
 
-    let ordered = parts.into_iter().map(|(p,_,_)| p).collect::<Vec<_>>();
-    let installed = assemble_verified_model_v1(root, artifact, &prefix, &ordered, total, started, session_start)?;
+    let ordered = parts.into_iter().map(|(p, _, _)| p).collect::<Vec<_>>();
+    let installed = assemble_verified_model_v1(
+        root,
+        artifact,
+        &prefix,
+        &ordered,
+        total,
+        started,
+        session_start,
+    )?;
     let _ = fs::remove_file(&manifest);
     Ok(installed)
 }

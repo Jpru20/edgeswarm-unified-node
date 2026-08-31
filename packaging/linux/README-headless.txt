@@ -19,3 +19,8 @@ Status:
 
 Logs:
     journalctl -u edgeswarm-node-headless@USER.service
+
+Live console:
+    edgeswarm-node-status
+
+Press Ctrl+C to close the console. The EdgeSwarm node continues running under systemd.

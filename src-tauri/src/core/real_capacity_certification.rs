@@ -28,6 +28,32 @@ fn approved_model_from_sha(model_sha: &str) -> Option<(&'static str, &'static st
         "65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423" => {
             Some(("Qwen2.5-7B-Instruct-Q4_K_M", "Neural-Inference-7B"))
         }
+        "7b064f5842bf9532c91456deda288a1b672397a54fa729aa665952863033557c" => {
+            Some(("Meta-Llama-3.1-8B-Instruct-Q4_K_M", "Neural-Inference-8B"))
+        }
+        "e47ad95dad6ff848b431053b375adb5d39321290ea2c638682577dafca87c008" => {
+            Some(("Qwen2.5-14B-Instruct-Q4_K_M", "Neural-Inference-14B"))
+        }
+        "2946d28c9e1bb2bcae6d42e8678863a31775df6f740315c7d7e6d6b6411f5937" => {
+            Some(("Qwen2.5-Coder-14B-Instruct-Q4_K_M", "Neural-Inference-14B"))
+        }
+        "d1a6d049f09730c3f8ba26cf6b0b60c89790b5fdafa9a59c819acdfe93fffd1b" => Some((
+            "Mistral-Small-24B-Instruct-2501-Q4_K_M",
+            "Neural-Inference-24B",
+        )),
+        "4e83142e3ad3719ac61334f70a956dcc60bbba8adb29de5114161310bb9f7170" => {
+            Some(("Gemma-3-27B-it-Q4_K_M", "Neural-Inference-27B"))
+        }
+        "382b4f5a164d200f93790ee0e339fae12852896d23485cfb203ce868fea33a95" => {
+            Some(("Qwen3-30B-A3B-Instruct-Q4_K_M", "Neural-Inference-30B"))
+        }
+        "4cc57c0f51040a226e5a72cc47b7613f7772950e460a665f7083de89f183f60e" => {
+            Some(("Muse-Glimmer-30B-Q4_K_M", "Neural-Inference-30B"))
+        }
+        "f775c87029be95fb41df9e2882e6e938b73121c30ffc235ac6b6b880add49aa5" => Some((
+            "Meta-Llama-3.1-70B-Instruct-Q4_K_M",
+            "Neural-Inference-70B-Plus",
+        )),
         _ => None,
     }
 }

@@ -6,7 +6,8 @@ use edgeswarm_unified_node_lib::core::{
     wallet_bootstrap::bootstrap_authenticated_device_wallet_v1,
 };
 use std::{
-    io::{self, Write},
+    io::{self, BufRead, BufReader, Write},
+    process::{Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
 use zeroize::Zeroizing;
@@ -75,7 +76,110 @@ fn install_service_config_v1(password: &str) -> Result<(), String> {
     result
 }
 
+fn render_console_event_v1(line: &str) {
+    if let Some(v) = line.strip_prefix("MODEL_RECOMMENDATION=") {
+        println!("✓ Model selected: {v}");
+    } else if line == "MODEL_PROVISIONING_STARTED=true" {
+        println!("↻ Downloading required AI model...");
+    } else if let Some(v) = line.strip_prefix("MODEL_DOWNLOAD_PROGRESS=") {
+        let p: Vec<&str> = v.split("|").collect();
+        if p.len() == 6 {
+            let pct = p[3].parse::<f64>().unwrap_or(0.0);
+            let done = p[1].parse::<f64>().unwrap_or(0.0) / 1_073_741_824.0;
+            let total = p[2].parse::<f64>().unwrap_or(0.0) / 1_073_741_824.0;
+            let speed = p[4].parse::<f64>().unwrap_or(0.0) / 1_048_576.0;
+            let eta = p[5].parse::<u64>().unwrap_or(0);
+            let filled = ((pct / 100.0) * 24.0).round() as usize;
+            let bar = format!(
+                "{}{}",
+                "█".repeat(filled.min(24)),
+                "░".repeat(24usize.saturating_sub(filled))
+            );
+            println!(
+                "  [{bar}] {pct:5.1}% · {done:.2}/{total:.2} GB · {speed:.1} MB/s · ETA {eta}s"
+            );
+        }
+    } else if line == "MODEL_PROVISIONING_COMPLETE=true" {
+        println!("✓ Model downloaded and verified");
+    } else if line == "MODEL_CERTIFICATION_STARTED=true" {
+        println!("↻ Certifying device capacity...");
+    } else if let Some(v) = line.strip_prefix("CERTIFICATION_CONCURRENCY_STARTED=") {
+        if v == "1" {
+            println!("  Baseline · 1 worker");
+        } else {
+            println!("  Parallel capacity · {v} workers");
+        }
+    } else if let Some(v) = line.strip_prefix("CERTIFICATION_WORKLOAD_PROGRESS=") {
+        let p: Vec<&str> = v.split("|").collect();
+        if p.len() == 3 {
+            println!("    ✓ Workload {} / {}", p[1], p[2]);
+        }
+    } else if line == "MODEL_CERTIFICATION_COMPLETE=true" {
+        println!("✓ Device certification complete");
+    } else if let Some(v) = line.strip_prefix("ACTIVE_EXECUTION_MODEL=") {
+        println!("✓ Active model: {v}");
+    } else if line == "LOCAL_RUNTIME_READY=true" {
+        println!("✓ Local inference runtime ready");
+    } else if line == "READINESS_HEARTBEAT_HTTP_STATUS=200" {
+        println!("✓ Connected to EdgeSwarm");
+        println!("● ONLINE — EdgeSwarm Node is ready");
+        println!("Waiting for eligible work...");
+    } else if line == "TASK_CLAIMED=true" {
+        println!("→ Task received");
+    } else if let Some(v) = line.strip_prefix("HEADLESS_NODE_ERROR=") {
+        println!("✗ Node error: {v}");
+    }
+}
+
+fn live_console_v1() -> Result<(), String> {
+    let user = std::env::var("USER").map_err(|_| "provider_user_missing".to_string())?;
+    let service = format!("edgeswarm-node-headless@{user}.service");
+
+    println!();
+    println!("EdgeSwarm Node Console");
+    println!("================================================");
+    println!("The node runs independently under systemd.");
+    println!("Press Ctrl+C anytime to close this console.");
+    println!("Closing the console does NOT stop the node.");
+    println!("================================================");
+    println!();
+
+    let mut child = Command::new("journalctl")
+        .args(["-u", &service, "-f", "-n", "60", "--no-pager", "-o", "cat"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|_| "node_console_journal_start_failed".to_string())?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "node_console_journal_stdout_missing".to_string())?;
+    let reader = BufReader::new(stdout);
+
+    for line in reader.lines() {
+        let line = line.map_err(|_| "node_console_journal_read_failed".to_string())?;
+        render_console_event_v1(line.trim());
+    }
+
+    println!();
+    println!("Console detached. EdgeSwarm Node continues running.");
+    Ok(())
+}
+
 fn run() -> Result<(), String> {
+    let status_mode = std::env::args().any(|arg| arg == "--status")
+        || std::env::args()
+            .next()
+            .map(|arg| arg.ends_with("edgeswarm-node-status"))
+            .unwrap_or(false);
+
+    if status_mode {
+        return live_console_v1();
+    }
+
+    println!("EdgeSwarm Node Setup");
+    println!("================================================");
+
     print!("EdgeSwarm email: ");
     io::stdout()
         .flush()
@@ -153,8 +257,13 @@ fn run() -> Result<(), String> {
     println!("WALLET_ROW_VERIFIED=true");
     println!("SECOND_HEARTBEAT_SENT=false");
     println!("TASK_POLL_SENT=false");
+    println!();
+    println!("✓ Account verified");
+    println!("✓ MFA verified");
+    println!("✓ Device wallet ready");
+    println!("✓ Node service configured and started");
 
-    Ok(())
+    live_console_v1()
 }
 
 fn main() {
