@@ -4,16 +4,14 @@ use crate::core::{
     deterministic_executor,
     model_discovery::discover_models,
     model_provisioning::{
-        fetch_model_recommendation_v1,
-        provision_recommendation_v1,
-        set_model_download_stage_v1,
+        fetch_model_recommendation_v1, provision_recommendation_v1, set_model_download_stage_v1,
     },
-    real_capacity_certification::certify_model_path_v1,
     production_heartbeat::ProductionHeartbeatV1,
     production_inference::ProductionLlamaClient,
     production_task_http::{
         poll_once, read_auth, send_heartbeat, send_stream_frame_with_retry, submit_with_retry,
     },
+    real_capacity_certification::certify_model_path_v1,
     result_signing,
     task_client::{build_submit_result, GetJobsResponse, TaskEnvelope},
     wallet_account::DeviceWallet,
@@ -23,8 +21,7 @@ use crate::core::{
     wallet_vault, NodeState,
 };
 use crate::runtime::llama_process::{
-    resolve_llama_server_path_v1, resolve_model_root_v1, LlamaProcessConfig,
-    ManagedLlamaProcess,
+    resolve_llama_server_path_v1, resolve_model_root_v1, LlamaProcessConfig, ManagedLlamaProcess,
 };
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
@@ -402,14 +399,18 @@ fn model_disk_free_gb_v1() -> u64 {
     let root = crate::core::model_provisioning::model_root_v1();
     let disks = Disks::new_with_refreshed_list();
 
-    let matched = disks.list().iter()
+    let matched = disks
+        .list()
+        .iter()
         .filter(|disk| root.starts_with(disk.mount_point()))
         .max_by_key(|disk| disk.mount_point().components().count());
 
     matched
         .map(|disk| disk.available_space() / 1024 / 1024 / 1024)
         .or_else(|| {
-            disks.list().iter()
+            disks
+                .list()
+                .iter()
                 .map(|disk| disk.available_space() / 1024 / 1024 / 1024)
                 .max()
         })
@@ -417,8 +418,7 @@ fn model_disk_free_gb_v1() -> u64 {
 }
 
 fn model_recommendation_payload_v1(state: &NodeState) -> Value {
-    let ram_gb = state.hardware.total_memory_bytes as f64
-        / 1024.0 / 1024.0 / 1024.0;
+    let ram_gb = state.hardware.total_memory_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
     let backend = state.acceleration.backend.to_ascii_lowercase();
     let macos = state.platform.os.eq_ignore_ascii_case("macos");
 
@@ -439,12 +439,10 @@ fn model_recommendation_payload_v1(state: &NodeState) -> Value {
 
 fn provision_fresh_model_v1(state: &NodeState) -> Result<bool, String> {
     let payload = model_recommendation_payload_v1(state);
-    let base_url = env::var("GCP_BASE_URL")
-        .unwrap_or_else(|_| DEFAULT_BACKEND_URL.to_string());
+    let base_url = env::var("GCP_BASE_URL").unwrap_or_else(|_| DEFAULT_BACKEND_URL.to_string());
 
     println!("MODEL_RECOMMENDATION_REQUESTED=true");
-    let recommendation =
-        fetch_model_recommendation_v1(&base_url, &payload)?;
+    let recommendation = fetch_model_recommendation_v1(&base_url, &payload)?;
 
     println!("MODEL_RECOMMENDATION={}", recommendation.model_id);
 
@@ -458,7 +456,8 @@ fn provision_fresh_model_v1(state: &NodeState) -> Result<bool, String> {
     let paths = provision_recommendation_v1(&recommendation)?;
     println!("MODEL_PROVISIONING_COMPLETE=true");
 
-    let model_path = paths.first()
+    let model_path = paths
+        .first()
         .ok_or_else(|| "provisioned_model_path_missing".to_string())?;
     let runtime_path = resolve_llama_server_path_v1()?;
 
@@ -579,9 +578,7 @@ pub fn run_node_service(
     let mut base_heartbeat =
         ProductionHeartbeatV1::from_node_state(&state, env!("CARGO_PKG_VERSION"), "laptop", &[]);
 
-    if base_heartbeat.model_id.is_none()
-        && provision_fresh_model_v1(&state)?
-    {
+    if base_heartbeat.model_id.is_none() && provision_fresh_model_v1(&state)? {
         state = NodeState::detect();
         base_heartbeat = ProductionHeartbeatV1::from_node_state(
             &state,
@@ -681,6 +678,7 @@ pub fn run_node_service(
     }
 
     let mut last_idle_heartbeat = Instant::now();
+    let mut last_block_reason: Option<String> = None;
 
     loop {
         // Graceful stop boundary: never claim another task after
@@ -721,17 +719,46 @@ pub fn run_node_service(
         };
 
         if poll.blocked {
-            println!("TASK_CLAIMED=false");
-            println!("POLL_BLOCKED=true");
-            println!(
-                "POLL_BLOCK_REASON={}",
-                poll.block_reason.as_deref().unwrap_or("unspecified")
-            );
-            println!(
-                "POLL_BLOCK_MESSAGE={}",
-                poll.message.as_deref().unwrap_or("")
-            );
-            return Ok(());
+            let reason = poll
+                .block_reason
+                .as_deref()
+                .unwrap_or("unspecified")
+                .to_string();
+
+            if last_block_reason.as_deref() != Some(reason.as_str()) {
+                println!("TASK_CLAIMED=false");
+                println!("POLL_BLOCKED=true");
+                println!("POLL_BLOCK_REASON={reason}");
+                println!(
+                    "POLL_BLOCK_MESSAGE={}",
+                    poll.message.as_deref().unwrap_or("")
+                );
+                println!("NODE_WAITING_FOR_ASSIGNMENT_APPROVAL=true");
+                last_block_reason = Some(reason);
+            }
+
+            if last_idle_heartbeat.elapsed() >= Duration::from_secs(15) {
+                let status = send_heartbeat(&http, &auth_client, &mut auth, &base_heartbeat)?;
+                println!("IDLE_HEARTBEAT_HTTP_STATUS={status}");
+                last_idle_heartbeat = Instant::now();
+            }
+
+            for _ in 0..20 {
+                if stop.load(Ordering::Acquire) {
+                    println!("NODE_SERVICE_STOP_REQUESTED=true");
+                    println!("NODE_SERVICE_STOPPED=true");
+                    return Ok(());
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+
+            continue;
+        }
+
+        if last_block_reason.take().is_some() {
+            println!("POLL_BLOCKED=false");
+            println!("NODE_WAITING_FOR_ASSIGNMENT_APPROVAL=false");
+            println!("POLL_ASSIGNMENT_ELIGIBILITY_RESTORED=true");
         }
 
         let Some(task) = first_task(poll) else {

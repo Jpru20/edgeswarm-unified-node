@@ -23,7 +23,7 @@ fn sudo_v1(args: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-fn install_service_config_v1(password: &str) -> Result<(), String> {
+fn install_service_config_v1(password: &str) -> Result<u64, String> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -69,7 +69,14 @@ fn install_service_config_v1(password: &str) -> Result<(), String> {
         sudo_v1(&["install", "-m", "0600", tmpstr, &wallet])?;
         sudo_v1(&["sh","-c",&format!("printf %s\\\\n GCP_BASE_URL=https://api.edgeswarm.io > {envfile} && chmod 0644 {envfile}")])?;
         sudo_v1(&["systemctl", "daemon-reload"])?;
-        sudo_v1(&["systemctl", "enable", "--now", &service])
+
+        let started_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| "service_start_clock_failed".to_string())?
+            .as_secs();
+
+        sudo_v1(&["systemctl", "enable", "--now", &service])?;
+        Ok(started_at)
     })();
 
     let _ = std::fs::remove_file(&tmp);
@@ -124,6 +131,11 @@ fn render_console_event_v1(line: &str) {
         println!("✓ Connected to EdgeSwarm");
         println!("● ONLINE — EdgeSwarm Node is ready");
         println!("Waiting for eligible work...");
+    } else if line == "NODE_WAITING_FOR_ASSIGNMENT_APPROVAL=true" {
+        println!("● ONLINE — Waiting for assignment approval");
+    } else if line == "POLL_ASSIGNMENT_ELIGIBILITY_RESTORED=true" {
+        println!("✓ Assignment eligibility enabled");
+        println!("Waiting for eligible work...");
     } else if line == "TASK_CLAIMED=true" {
         println!("→ Task received");
     } else if let Some(v) = line.strip_prefix("HEADLESS_NODE_ERROR=") {
@@ -131,7 +143,60 @@ fn render_console_event_v1(line: &str) {
     }
 }
 
-fn live_console_v1() -> Result<(), String> {
+fn show_current_node_state_v1(service: &str) {
+    let active = Command::new("systemctl")
+        .args(["is-active", service])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "active")
+        .unwrap_or(false);
+
+    if !active {
+        println!("● OFFLINE — EdgeSwarm Node service is not running");
+        return;
+    }
+
+    let pid = Command::new("systemctl")
+        .args(["show", service, "-p", "MainPID", "--value"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    let current = if pid.is_empty() || pid == "0" {
+        String::new()
+    } else {
+        Command::new("journalctl")
+            .arg(format!("_PID={pid}"))
+            .args(["--no-pager", "-o", "cat"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default()
+    };
+
+    let mut ready = false;
+    let mut blocked = false;
+
+    for line in current.lines() {
+        let line = line.trim();
+        if line == "READINESS_HEARTBEAT_HTTP_STATUS=200" {
+            ready = true;
+        } else if line == "POLL_BLOCKED=true" {
+            blocked = true;
+        } else if line == "POLL_BLOCKED=false" {
+            blocked = false;
+        }
+    }
+
+    if ready && blocked {
+        println!("● ONLINE — Waiting for assignment approval");
+    } else if ready {
+        println!("● ONLINE — EdgeSwarm Node is ready");
+    } else {
+        println!("● STARTING — EdgeSwarm Node is initializing");
+    }
+}
+
+fn live_console_v1(started_at: Option<u64>) -> Result<(), String> {
     let user = std::env::var("USER").map_err(|_| "provider_user_missing".to_string())?;
     let service = format!("edgeswarm-node-headless@{user}.service");
 
@@ -144,8 +209,19 @@ fn live_console_v1() -> Result<(), String> {
     println!("================================================");
     println!();
 
-    let mut child = Command::new("journalctl")
-        .args(["-u", &service, "-f", "-n", "60", "--no-pager", "-o", "cat"])
+    show_current_node_state_v1(&service);
+    println!();
+
+    let mut command = Command::new("journalctl");
+    command.args(["-u", &service, "-f", "--no-pager", "-o", "cat"]);
+
+    if let Some(epoch) = started_at {
+        command.args(["--since", &format!("@{epoch}")]);
+    } else {
+        command.args(["-n", "0"]);
+    }
+
+    let mut child = command
         .stdout(Stdio::piped())
         .spawn()
         .map_err(|_| "node_console_journal_start_failed".to_string())?;
@@ -174,7 +250,7 @@ fn run() -> Result<(), String> {
             .unwrap_or(false);
 
     if status_mode {
-        return live_console_v1();
+        return live_console_v1(None);
     }
 
     println!("EdgeSwarm Node Setup");
@@ -246,7 +322,7 @@ fn run() -> Result<(), String> {
         password.as_str(),
     )?;
     session.save_secure()?;
-    install_service_config_v1(password.as_str())?;
+    let service_started_at = install_service_config_v1(password.as_str())?;
     println!("WALLET_PUBLIC_IDENTITY_WRITTEN=true");
     println!("SESSION_AAL2=true");
     println!("AUTH_SESSION_WRITTEN=true");
@@ -263,7 +339,7 @@ fn run() -> Result<(), String> {
     println!("✓ Device wallet ready");
     println!("✓ Node service configured and started");
 
-    live_console_v1()
+    live_console_v1(Some(service_started_at))
 }
 
 fn main() {
