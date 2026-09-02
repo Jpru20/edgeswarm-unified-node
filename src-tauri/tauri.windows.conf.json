@@ -1,0 +1,13 @@
+{
+    "bundle":  {
+                   "windows":  {
+                                   "nsis":  {
+                                                "installerHooks":  "./windows/hooks.nsh"
+                                            }
+                               },
+                   "resources":  [
+                                     "resources/runtime/current/",
+                                     "resources/windows/vc_redist.x64.exe"
+                                 ]
+               }
+}

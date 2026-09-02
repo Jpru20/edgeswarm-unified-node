@@ -71,7 +71,7 @@ fn runtime_version(path: &Path) -> Result<String, String> {
     );
 
     for line in text.lines() {
-        if let Some(version) = line.trim().strip_prefix("version: ") {
+        if let Some((_, version)) = line.trim().split_once("version: ") {
             return Ok(version.trim().to_string());
         }
     }

@@ -35,7 +35,7 @@
                },
     "plugins":  {
                     "updater":  {
-                                    "pubkey":  "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM3ODlENUJFMTgxMzk0MzMKUldRemxCTVl2dFdKeHpSODIrRW1NYzhpMXF6ckxrVTB6aU41d204aE51a0ZGNGVBeVZJU1pEQlQK",
+                                    "pubkey":  "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY1M0ZFNTA2NzgwRkE4RjkKUldUNXFBOTRCdVUvWlpSSnNTelBYWnc4cFBBRk5SVFN5dEFZeWxsbHVHZm9OenhWZXlIWlJCNCsK",
                                     "endpoints":  [
                                                       "https://api.edgeswarm.io/node/desktop-update/{{target}}/{{arch}}/{{current_version}}"
                                                   ],
