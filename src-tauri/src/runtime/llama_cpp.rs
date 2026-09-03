@@ -35,11 +35,28 @@ struct LlamaAttempt {
 pub struct LlamaCppHttpExecutor {
     client: Client,
     base_url: String,
+    certification_selected_model: Option<String>,
 }
 
 fn model_spec_for_workload(
     workload: &CertificationWorkload,
+    exact_selected_model: Option<&str>,
 ) -> Result<&'static ModelSpecV1, String> {
+    if let Some(selected_model) = exact_selected_model {
+        let spec = model_spec(selected_model)
+            .ok_or_else(|| format!("model_spec_missing:{selected_model}"))?;
+
+        if spec.capability != workload.expected_required_model
+            && workload.expected_required_model != "Neural-Inference"
+        {
+            return Err(format!(
+                "certification_model_capability_mismatch:{selected_model}:{}",
+                workload.expected_required_model
+            ));
+        }
+
+        return Ok(spec);
+    }
     let priority = capability_priority(&workload.expected_required_model).ok_or_else(|| {
         format!(
             "unsupported_certification_capability:{}",
@@ -79,7 +96,16 @@ impl LlamaCppHttpExecutor {
         Ok(Self {
             client,
             base_url: base_url.into().trim_end_matches('/').to_string(),
+            certification_selected_model: None,
         })
+    }
+
+    pub fn new_for_model(base_url: impl Into<String>, selected_model: &str) -> Result<Self, String> {
+        let spec = model_spec(selected_model)
+            .ok_or_else(|| format!("model_spec_missing:{selected_model}"))?;
+        let mut executor = Self::new(base_url)?;
+        executor.certification_selected_model = Some(spec.selected_model.to_string());
+        Ok(executor)
     }
 
     fn execute_attempt(
@@ -195,7 +221,7 @@ impl LlamaCppHttpExecutor {
     ) -> Result<LlamaTaskExecution, String> {
         let compiled = compile_certification_prompt(workload)?;
 
-        let spec = model_spec_for_workload(workload)?;
+        let spec = model_spec_for_workload(workload, self.certification_selected_model.as_deref())?;
 
         let generation = production_generation_settings_v1(
             &compiled.user_text,

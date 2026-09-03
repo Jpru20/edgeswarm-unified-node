@@ -200,7 +200,7 @@ fn build_task_submit_payload(
 
     let neural_supported = match (active_selected_model, active_capability) {
         (Some(active_model), Some(active_capability)) => {
-            required == active_capability
+            (required == active_capability || required == "Neural-Inference")
                 && (selected.is_empty() || selected == "tier:auto" || selected == active_model)
         }
         _ => false,
@@ -332,6 +332,24 @@ struct NodeServiceInstanceLockV1 {
     _file: std::fs::File,
 }
 
+fn node_service_lock_contention_v1(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Windows LockFileEx may report lock/share contention as
+        // ERROR_SHARING_VIOLATION (32) or ERROR_LOCK_VIOLATION (33)
+        // rather than mapping it to ErrorKind::WouldBlock.
+        return matches!(error.raw_os_error(), Some(32) | Some(33));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
 fn acquire_node_service_instance_lock_at_v1(
     data_dir: &std::path::Path,
 ) -> Result<NodeServiceInstanceLockV1, String> {
@@ -351,7 +369,7 @@ fn acquire_node_service_instance_lock_at_v1(
 
     match FileExt::try_lock_exclusive(&file) {
         Ok(()) => Ok(NodeServiceInstanceLockV1 { _file: file }),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+        Err(error) if node_service_lock_contention_v1(&error) => {
             Err("node_service_already_running".to_string())
         }
         Err(_) => Err("node_service_lock_failed".to_string()),
@@ -456,17 +474,35 @@ fn provision_fresh_model_v1(state: &NodeState) -> Result<bool, String> {
     let paths = provision_recommendation_v1(&recommendation)?;
     println!("MODEL_PROVISIONING_COMPLETE=true");
 
-    let model_path = paths
-        .first()
-        .ok_or_else(|| "provisioned_model_path_missing".to_string())?;
+    if paths.is_empty() {
+        return Err("provisioned_model_path_missing".to_string());
+    }
+
     let runtime_path = resolve_llama_server_path_v1()?;
 
     println!("MODEL_CERTIFICATION_STARTED=true");
+    println!("MODEL_CERTIFICATION_COUNT={}", paths.len());
     set_model_download_stage_v1("certifying");
-    certify_model_path_v1(
-        model_path.to_string_lossy().to_string(),
-        runtime_path.to_string_lossy().to_string(),
-    )?;
+
+    for (index, model_path) in paths.iter().enumerate() {
+        println!(
+            "MODEL_CERTIFICATION_ITEM={}/{}",
+            index + 1,
+            paths.len()
+        );
+
+        certify_model_path_v1(
+            model_path.to_string_lossy().to_string(),
+            runtime_path.to_string_lossy().to_string(),
+        )?;
+
+        println!(
+            "MODEL_CERTIFICATION_ITEM_COMPLETE={}/{}",
+            index + 1,
+            paths.len()
+        );
+    }
+
     println!("MODEL_CERTIFICATION_COMPLETE=true");
     set_model_download_stage_v1("ready");
 
@@ -593,11 +629,11 @@ pub fn run_node_service(
         return Err("runner_capacity_gate_failed".into());
     }
 
-    let active_selected_model = base_heartbeat.model_id.clone();
+    let mut active_selected_model = base_heartbeat.model_id.clone();
 
-    let active_capability = base_heartbeat.model_capability.clone();
+    let mut active_capability = base_heartbeat.model_capability.clone();
 
-    let active_runtime = base_heartbeat.runtime.clone();
+    let mut active_runtime = base_heartbeat.runtime.clone();
 
     let runtime_acceleration = execution_acceleration_v1();
 
@@ -624,7 +660,7 @@ pub fn run_node_service(
 
     let mut _managed_llama: Option<ManagedLlamaProcess> = None;
 
-    let llama = if neural_ready {
+    let mut llama = if neural_ready {
         let llama_base_url = match env::var("EDGESWARM_LLAMA_BASE_URL") {
             Ok(value) if !value.trim().is_empty() => {
                 println!("LLAMA_RUNTIME_OWNERSHIP=external");
@@ -831,6 +867,58 @@ pub fn run_node_service(
             }
         }
 
+        let current_active_model_v1 = active_selected_model.as_deref().and_then(|selected| {
+            state.models.iter().find(|model| model.selected_model == selected).map(|model| {
+                crate::core::execution_model::ActiveModelV1 {
+                    selected_model: model.selected_model.clone(),
+                    capability: model.capability.clone(),
+                    runtime: model.runtime.clone(),
+                    tier: model.tier,
+                }
+            })
+        });
+
+        let task_execution_model_v1 =
+            crate::core::execution_model::certified_model_for_task(
+                &state, &task, current_active_model_v1.as_ref(),
+            )?;
+
+        if let Some(target) = task_execution_model_v1 {
+            let switch_required =
+                crate::core::execution_model::runtime_switch_required(
+                    active_selected_model.as_deref(),
+                    &target,
+                );
+
+            println!("TASK_EXECUTION_MODEL={}", target.selected_model);
+            println!("MODEL_RUNTIME_SWITCH_REQUIRED={switch_required}");
+
+            if switch_required {
+                if env::var("EDGESWARM_LLAMA_BASE_URL")
+                    .ok().filter(|v| !v.trim().is_empty()).is_some()
+                {
+                    return Err("external_runtime_model_switch_unsupported".into());
+                }
+
+                llama = None;
+                _managed_llama = None;
+
+                let model_path = resolve_active_model_path_v1(&target.selected_model)?;
+                let config = LlamaProcessConfig::for_model(model_path)?;
+                let runtime = ManagedLlamaProcess::start(&config)?;
+                let client = ProductionLlamaClient::new(runtime.base_url().to_string())?;
+                client.health_check()?;
+
+                _managed_llama = Some(runtime);
+                llama = Some(client);
+                active_selected_model = Some(target.selected_model.clone());
+                active_capability = Some(target.capability.clone());
+                active_runtime = Some(target.runtime.clone());
+
+                println!("ACTIVE_EXECUTION_MODEL={}", target.selected_model);
+                println!("MODEL_RUNTIME_SWITCH_COMPLETE=true");
+            }
+        }
         let provider_email_for_task_v1 = auth.provider_email.clone();
 
         let stream_requested_v1 = task_realtime_neural_streaming_v1(&task);

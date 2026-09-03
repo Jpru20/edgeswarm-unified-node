@@ -6,7 +6,8 @@ use crate::{
         certificate_match::sha256_file,
         certification_runner::CertificationRunner,
         certification_workload::{bind_neural_realworld_pack_v1, built_in_neural_realworld_v1},
-        model_registry::OUTPUT_LIMIT_POLICY_VERSION,
+        model_discovery::discover_models,
+        model_registry::{model_spec, OUTPUT_LIMIT_POLICY_VERSION},
         NodeState,
     },
     runtime::{
@@ -99,6 +100,28 @@ pub fn certify_model_path_v1(
     let (model_id, model_capability) = approved_model_from_sha(&model_sha)
         .ok_or_else(|| format!("model_not_approved_for_real_certification:{model_sha}"))?;
 
+    let model_parent = model_path.parent()
+        .ok_or_else(|| "certification_model_parent_missing".to_string())?;
+    let canonical_model = std::fs::canonicalize(model_path)
+        .map_err(|_| "certification_model_canonicalize_failed".to_string())?;
+
+    let selected_model = discover_models(model_parent)
+        .into_iter()
+        .find(|candidate| {
+            std::fs::canonicalize(&candidate.path)
+                .map(|path| path == canonical_model)
+                .unwrap_or(false)
+        })
+        .map(|candidate| candidate.selected_model)
+        .ok_or_else(|| "certification_selected_model_not_resolved".to_string())?;
+
+    let selected_spec = model_spec(&selected_model)
+        .ok_or_else(|| format!("model_spec_missing:{selected_model}"))?;
+
+    if selected_spec.capability != model_capability {
+        return Err("certification_selected_model_capability_mismatch".into());
+    }
+
     let runtime_version = runtime_version(runtime_path)?;
 
     let state = NodeState::detect();
@@ -123,7 +146,8 @@ pub fn certify_model_path_v1(
     println!("LLAMA_RUNTIME_OWNERSHIP=managed");
     println!("LLAMA_BASE_URL={runtime_base_url}");
 
-    let mut executor = LlamaCppHttpExecutor::new(runtime_base_url)?;
+    println!("SELECTED_MODEL={selected_model}");
+    let mut executor = LlamaCppHttpExecutor::new_for_model(runtime_base_url, &selected_model)?;
 
     println!("REAL_CERTIFICATION_STARTED=true");
     println!("PACK_ID={}", pack.pack_id);
