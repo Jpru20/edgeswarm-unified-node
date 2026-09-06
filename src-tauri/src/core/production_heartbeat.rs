@@ -161,15 +161,14 @@ impl ProductionHeartbeatV1 {
             })
             .collect();
 
-        let concurrency_limit =
-            if ready_models.is_empty() {
-                1
-            } else {
-                state
-                    .capacity
-                    .certified_concurrency
-                    .max(1)
-            };
+        // PRODUCTION_SERIAL_RUNNER_CONCURRENCY_V1
+        //
+        // Capacity certification may prove that a model can sustain
+        // concurrency > 1. Preserve that result in per-model capacity
+        // metadata, but the current production node service executes
+        // one claimed task at a time. Do not advertise assignment
+        // concurrency that the runner cannot actually service.
+        let concurrency_limit = 1_u16;
 
         Self {
             hardware_id:
