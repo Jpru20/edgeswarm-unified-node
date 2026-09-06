@@ -127,6 +127,39 @@ fn artifact_id(model: &DiscoveredModelV1) -> String {
         .to_string()
 }
 
+fn predates_windows_gpu_runtime_v1(app_version: &str) -> bool {
+    let version = app_version.trim().trim_start_matches('v');
+
+    let mut parts = version
+        .split('.')
+        .filter_map(|part| {
+            let numeric = part
+                .chars()
+                .take_while(|ch| ch.is_ascii_digit())
+                .collect::<String>();
+
+            numeric.parse::<u32>().ok()
+        });
+
+    let parsed = (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    );
+
+    parsed < (1, 5, 18)
+}
+
+fn requires_windows_gpu_revalidation_v1(
+    certificate_app_version: &str,
+    certificate_acceleration: &str,
+    detected_acceleration: &str,
+) -> bool {
+    cfg!(target_os = "windows")
+        && certificate_acceleration == "cpu"
+        && matches!(detected_acceleration, "cuda" | "vulkan")
+        && predates_windows_gpu_runtime_v1(certificate_app_version)
+}
 pub fn resolve_per_model_states(
     model_root: &Path,
     runtime_path: &Path,
@@ -202,6 +235,26 @@ pub fn resolve_per_model_states(
             }
 
             relevant_certificate_seen = true;
+
+            if requires_windows_gpu_revalidation_v1(
+                &certificate.app_version,
+                &certificate.acceleration,
+                acceleration,
+            ) {
+                println!(
+                    "WINDOWS_GPU_REVALIDATION_REQUIRED={} OLD_ACCELERATION={} NEW_ACCELERATION={}",
+                    model.selected_model,
+                    certificate.acceleration,
+                    acceleration
+                );
+
+                state.status = "revalidation_required".into();
+                state.capacity_status =
+                    CapacityStatus::RevalidationRequired;
+
+                continue;
+            }
+
             state.certificate_loaded = true;
 
             let certificate_acceleration =
@@ -304,5 +357,66 @@ impl From<&PerModelStateV1> for ModelState {
             capacity_status: state.capacity_status.clone(),
             certified_concurrency: state.certified_concurrency,
         }
+    }
+}
+
+#[cfg(test)]
+mod gpu_upgrade_tests {
+    use super::*;
+
+    #[test]
+    fn pre_1518_versions_are_detected() {
+        assert!(predates_windows_gpu_runtime_v1("1.5.17"));
+        assert!(predates_windows_gpu_runtime_v1("1.5.16"));
+        assert!(!predates_windows_gpu_runtime_v1("1.5.18"));
+        assert!(!predates_windows_gpu_runtime_v1("1.6.0"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn old_cpu_certificate_requires_gpu_revalidation() {
+        assert!(requires_windows_gpu_revalidation_v1(
+            "1.5.17",
+            "cpu",
+            "vulkan",
+        ));
+
+        assert!(requires_windows_gpu_revalidation_v1(
+            "1.5.17",
+            "cpu",
+            "cuda",
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn fresh_cpu_fallback_certificate_remains_valid() {
+        assert!(!requires_windows_gpu_revalidation_v1(
+            "1.5.18",
+            "cpu",
+            "vulkan",
+        ));
+
+        assert!(!requires_windows_gpu_revalidation_v1(
+            "1.5.18",
+            "cpu",
+            "cuda",
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn accelerated_certificate_does_not_revalidate() {
+        assert!(!requires_windows_gpu_revalidation_v1(
+            "1.5.17",
+            "vulkan",
+            "vulkan",
+        ));
+
+        assert!(!requires_windows_gpu_revalidation_v1(
+            "1.5.17",
+            "cuda",
+            "cuda",
+        ));
     }
 }
