@@ -21,7 +21,7 @@ use crate::core::{
     wallet_vault, NodeState,
 };
 use crate::runtime::llama_process::{
-    resolve_llama_server_path_v1, resolve_model_root_v1, LlamaProcessConfig, ManagedLlamaProcess,
+    resolve_llama_server_path_v1, resolve_model_root_v1, resolve_cpu_llama_server_path_v1, runtime_acceleration_for_config_v1, LlamaProcessConfig, ManagedLlamaProcess,
 };
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
@@ -102,24 +102,34 @@ fn resolve_active_model_path_v1(selected_model: &str) -> Result<String, String> 
     Ok(model.path.to_string_lossy().to_string())
 }
 
-fn execution_acceleration_v1() -> String {
-    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        let layers = env::var("EDGESWARM_LLAMA_GPU_LAYERS")
-            .ok()
-            .and_then(|value| value.parse::<i32>().ok())
-            .unwrap_or(999);
+fn execution_config_for_certified_model_v1(
+    model_path: String,
+    certified_acceleration: &str,
+) -> Result<LlamaProcessConfig, String> {
+    let mut config = LlamaProcessConfig::for_model(model_path)?;
 
-        if layers > 0 {
-            return "metal".into();
+    #[cfg(target_os = "windows")]
+    {
+        match certified_acceleration {
+            "cpu" => {
+                config.executable = resolve_cpu_llama_server_path_v1()?;
+                config.gpu_layers = 0;
+            }
+            "cuda" | "vulkan" => {
+                let actual = runtime_acceleration_for_config_v1(&config);
+
+                if actual != certified_acceleration {
+                    return Err(format!(
+                        "certified_runtime_acceleration_unavailable:expected={certified_acceleration}:actual={actual}"
+                    ));
+                }
+            }
+            _ => {}
         }
     }
 
-    env::var("EDGESWARM_EXECUTION_ACCELERATION")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "cpu".into())
+    Ok(config)
 }
-
 fn failure_payload(
     task: &TaskEnvelope,
     email: &str,
@@ -635,7 +645,7 @@ pub fn run_node_service(
 
     let mut active_runtime = base_heartbeat.runtime.clone();
 
-    let runtime_acceleration = execution_acceleration_v1();
+    let mut runtime_acceleration = base_heartbeat.runtime_acceleration.clone();
 
     let neural_ready = active_selected_model.is_some()
         && active_capability
@@ -675,9 +685,23 @@ pub fn run_node_service(
 
                 println!("ACTIVE_EXECUTION_MODEL={selected_model}");
 
-                let config = LlamaProcessConfig::for_model(model_path)?;
-                let runtime = ManagedLlamaProcess::start(&config)?;
-                let base_url = runtime.base_url().to_string();
+                let config =
+                    execution_config_for_certified_model_v1(
+                        model_path,
+                        &runtime_acceleration,
+                    )?;
+
+                let runtime =
+                    ManagedLlamaProcess::start(&config)?;
+
+                runtime_acceleration =
+                    runtime.acceleration().to_string();
+
+                base_heartbeat.runtime_acceleration =
+                    runtime_acceleration.clone();
+
+                let base_url =
+                    runtime.base_url().to_string();
 
                 println!("LLAMA_RUNTIME_OWNERSHIP=managed");
                 _managed_llama = Some(runtime);
@@ -904,9 +928,38 @@ pub fn run_node_service(
                 _managed_llama = None;
 
                 let model_path = resolve_active_model_path_v1(&target.selected_model)?;
-                let config = LlamaProcessConfig::for_model(model_path)?;
-                let runtime = ManagedLlamaProcess::start(&config)?;
-                let client = ProductionLlamaClient::new(runtime.base_url().to_string())?;
+                let desired_acceleration = state
+                    .models
+                    .iter()
+                    .find(|model| {
+                        model.selected_model
+                            == target.selected_model
+                    })
+                    .map(|model| model.acceleration.clone())
+                    .ok_or_else(|| {
+                        format!(
+                            "certified_model_state_missing:{}",
+                            target.selected_model
+                        )
+                    })?;
+
+                let config =
+                    execution_config_for_certified_model_v1(
+                        model_path,
+                        &desired_acceleration,
+                    )?;
+
+                let runtime =
+                    ManagedLlamaProcess::start(&config)?;
+
+                runtime_acceleration =
+                    runtime.acceleration().to_string();
+
+                let client =
+                    ProductionLlamaClient::new(
+                        runtime.base_url().to_string()
+                    )?;
+
                 client.health_check()?;
 
                 _managed_llama = Some(runtime);

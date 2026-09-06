@@ -233,7 +233,9 @@ impl ProductionHeartbeatV1 {
                 }),
 
             runtime_acceleration:
-                state.acceleration.backend.clone(),
+                primary
+                    .map(|model| model.acceleration.clone())
+                    .unwrap_or_else(|| state.acceleration.backend.clone()),
 
             eligible_model_capabilities,
 

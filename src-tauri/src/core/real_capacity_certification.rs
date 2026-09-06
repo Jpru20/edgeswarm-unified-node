@@ -12,7 +12,7 @@ use crate::{
     },
     runtime::{
         llama_cpp::LlamaCppHttpExecutor,
-        llama_process::{LlamaProcessConfig, ManagedLlamaProcess},
+        llama_process::{start_managed_llama_with_cpu_fallback_v1, LlamaProcessConfig},
     },
 };
 use std::{
@@ -122,7 +122,6 @@ pub fn certify_model_path_v1(
         return Err("certification_selected_model_capability_mismatch".into());
     }
 
-    let runtime_version = runtime_version(runtime_path)?;
 
     let state = NodeState::detect();
     let mut pack = built_in_neural_realworld_v1()?;
@@ -140,7 +139,12 @@ pub fn certify_model_path_v1(
     println!("MODEL_CAPABILITY={model_capability}");
     println!("GPU_LAYERS={}", runtime_config.gpu_layers);
 
-    let managed_runtime = ManagedLlamaProcess::start(&runtime_config)?;
+    let managed_runtime =
+        start_managed_llama_with_cpu_fallback_v1(&runtime_config)?;
+    let runtime_version =
+        runtime_version(managed_runtime.executable_path())?;
+    let runtime_acceleration =
+        managed_runtime.acceleration().to_string();
     let runtime_base_url = managed_runtime.base_url().to_string();
 
     println!("LLAMA_RUNTIME_OWNERSHIP=managed");
@@ -155,7 +159,7 @@ pub fn certify_model_path_v1(
     println!("MAXIMUM_CONCURRENCY_TESTED=2");
     println!("MODEL_SHA256={model_sha}");
     println!("RUNTIME_VERSION={runtime_version}");
-    println!("ACCELERATION={}", state.acceleration.backend);
+    println!("ACCELERATION={runtime_acceleration}");
 
     let report = runner.run(&pack, &mut executor)?;
 
@@ -212,7 +216,7 @@ pub fn certify_model_path_v1(
         quantization: "Q4_K_M".into(),
         runtime: "llama.cpp".into(),
         runtime_version,
-        acceleration: state.acceleration.backend.clone(),
+        acceleration: runtime_acceleration,
         benchmark_mode: "no_cache_prompt".into(),
         capacity_policy_version: "realworld-capacity-policy-v1".into(),
         output_limit_policy_version: OUTPUT_LIMIT_POLICY_VERSION.into(),

@@ -23,20 +23,38 @@ pub fn detect() -> AccelerationInfo {
 
             if let Some(line) = text.lines().next() {
                 let mut parts = line.splitn(2, ',');
-
-                let name = parts
-                    .next()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty());
-
-                let memory_mib = parts
-                    .next()
-                    .and_then(|value| value.trim().parse::<u64>().ok());
+                let name = parts.next().map(str::trim).filter(|v| !v.is_empty());
+                let memory_mib =
+                    parts.next().and_then(|v| v.trim().parse::<u64>().ok());
 
                 return AccelerationInfo {
                     backend: "cuda".into(),
                     device_name: name.map(str::to_string),
                     vram_bytes: memory_mib.map(|mib| mib * 1024 * 1024),
+                    available: true,
+                    detection_status: "detected".into(),
+                };
+            }
+        }
+    }
+
+    let script = r#"$g=Get-CimInstance Win32_VideoController |
+Where-Object {$_.Name -match 'AMD|Radeon' -and $_.Name -notmatch 'Microsoft'} |
+Select-Object -First 1;
+if($g){Write-Output ($g.Name+'|'+[string]$g.AdapterRAM)}"#;
+
+    if let Ok(output) = hidden_windows_command("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+    {
+        if output.status.success() {
+            let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+            if let Some((name, memory)) = raw.split_once('|') {
+                return AccelerationInfo {
+                    backend: "vulkan".into(),
+                    device_name: Some(name.trim().to_string()),
+                    vram_bytes: memory.trim().parse::<u64>().ok(),
                     available: true,
                     detection_status: "detected".into(),
                 };
@@ -52,7 +70,6 @@ pub fn detect() -> AccelerationInfo {
         detection_status: "cpu_fallback".into(),
     }
 }
-
 pub fn platform_name() -> &'static str {
     "windows"
 }

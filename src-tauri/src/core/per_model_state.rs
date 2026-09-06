@@ -1,3 +1,4 @@
+use crate::runtime::llama_process::resolve_cpu_llama_server_path_v1;
 use crate::{
     adapters,
     core::{
@@ -54,7 +55,7 @@ fn certification_policy(capability: &str) -> Option<CertificationPolicyV1> {
     })
 }
 
-fn runtime_version(path: &Path) -> Result<String, String> {
+fn resolve_runtime_version_v1(path: &Path) -> Result<String, String> {
     let mut command = Command::new(path);
 
     #[cfg(target_os = "windows")]
@@ -132,7 +133,7 @@ pub fn resolve_per_model_states(
     installation_id: &str,
     acceleration: &str,
 ) -> Result<Vec<PerModelStateV1>, String> {
-    let runtime_version = runtime_version(runtime_path)?;
+    let runtime_version = resolve_runtime_version_v1(runtime_path)?;
     let certificates = load_certificates();
 
     let mut states = Vec::new();
@@ -203,6 +204,34 @@ pub fn resolve_per_model_states(
             relevant_certificate_seen = true;
             state.certificate_loaded = true;
 
+            let certificate_acceleration =
+                if certificate.acceleration == acceleration
+                    || certificate.acceleration == "cpu"
+                {
+                    certificate.acceleration.as_str()
+                } else {
+                    acceleration
+                };
+            let certificate_runtime_version =
+                if certificate.acceleration == "cpu"
+                    && acceleration != "cpu"
+                {
+                    let cpu_path =
+                        resolve_cpu_llama_server_path_v1()
+                            .ok();
+
+                    let Some(cpu_path) = cpu_path else {
+                        continue;
+                    };
+
+                    let Ok(version) = resolve_runtime_version_v1(&cpu_path) else {
+                        continue;
+                    };
+
+                    version
+                } else {
+                    runtime_version.clone()
+                };
             let context = CertificateMatchContext {
                 installation_id,
                 model_id: &artifact_id,
@@ -210,8 +239,8 @@ pub fn resolve_per_model_states(
                 model_capability: model.capability,
                 quantization: policy.quantization,
                 runtime: model.runtime,
-                runtime_version: &runtime_version,
-                acceleration,
+                runtime_version: &certificate_runtime_version,
+                acceleration: certificate_acceleration,
                 certification_pack_id: certificate.certification_pack_id.as_str(),
                 benchmark_mode: "no_cache_prompt",
                 capacity_policy_version: policy.capacity_policy_version,
@@ -221,6 +250,8 @@ pub fn resolve_per_model_states(
             let failures = certificate_match_failures(certificate, &context);
 
             if failures.is_empty() {
+                state.acceleration = certificate.acceleration.clone();
+                state.runtime_version = certificate.runtime_version.clone();
                 state.status = "ready".into();
                 state.capacity_status = CapacityStatus::Certified;
                 state.certified_concurrency = Some(certificate.certified_concurrency);

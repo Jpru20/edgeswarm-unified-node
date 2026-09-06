@@ -25,29 +25,88 @@ pub struct LlamaProcessConfig {
     pub startup_timeout: Duration,
 }
 
+fn runtime_has_gpu_backend_v1(executable: &std::path::Path) -> bool {
+    executable
+        .parent()
+        .map(|directory| {
+            directory.join("ggml-cuda.dll").is_file()
+                || directory.join("ggml-vulkan.dll").is_file()
+        })
+        .unwrap_or(false)
+}
+pub fn runtime_acceleration_for_config_v1(
+    config: &LlamaProcessConfig,
+) -> String {
+    if config.gpu_layers == 0 {
+        return "cpu".into();
+    }
+
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        return "metal".into();
+    }
+
+    if let Some(directory) = config.executable.parent() {
+        if let Ok(entries) = std::fs::read_dir(directory) {
+            let names = entries
+                .flatten()
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .map(|name| name.to_ascii_lowercase())
+                .collect::<Vec<_>>();
+
+            if names.iter().any(|name| name.contains("ggml-cuda")) {
+                return "cuda".into();
+            }
+
+            if names.iter().any(|name| name.contains("ggml-vulkan")) {
+                return "vulkan".into();
+            }
+        }
+    }
+
+    let detected = adapters::detect_acceleration().backend;
+
+    if matches!(detected.as_str(), "cuda" | "vulkan" | "metal") {
+        return detected;
+    }
+
+    "cpu".into()
+}
 impl LlamaProcessConfig {
     pub fn for_model(model_path: impl Into<PathBuf>) -> Result<Self, String> {
+        let executable = resolve_llama_server_path_v1()?;
+
+        let gpu_layers = env::var("EDGESWARM_LLAMA_GPU_LAYERS")
+            .ok()
+            .and_then(|value| value.parse::<i32>().ok())
+            .unwrap_or_else(|| {
+                if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+                    999
+                } else if cfg!(target_os = "windows")
+                    && executable
+                        .parent()
+                        .map(|directory| {
+                            directory.join("ggml-cuda.dll").is_file()
+                                || directory.join("ggml-vulkan.dll").is_file()
+                        })
+                        .unwrap_or(false)
+                {
+                    -1
+                } else {
+                    0
+                }
+            });
+
         Ok(Self {
-            executable: resolve_llama_server_path_v1()?,
+            executable,
             model_path: model_path.into(),
             host: LLAMA_DEFAULT_HOST.into(),
             port: LLAMA_DEFAULT_PORT,
             context_tokens: 4096,
             threads: 8,
-            gpu_layers: std::env::var("EDGESWARM_LLAMA_GPU_LAYERS")
-                .ok()
-                .and_then(|value| value.parse::<i32>().ok())
-                .unwrap_or_else(|| {
-                    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-                        999
-                    } else {
-                        0
-                    }
-                }),
+            gpu_layers,
             startup_timeout: Duration::from_secs(180),
         })
     }
-
     pub fn base_url(&self) -> String {
         format!("http://{}:{}", self.host, self.port)
     }
@@ -56,6 +115,8 @@ impl LlamaProcessConfig {
 pub struct ManagedLlamaProcess {
     child: Child,
     base_url: String,
+    executable: PathBuf,
+    acceleration: String,
 }
 
 impl ManagedLlamaProcess {
@@ -97,6 +158,8 @@ impl ManagedLlamaProcess {
         let mut managed = Self {
             child,
             base_url: config.base_url(),
+            executable: config.executable.clone(),
+            acceleration: runtime_acceleration_for_config_v1(config),
         };
 
         if let Err(error) = managed.wait_until_ready(config.startup_timeout) {
@@ -109,6 +172,13 @@ impl ManagedLlamaProcess {
 
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+    pub fn executable_path(&self) -> &std::path::Path {
+        &self.executable
+    }
+
+    pub fn acceleration(&self) -> &str {
+        &self.acceleration
     }
 
     pub fn stop(&mut self) {
@@ -169,6 +239,48 @@ impl Drop for ManagedLlamaProcess {
     }
 }
 
+pub fn resolve_cpu_llama_server_path_v1() -> Result<PathBuf, String> {
+    let filename = runtime_executable_filename_v1();
+
+    if let Ok(executable) = env::current_exe() {
+        if let Some(dir) = executable.parent() {
+            for path in [
+                dir.join("resources").join("runtime").join("current").join(filename),
+                dir.join("runtime").join("current").join(filename),
+                dir.join("runtime").join(filename),
+            ] {
+                if path.is_file() {
+                    return Ok(path);
+                }
+            }
+        }
+    }
+
+    Err("cpu_llama_server_not_installed".into())
+}
+
+pub fn start_managed_llama_with_cpu_fallback_v1(
+    config: &LlamaProcessConfig,
+) -> Result<ManagedLlamaProcess, String> {
+    let requested = runtime_acceleration_for_config_v1(config);
+
+    match ManagedLlamaProcess::start(config) {
+        Ok(runtime) => Ok(runtime),
+        Err(primary_error) if requested == "cuda" || requested == "vulkan" => {
+            println!("LLAMA_ACCELERATED_RUNTIME_FAILED={primary_error}");
+            println!("LLAMA_CPU_FALLBACK_ATTEMPTED=true");
+
+            let mut fallback = config.clone();
+            fallback.executable = resolve_cpu_llama_server_path_v1()?;
+            fallback.gpu_layers = 0;
+
+            let runtime = ManagedLlamaProcess::start(&fallback)?;
+            println!("LLAMA_CPU_FALLBACK_ACTIVE=true");
+            Ok(runtime)
+        }
+        Err(error) => Err(error),
+    }
+}
 pub fn resolve_model_root_v1() -> Result<PathBuf, String> {
     if let Some(path) = env::var_os("EDGESWARM_MODEL_ROOT") {
         let path = PathBuf::from(path);
@@ -246,6 +358,40 @@ pub fn resolve_llama_server_path_v1() -> Result<PathBuf, String> {
 
     let filename = runtime_executable_filename_v1();
 
+    // WINDOWS_ACCELERATED_RUNTIME_SELECTION_V1
+    #[cfg(target_os = "windows")]
+    {
+        let acceleration = adapters::detect_acceleration();
+
+        let variant = match acceleration.backend.as_str() {
+            "cuda" => Some("cuda"),
+            "vulkan" => Some("vulkan"),
+            _ => None,
+        };
+
+        if let Some(variant) = variant {
+            if let Ok(executable) = env::current_exe() {
+                if let Some(directory) = executable.parent() {
+                    let path = directory
+                        .join("resources")
+                        .join("runtime")
+                        .join(variant)
+                        .join("current")
+                        .join(filename);
+
+                    if path.is_file() {
+                        println!("LLAMA_RUNTIME_VARIANT={variant}");
+                        return Ok(path);
+                    }
+                }
+            }
+
+            println!(
+                "LLAMA_ACCELERATED_RUNTIME_UNAVAILABLE={}",
+                acceleration.backend
+            );
+        }
+    }
     // UNIFIED_BUNDLED_LLAMA_RUNTIME_V1
     // Each supported release ships its native llama runtime under
     // runtime/current beside the EdgeSwarm executable.

@@ -7,6 +7,8 @@
                                },
                    "resources":  [
                                      "resources/runtime/current/",
+            "resources/runtime/cuda/current/",
+            "resources/runtime/vulkan/current/",
                                      "resources/windows/vc_redist.x64.exe"
                                  ]
                }
