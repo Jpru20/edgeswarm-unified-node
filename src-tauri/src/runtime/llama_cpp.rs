@@ -337,6 +337,13 @@ impl CertificationExecutor for LlamaCppHttpExecutor {
                             println!(
                                     "CERTIFICATION_WORKLOAD_PROGRESS={concurrency}|{done}|{total_workloads}"
                                 );
+
+                            crate::core::certification_progress::
+                                certification_workload_progress_v1(
+                                    concurrency,
+                                    done,
+                                    total_workloads,
+                                );
                         }
 
                         Ok(Err(error)) => {

@@ -2,6 +2,7 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import "./App.css";
+import swarmLogo from "./assets/swarm-logo.png";
 
 type Screen = "login" | "mfa" | "dashboard";
 
@@ -29,12 +30,27 @@ type ModelDownloadProgress = {
   etaSeconds?: number | null;
 };
 
+type CertificationProgress = {
+  state: string;
+  maximumConcurrency: number;
+  currentConcurrency?: number | null;
+  completedWorkloads: number;
+  totalWorkloads: number;
+  testedConcurrencyLevels: number[];
+  certifiedConcurrency: number;
+  rejectedConcurrency?: number | null;
+  lastError?: string | null;
+};
+
 type NodeServiceStatus = {
   running: boolean;
+  desiredRunning: boolean;
   stopping: boolean;
   lastError?: string | null;
   logs: string[];
   modelDownload?: ModelDownloadProgress | null;
+  certification?: CertificationProgress | null;
+  capacityTestRequested?: boolean;
 };
 
 type ModelState = {
@@ -94,6 +110,7 @@ function App() {
   const [serviceStatus, setServiceStatus] =
     useState<NodeServiceStatus>({
       running: false,
+      desiredRunning: false,
       stopping: false,
       lastError: null,
       logs: [],
@@ -106,6 +123,12 @@ function App() {
   const [ledgerBusy, setLedgerBusy] = useState(false);
   const ledgerSyncInFlightRef = useRef(false);
   const lastLedgerTriggerRef = useRef("");
+
+  // CERTIFIED_CAPACITY_EVENT_REFRESH_V3
+  // Full NodeState detection is expensive. Refresh it only when
+  // provider/certification state actually changes.
+  const nodeStateRefreshKeyRef = useRef("");
+
   const consoleRef = useRef<HTMLElement | null>(null);
   const shouldFollowConsoleRef = useRef(true);
 
@@ -146,7 +169,7 @@ function App() {
     setNodeActionBusy(true);
 
     try {
-      const command = serviceStatus.running
+      const command = serviceStatus.desiredRunning
         ? "stop_node"
         : "start_node";
 
@@ -254,6 +277,56 @@ function App() {
       consoleElement.scrollTop = consoleElement.scrollHeight;
     }
   }, [serviceStatus.logs, serviceStatus.lastError]);
+
+
+  // CERTIFIED_CAPACITY_EVENT_REFRESH_V3
+  //
+  // Never poll get_node_state: it performs full machine/model
+  // detection. Refresh only on meaningful provider state changes.
+  useEffect(() => {
+    if (screen !== "dashboard") {
+      nodeStateRefreshKeyRef.current = "";
+      return;
+    }
+
+    const certificationState =
+      serviceStatus.certification?.state
+        ?.trim()
+        .toLowerCase() ?? "";
+
+    const certifiedConcurrency =
+      serviceStatus.certification?.certifiedConcurrency ?? 0;
+
+    const providerReady =
+      serviceStatus.running;
+
+    const certificationComplete =
+      certificationState === "complete";
+
+    if (!providerReady && !certificationComplete) {
+      return;
+    }
+
+    const refreshKey =
+      `${providerReady}:${certificationState}:${certifiedConcurrency}`;
+
+    if (
+      nodeStateRefreshKeyRef.current === refreshKey
+    ) {
+      return;
+    }
+
+    nodeStateRefreshKeyRef.current = refreshKey;
+
+    void loadNodeState().catch(() => {
+      // Preserve the last valid NodeState.
+    });
+  }, [
+    screen,
+    serviceStatus.running,
+    serviceStatus.certification?.state,
+    serviceStatus.certification?.certifiedConcurrency,
+  ]);
 
   async function handleLogin(event: FormEvent) {
     event.preventDefault();
@@ -405,11 +478,7 @@ function App() {
 
   const visibleModel = readyModel ?? models[0] ?? null;
 
-  const hardwareId =
-    nodeState?.hardwareIdentity?.hardwareId ?? "unavailable";
 
-  const hardwareShort =
-    hardwareId.length >= 8 ? hardwareId.slice(0, 8) : hardwareId;
 
   const ramGb = nodeState?.hardware
     ? Math.round(nodeState.hardware.totalMemoryBytes / (1024 ** 3))
@@ -430,113 +499,370 @@ function App() {
       : `$${totalEarnedUsd.toFixed(8)} USD`;
 
   return (
-    <main className="app dashboard">
-      <h1>Edge Swarm Provider Node</h1>
+    <main className="dashboard-modern">
+      <div className="swarm-shell">
+        <header className="swarm-topbar">
+          <div className="swarm-brand">
+            <img
+              className="swarm-brand-logo"
+              src={swarmLogo}
+              alt="Swarm"
+            />
+            <div>
+              <div className="swarm-brand-name">Swarm</div>
+              <div className="swarm-brand-subtitle">
+                Distributed AI Provider
+              </div>
+            </div>
+          </div>
 
-      <div className="attestation">Hardware Attestation: Valid [{hardwareShort}]</div>
+          <div className="swarm-topbar-meta">
+            <span className="swarm-version">
+              v{appVersion || "..."}
+            </span>
+            <span
+              className={`swarm-status-pill ${
+                serviceStatus.running ? "online" : "offline"
+              }`}
+            >
+              <span className="swarm-status-dot" />
+              {serviceStatus.stopping
+                ? "Stopping"
+                : serviceStatus.running
+                  ? "Online"
+                  : "Offline"}
+            </span>
+          </div>
+        </header>
 
-      <div className="account">
-        Logged in as: {providerEmail}
+        <section className="swarm-hero">
+          <div className="swarm-hero-copy">
+            <div className="swarm-eyebrow">
+              PROVIDER NODE
+            </div>
+
+            <h1>
+              {serviceStatus.running
+                ? "Your node is online"
+                : "Your node is paused"}
+            </h1>
+
+            <p>
+              {serviceStatus.running
+                ? `${gpuName} \u00B7 ${
+                    visibleModel?.acceleration ??
+                    nodeState?.acceleration.backend ??
+                    "Detecting runtime"
+                  }`
+                : "Start your node to make this device available to Swarm."}
+            </p>
+          </div>
+
+          <button
+            className={`swarm-primary-button ${
+              serviceStatus.desiredRunning ? "stop" : ""
+            }`}
+            type="button"
+            onClick={toggleNode}
+            disabled={nodeActionBusy || serviceStatus.stopping}
+          >
+            {serviceStatus.stopping
+              ? "Stopping..."
+              : serviceStatus.desiredRunning
+                ? "Stop node"
+                : "Start node"}
+          </button>
+        </section>
+
+        {serviceStatus.certification?.state === "running" && (
+          <section className="swarm-card swarm-certification-card">
+            <div className="swarm-card-heading">
+              <div>
+                <div className="swarm-eyebrow">
+                  DEVICE OPTIMIZATION
+                </div>
+                <h2>Finding your best capacity</h2>
+              </div>
+              <div className="swarm-live-badge">
+                Testing
+              </div>
+            </div>
+
+            <p className="swarm-card-description">
+              Swarm is testing how many AI tasks this device can
+              run reliably at the same time.
+            </p>
+
+            <div className="swarm-cert-list">
+              {Array.from(
+                {
+                  length:
+                    serviceStatus.certification.maximumConcurrency,
+                },
+                (_, index) => index + 1,
+              ).map((level) => {
+                const cert = serviceStatus.certification!;
+                const rejected =
+                  cert.rejectedConcurrency === level;
+                const passed =
+                  cert.testedConcurrencyLevels.includes(level) &&
+                  level <= cert.certifiedConcurrency;
+                const testing =
+                  cert.currentConcurrency === level;
+
+                return (
+                  <div className="swarm-cert-row" key={level}>
+                    <div>
+                      <strong>
+                        {level} worker{level === 1 ? "" : "s"}
+                      </strong>
+                      <span>
+                        {level === 1
+                          ? "Single AI task"
+                          : `${level} simultaneous AI tasks`}
+                      </span>
+                    </div>
+
+                    <span
+                      className={`swarm-cert-state ${
+                        rejected
+                          ? "rejected"
+                          : passed
+                            ? "passed"
+                            : testing
+                              ? "testing"
+                              : "waiting"
+                      }`}
+                    >
+                      {rejected
+                        ? "Rejected"
+                        : passed
+                          ? "Pass"
+                          : testing
+                            ? `${cert.completedWorkloads}/${cert.totalWorkloads}`
+                            : "Waiting"}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {serviceStatus.modelDownload &&
+          ["downloading", "verifying"].includes(
+            serviceStatus.modelDownload.status,
+          ) && (
+            <section className="swarm-card">
+              <div className="swarm-card-heading">
+                <div>
+                  <div className="swarm-eyebrow">
+                    MODEL SETUP
+                  </div>
+                  <h2>
+                    {serviceStatus.modelDownload.status ===
+                    "verifying"
+                      ? "Verifying model"
+                      : "Preparing your AI model"}
+                  </h2>
+                </div>
+
+                <strong>
+                  {serviceStatus.modelDownload.percent.toFixed(0)}%
+                </strong>
+              </div>
+
+              <div className="swarm-progress-track">
+                <div
+                  className="swarm-progress-fill"
+                  style={{
+                    width: `${Math.min(
+                      100,
+                      Math.max(
+                        0,
+                        serviceStatus.modelDownload.percent,
+                      ),
+                    )}%`,
+                  }}
+                />
+              </div>
+            </section>
+          )}
+
+        <div className="swarm-metric-grid">
+          <section className="swarm-card swarm-earnings-card">
+            <div className="swarm-eyebrow">EARNINGS</div>
+            <div className="swarm-metric-value">
+              {earningsText}
+            </div>
+            <div className="swarm-muted">
+              Total earned
+            </div>
+
+            <button
+              className="swarm-text-button"
+              type="button"
+              onClick={() => void syncLedger()}
+              disabled={ledgerBusy}
+            >
+              {ledgerBusy ? "Syncing..." : "Refresh earnings"}
+            </button>
+          </section>
+
+          <section className="swarm-card">
+            <div className="swarm-eyebrow">
+              CERTIFIED CAPACITY
+            </div>
+            <div className="swarm-metric-value">
+              {visibleModel?.certifiedConcurrency ?? "?"}
+            </div>
+            <div className="swarm-muted">
+              concurrent task
+              {visibleModel?.certifiedConcurrency === 1
+                ? ""
+                : "s"}
+            </div>
+          </section>
+        </div>
+
+        <section className="swarm-card">
+          <div className="swarm-card-heading">
+            <div>
+              <div className="swarm-eyebrow">
+                DEVICE PERFORMANCE
+              </div>
+              <h2>
+                {visibleModel?.selectedModel ??
+                  "Preparing device"}
+              </h2>
+            </div>
+
+            <span
+              className={`swarm-model-badge ${
+                readyModel ? "ready" : ""
+              }`}
+            >
+              {capabilityText}
+            </span>
+          </div>
+
+          <div className="swarm-detail-list">
+            <div className="swarm-detail-row">
+              <span>AI model</span>
+              <strong>
+                {visibleModel?.selectedModel ?? "Detecting"}
+              </strong>
+            </div>
+
+            <div className="swarm-detail-row">
+              <span>Acceleration</span>
+              <strong>
+                {visibleModel?.acceleration ??
+                  nodeState?.acceleration.backend ??
+                  "Detecting"}
+              </strong>
+            </div>
+
+            <div className="swarm-detail-row">
+              <span>GPU</span>
+              <strong>{gpuName}</strong>
+            </div>
+
+            <div className="swarm-detail-row">
+              <span>Memory</span>
+              <strong>
+                {ramGb ?? "?"} GB
+              </strong>
+            </div>
+
+            <div className="swarm-detail-row">
+              <span>Processor</span>
+              <strong>{cpuName}</strong>
+            </div>
+          </div>
+        </section>
+
+        <section className="swarm-card swarm-activity-card">
+          <div className="swarm-card-heading">
+            <div>
+              <div className="swarm-eyebrow">
+                ACTIVITY
+              </div>
+              <h2>
+                {serviceStatus.running
+                  ? "Node status"
+                  : "Node paused"}
+              </h2>
+            </div>
+
+            <span
+              className={`swarm-activity-indicator ${
+                serviceStatus.running ? "active" : ""
+              }`}
+            />
+          </div>
+
+          <p className="swarm-activity-message">
+            {serviceStatus.lastError ||
+              serviceStatus.logs
+                .slice()
+                .reverse()
+                .find((line) =>
+                  line.startsWith("POLL_BLOCK_REASON="),
+                )
+                ?.replace("POLL_BLOCK_REASON=", "") ||
+              (serviceStatus.running
+                ? "Waiting for work"
+                : "Start the node when you are ready.")}
+          </p>
+        </section>
+
+        <details className="swarm-diagnostics">
+          <summary>
+            <span>Diagnostics</span>
+            <span className="swarm-muted">
+              Technical details
+            </span>
+          </summary>
+
+          <section
+            className="swarm-diagnostics-console"
+            ref={consoleRef}
+            onScroll={(event) => {
+              const element = event.currentTarget;
+              const distanceFromBottom =
+                element.scrollHeight -
+                element.scrollTop -
+                element.clientHeight;
+
+              shouldFollowConsoleRef.current =
+                distanceFromBottom < 32;
+            }}
+          >
+            <div>
+              &gt; Swarm Provider Node v
+              {appVersion || "..."}
+            </div>
+
+            {serviceStatus.logs.map((line, index) => (
+              <div key={`${index}-${line}`}>
+                &gt; {line}
+              </div>
+            ))}
+
+            {serviceStatus.lastError && (
+              <div>
+                &gt; Error: {serviceStatus.lastError}
+              </div>
+            )}
+          </section>
+        </details>
+
+        <footer className="swarm-footer">
+          <span>{providerEmail}</span>
+          <span>Swarm v{appVersion || "..."}</span>
+        </footer>
       </div>
-
-      <div className="version">Node Version: v{appVersion || "..."}</div>
-
-      <section className="model-panel">
-        <div className="panel-heading">Device Capability Profile</div>
-
-        <div className="model-name">
-          {visibleModel?.selectedModel ?? "Awaiting capability profile"}
-        </div>
-
-        <div className={readyModel ? "model-status ready" : "model-status"}>
-          {capabilityText}
-        </div>
-
-        {/* MODEL_DOWNLOAD_PROGRESS_UI_V2 */}
-        {serviceStatus.modelDownload && (
-          <>
-            <div className="progress-track">
-              <div
-                className="progress-fill"
-                style={{
-                  width: `${Math.max(
-                    0,
-                    Math.min(100, serviceStatus.modelDownload.percent),
-                  )}%`,
-                }}
-              />
-            </div>
-            <div className="progress-label">
-              {serviceStatus.modelDownload.status === "downloading"
-                ? `Downloading model — ${serviceStatus.modelDownload.percent.toFixed(1)}% · ${(serviceStatus.modelDownload.downloadedBytes / 1073741824).toFixed(2)} / ${(serviceStatus.modelDownload.totalBytes / 1073741824).toFixed(2)} GiB · ${(serviceStatus.modelDownload.bytesPerSecond / 1048576).toFixed(1)} MB/s${serviceStatus.modelDownload.etaSeconds ? ` · ~${Math.ceil(serviceStatus.modelDownload.etaSeconds / 60)} min remaining` : ""}`
-                : serviceStatus.modelDownload.status === "verifying"
-                  ? "Verifying model integrity..."
-                  : serviceStatus.modelDownload.status === "certifying"
-                    ? "Certifying this device..."
-                    : serviceStatus.modelDownload.status === "ready"
-                      ? "Model ready"
-                      : "Preparing model..."}
-            </div>
-          </>
-        )}
-      </section>
-
-      <div className="earnings">{earningsText}</div>
-      <div className="earnings-label">Total Earnings</div>
-
-      <button
-        className={`start-button ${
-          serviceStatus.running ? "running" : ""
-        }`}
-        type="button"
-        onClick={toggleNode}
-        disabled={nodeActionBusy || serviceStatus.stopping}
-      >
-        {serviceStatus.stopping
-          ? "STOPPING..."
-          : serviceStatus.running
-            ? "STOP NODE"
-            : "START NODE"}
-      </button>
-
-      <section
-        className="console"
-        ref={consoleRef}
-        onScroll={(event) => {
-          const element = event.currentTarget;
-          const distanceFromBottom =
-            element.scrollHeight - element.scrollTop - element.clientHeight;
-
-          shouldFollowConsoleRef.current = distanceFromBottom < 32;
-        }}
-      >
-        <div>&gt; System Initialized. Identity Verified via Supabase Auth.</div>
-        <div>&gt; Running Edge Swarm Provider Node v{appVersion || "..."}</div>
-        <div>
-          &gt; Hardware: {cpuName} | RAM: {ramGb ?? "Unknown"}GB | GPU: {gpuName}
-        </div>
-
-        {serviceStatus.logs.map((line, index) => (
-          <div key={`${index}-${line}`}>
-            &gt; {line}
-          </div>
-        ))}
-
-        {serviceStatus.lastError && (
-          <div>
-            &gt; Node service error: {serviceStatus.lastError}
-          </div>
-        )}
-      </section>
-
-      <button
-        className="ledger-button"
-        type="button"
-        onClick={() => void syncLedger()}
-        disabled={ledgerBusy}
-      >
-        SYNC LEDGER DATA
-      </button>
     </main>
   );
 }

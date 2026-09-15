@@ -15,10 +15,12 @@ use crate::{
         llama_process::{start_managed_llama_with_cpu_fallback_v1, LlamaProcessConfig},
     },
 };
+use reqwest::blocking::Client;
+use serde_json::Value;
 use std::{
     path::Path,
     process::Command,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 fn approved_model_from_sha(model_sha: &str) -> Option<(&'static str, &'static str)> {
@@ -57,6 +59,54 @@ fn approved_model_from_sha(model_sha: &str) -> Option<(&'static str, &'static st
         )),
         _ => None,
     }
+}
+
+pub fn reported_runtime_slot_count_v1(
+    base_url: &str,
+) -> Result<u16, String> {
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(5))
+        .no_proxy()
+        .build()
+        .map_err(|_| "llama_slot_client_failed".to_string())?;
+
+    let response = client
+        .get(format!(
+            "{}/slots",
+            base_url.trim_end_matches('/')
+        ))
+        .send()
+        .map_err(|_| "llama_slots_request_failed".to_string())?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "llama_slots_http_{}",
+            response.status().as_u16()
+        ));
+    }
+
+    let slots = response
+        .json::<Vec<Value>>()
+        .map_err(|_| "llama_slots_response_invalid".to_string())?;
+
+    let count =
+        u16::try_from(slots.len())
+            .map_err(|_| "llama_slot_count_overflow".to_string())?;
+
+    if count == 0 {
+        return Err("llama_slot_count_zero".into());
+    }
+
+    Ok(count)
+}
+
+pub fn certification_max_concurrency_v1(
+    reported_slots: u16,
+) -> u16 {
+    CapacityPolicy::default()
+        .maximum_concurrency
+        .min(reported_slots.max(1))
 }
 
 fn runtime_version(path: &Path) -> Result<String, String> {
@@ -127,11 +177,6 @@ pub fn certify_model_path_v1(
     let mut pack = built_in_neural_realworld_v1()?;
     bind_neural_realworld_pack_v1(&mut pack, model_capability)?;
 
-    let mut policy = CapacityPolicy::default();
-    policy.maximum_concurrency = 2;
-
-    let runner = CertificationRunner::new(policy);
-
     let mut runtime_config = LlamaProcessConfig::for_model(model_path_string)?;
     runtime_config.executable = runtime_path.to_path_buf();
 
@@ -147,6 +192,39 @@ pub fn certify_model_path_v1(
         managed_runtime.acceleration().to_string();
     let runtime_base_url = managed_runtime.base_url().to_string();
 
+    let reported_slots =
+        reported_runtime_slot_count_v1(
+            &runtime_base_url
+        )
+        .unwrap_or_else(|error| {
+            println!(
+                "LLAMA_SLOT_DISCOVERY_FAILED={error}"
+            );
+            1
+        });
+
+    let maximum_concurrency =
+        certification_max_concurrency_v1(
+            reported_slots
+        );
+
+    let mut policy =
+        CapacityPolicy::default();
+
+    policy.maximum_concurrency =
+        maximum_concurrency;
+
+    let runner =
+        CertificationRunner::new(policy);
+
+    println!(
+        "LLAMA_REPORTED_SLOT_COUNT={reported_slots}"
+    );
+
+    println!(
+        "CERTIFICATION_DYNAMIC_MAX_CONCURRENCY={maximum_concurrency}"
+    );
+
     println!("LLAMA_RUNTIME_OWNERSHIP=managed");
     println!("LLAMA_BASE_URL={runtime_base_url}");
 
@@ -156,12 +234,26 @@ pub fn certify_model_path_v1(
     println!("REAL_CERTIFICATION_STARTED=true");
     println!("PACK_ID={}", pack.pack_id);
     println!("WORKLOAD_COUNT={}", pack.workloads.len());
-    println!("MAXIMUM_CONCURRENCY_TESTED=2");
+    println!("MAXIMUM_CONCURRENCY_TESTED={maximum_concurrency}");
     println!("MODEL_SHA256={model_sha}");
     println!("RUNTIME_VERSION={runtime_version}");
     println!("ACCELERATION={runtime_acceleration}");
 
-    let report = runner.run(&pack, &mut executor)?;
+    crate::core::certification_progress::certification_begin_v1(
+        maximum_concurrency,
+        pack.workloads.len(),
+    );
+
+    let report =
+        match runner.run(&pack, &mut executor) {
+            Ok(report) => report,
+            Err(error) => {
+                crate::core::certification_progress::certification_error_v1(
+                    error.clone()
+                );
+                return Err(error);
+            }
+        };
 
     let baseline = report
         .samples
@@ -238,6 +330,12 @@ pub fn certify_model_path_v1(
 
     let path = save_certificate(&certificate)?;
     let loaded = load_certificate(&path)?;
+
+    crate::core::certification_progress::certification_complete_v1(
+        loaded.certified_concurrency,
+        loaded.rejected_concurrency,
+        loaded.tested_concurrency_levels.clone(),
+    );
 
     println!(
         "TESTED_CONCURRENCY_LEVELS={:?}",

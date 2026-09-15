@@ -4,11 +4,13 @@ pub mod runtime;
 
 #[cfg(feature = "desktop")]
 mod desktop {
+    use tauri::Manager;
     use crate::core::{
         auth_client::SupabaseAuthClient,
         auth_login_client::SupabaseLoginClient,
         auth_login_contract::{jwt_aal, verified_totp_factor},
         auth_session::AuthSession,
+        desired_state::{persist_desired_node_state_v1, DesiredNodeStateV1},
         model_provisioning::{model_download_progress_v1, ModelDownloadProgressV1},
         node_service::{clear_node_service_logs, node_service_logs, run_node_service},
         wallet_bootstrap::bootstrap_authenticated_device_wallet_v1,
@@ -63,10 +65,13 @@ mod desktop {
     #[serde(rename_all = "camelCase")]
     struct NodeServiceStatus {
         running: bool,
+        desired_running: bool,
         stopping: bool,
         last_error: Option<String>,
         logs: Vec<String>,
         model_download: Option<ModelDownloadProgressV1>,
+        certification: crate::core::certification_progress::CertificationProgressV1,
+        capacity_test_requested: bool,
     }
 
     #[derive(Debug, Serialize)]
@@ -231,107 +236,219 @@ mod desktop {
     }
 
     #[tauri::command]
-    fn auth_verify(
+    async fn auth_verify(
         code: String,
         auth_state: tauri::State<'_, Mutex<AppAuthState>>,
     ) -> Result<AuthVerifyResult, String> {
-        let code = code.trim();
+        let code = code.trim().to_string();
 
-        if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
-            return Err("invalid_mfa_code_format".into());
+        if code.len() != 6
+            || !code.chars().all(|c| c.is_ascii_digit())
+        {
+            return Err(
+                "invalid_mfa_code_format".into()
+            );
         }
 
-        let (email, access_token, factor_id, challenge_id) = {
+        // Copy only owned values while holding the lock.
+        // No mutex guard is held across await or network work.
+        let (
+            email,
+            access_token,
+            factor_id,
+            challenge_id,
+            wallet_password,
+        ) = {
             let state = auth_state
                 .lock()
-                .map_err(|_| "auth_state_lock_failed".to_string())?;
+                .map_err(|_| {
+                    "auth_state_lock_failed".to_string()
+                })?;
 
             (
                 state.pending_email.clone(),
-                state.pending_access_token.as_ref().map(|v| v.to_string()),
+                state.pending_access_token
+                    .as_ref()
+                    .map(|value| value.to_string()),
                 state.pending_factor_id.clone(),
                 state.pending_challenge_id.clone(),
+                state.wallet_password
+                    .as_ref()
+                    .map(|value| {
+                        Zeroizing::new(
+                            value.as_str().to_owned()
+                        )
+                    }),
             )
         };
 
-        let email = email.ok_or_else(|| "pending_auth_email_missing".to_string())?;
+        let email = email.ok_or_else(|| {
+            "pending_auth_email_missing".to_string()
+        })?;
 
         let access_token =
-            access_token.ok_or_else(|| "pending_auth_access_token_missing".to_string())?;
+            access_token.ok_or_else(|| {
+                "pending_auth_access_token_missing"
+                    .to_string()
+            })?;
 
-        let factor_id = factor_id.ok_or_else(|| "pending_auth_factor_missing".to_string())?;
+        let factor_id =
+            factor_id.ok_or_else(|| {
+                "pending_auth_factor_missing".to_string()
+            })?;
 
         let challenge_id =
-            challenge_id.ok_or_else(|| "pending_auth_challenge_missing".to_string())?;
+            challenge_id.ok_or_else(|| {
+                "pending_auth_challenge_missing"
+                    .to_string()
+            })?;
 
-        let login = SupabaseLoginClient::from_env()?;
+        let wallet_password =
+            wallet_password.ok_or_else(|| {
+                "wallet_bootstrap_password_missing"
+                    .to_string()
+            })?;
 
-        let verified = login.verify(&access_token, &factor_id, &challenge_id, code)?;
+        println!(
+            "AUTH_VERIFY_BACKGROUND_WORKER_STARTED=true"
+        );
 
-        if jwt_aal(&verified.access_token).as_deref() != Some("aal2") {
-            return Err("mfa_session_not_aal2".into());
-        }
+        let verified_email =
+            tauri::async_runtime::spawn_blocking(
+                move || -> Result<String, String> {
+                    println!(
+                        "AUTH_VERIFY_STAGE=mfa_verify"
+                    );
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| "clock_failed".to_string())?
-            .as_secs();
+                    let login =
+                        SupabaseLoginClient::from_env()?;
 
-        let expires_at = verified
-            .expires_at
-            .or_else(|| {
-                verified
-                    .expires_in
-                    .map(|seconds| now.saturating_add(seconds))
-            })
-            .ok_or_else(|| "mfa_session_expiry_missing".to_string())?;
+                    let verified =
+                        login.verify(
+                            &access_token,
+                            &factor_id,
+                            &challenge_id,
+                            &code,
+                        )?;
 
-        let session = AuthSession::from_authenticated_session(
-            &email,
-            &verified.access_token,
-            &verified.refresh_token,
-            expires_at,
-        )?;
+                    if jwt_aal(
+                        &verified.access_token
+                    ).as_deref()
+                        != Some("aal2")
+                    {
+                        return Err(
+                            "mfa_session_not_aal2"
+                                .into()
+                        );
+                    }
 
-        let wallet_password = {
-            let state = auth_state
-                .lock()
-                .map_err(|_| "auth_state_lock_failed".to_string())?;
+                    let now =
+                        SystemTime::now()
+                            .duration_since(
+                                UNIX_EPOCH
+                            )
+                            .map_err(|_| {
+                                "clock_failed"
+                                    .to_string()
+                            })?
+                            .as_secs();
 
-            state
-                .wallet_password
-                .as_ref()
-                .map(|value| Zeroizing::new(value.as_str().to_owned()))
-                .ok_or_else(|| "wallet_bootstrap_password_missing".to_string())?
-        };
+                    let expires_at =
+                        verified
+                            .expires_at
+                            .or_else(|| {
+                                verified
+                                    .expires_in
+                                    .map(|seconds| {
+                                        now.saturating_add(
+                                            seconds
+                                        )
+                                    })
+                            })
+                            .ok_or_else(|| {
+                                "mfa_session_expiry_missing"
+                                    .to_string()
+                            })?;
 
-        bootstrap_authenticated_device_wallet_v1(
-            &email,
-            &verified.access_token,
-            wallet_password.as_str(),
-        )?;
+                    let session =
+                        AuthSession::
+                            from_authenticated_session(
+                                &email,
+                                &verified.access_token,
+                                &verified.refresh_token,
+                                expires_at,
+                            )?;
 
-        session.save_secure()?;
+                    println!(
+                        "AUTH_VERIFY_STAGE=wallet_bootstrap"
+                    );
+
+                    bootstrap_authenticated_device_wallet_v1(
+                        &email,
+                        &verified.access_token,
+                        wallet_password.as_str(),
+                    )?;
+
+                    println!(
+                        "AUTH_VERIFY_STAGE=session_save"
+                    );
+
+                    session.save_secure()?;
+
+                    println!(
+                        "AUTH_VERIFY_STAGE=complete"
+                    );
+
+                    Ok(email)
+                },
+            )
+            .await
+            .map_err(|error| {
+                format!(
+                    "auth_verify_worker_join_failed:{error}"
+                )
+            })??;
 
         {
             let mut state = auth_state
                 .lock()
-                .map_err(|_| "auth_state_lock_failed".to_string())?;
+                .map_err(|_| {
+                    "auth_state_lock_failed".to_string()
+                })?;
+
+            if state.pending_email.as_deref()
+                != Some(
+                    verified_email.as_str()
+                )
+            {
+                return Err(
+                    "auth_state_changed_during_verify"
+                        .into()
+                );
+            }
 
             state.pending_email = None;
             state.pending_access_token = None;
             state.pending_factor_id = None;
             state.pending_challenge_id = None;
 
-            state.authenticated_email = Some(email.clone());
+            state.authenticated_email =
+                Some(verified_email.clone());
 
-            // wallet_password intentionally remains until logout/app exit
-            // or until we explicitly zeroize it after the node service owns it.
+            // wallet_password intentionally remains until
+            // logout/app exit or until explicitly zeroized.
         }
 
-        Ok(AuthVerifyResult { email })
+        println!(
+            "AUTH_VERIFY_BACKGROUND_WORKER_COMPLETE=true"
+        );
+
+        Ok(AuthVerifyResult {
+            email: verified_email,
+        })
     }
 
+    #[cfg(not(target_os = "windows"))]
     fn current_node_service_status(
         runtime: &NodeRuntimeState,
     ) -> Result<NodeServiceStatus, String> {
@@ -348,11 +465,104 @@ mod desktop {
 
         Ok(NodeServiceStatus {
             running,
+            desired_running: running,
             stopping,
             last_error,
             logs,
             model_download: model_download_progress_v1(),
+            certification: crate::core::certification_progress::certification_progress_v1(),
+            capacity_test_requested:
+                crate::core::capacity_test_control::
+                    capacity_test_request_pending_v1(),
         })
+    }
+
+
+    #[cfg(target_os = "windows")]
+    fn current_node_service_status(
+        _runtime: &NodeRuntimeState,
+    ) -> Result<NodeServiceStatus, String> {
+        let desired =
+            crate::core::desired_state::
+                effective_desired_node_state_v1();
+
+        let desired_running =
+            desired.desired_state ==
+                DesiredNodeStateV1::Running;
+
+        let bridge =
+            crate::core::node_status_bridge::
+                load_fresh_node_status_v1(3_000)
+                    .unwrap_or(None);
+
+        let running =
+            bridge.as_ref()
+                .map(|value| value.running)
+                .unwrap_or(false);
+
+        let stopping =
+            bridge.as_ref()
+                .map(|value| {
+                    value.stopping ||
+                        (!desired_running && value.running)
+                })
+                .unwrap_or(false);
+
+        Ok(NodeServiceStatus {
+            running,
+            desired_running,
+            stopping,
+            last_error:
+                bridge.as_ref()
+                    .and_then(|value| value.last_error.clone()),
+            logs:
+                bridge.as_ref()
+                    .map(|value| value.logs.clone())
+                    .unwrap_or_default(),
+            model_download:
+                bridge.as_ref()
+                    .and_then(|value| value.model_download.clone()),
+            certification:
+                bridge.as_ref()
+                    .map(|value| value.certification.clone())
+                    .unwrap_or_default(),
+            capacity_test_requested:
+                bridge.as_ref()
+                    .map(|value| {
+                        value.capacity_test_requested
+                    })
+                    .unwrap_or_else(|| {
+                        crate::core::capacity_test_control::
+                            capacity_test_request_pending_v1()
+                    }),
+        })
+    }
+
+    #[tauri::command]
+    fn request_capacity_test(
+        runtime: tauri::State<'_, NodeRuntimeState>,
+    ) -> Result<bool, String> {
+        let status =
+            current_node_service_status(&runtime)?;
+
+        if !status.running ||
+            !status.desired_running
+        {
+            return Err(
+                "capacity_test_requires_running_node"
+                    .into()
+            );
+        }
+
+        if status.certification.state == "running" {
+            return Err(
+                "capacity_test_already_running"
+                    .into()
+            );
+        }
+
+        crate::core::capacity_test_control::
+            request_capacity_test_v1()
     }
 
     #[tauri::command]
@@ -362,6 +572,51 @@ mod desktop {
         current_node_service_status(&runtime)
     }
 
+
+    #[cfg(target_os = "windows")]
+    #[tauri::command]
+    fn start_node(
+        auth_state: tauri::State<'_, Mutex<AppAuthState>>,
+        runtime: tauri::State<'_, NodeRuntimeState>,
+    ) -> Result<NodeServiceStatus, String> {
+        let wallet_password = {
+            let state = auth_state
+                .lock()
+                .map_err(|_| "auth_state_lock_failed".to_string())?;
+
+            if state.authenticated_email.is_none() {
+                return Err(
+                    "node_start_requires_authenticated_session".into()
+                );
+            }
+
+            let password = state
+                .wallet_password
+                .as_ref()
+                .ok_or_else(|| {
+                    "node_start_wallet_password_missing".to_string()
+                })?;
+
+            Zeroizing::new(password.as_str().to_owned())
+        };
+
+        crate::core::windows_restart_credential::
+            persist_windows_restart_credential_v1(
+                wallet_password.as_str(),
+            )?;
+
+        crate::core::windows_supervisor_task::
+            ensure_windows_supervisor_task_v1()?;
+
+        persist_desired_node_state_v1(
+            DesiredNodeStateV1::Running,
+            "user_start",
+        )?;
+
+        current_node_service_status(&runtime)
+    }
+
+    #[cfg(not(target_os = "windows"))]
     #[tauri::command]
     fn start_node(
         auth_state: tauri::State<'_, Mutex<AppAuthState>>,
@@ -405,6 +660,17 @@ mod desktop {
 
             Zeroizing::new(password.as_str().to_owned())
         };
+
+        #[cfg(target_os = "windows")]
+        crate::core::windows_restart_credential::
+            persist_windows_restart_credential_v1(
+                wallet_password.as_str(),
+            )?;
+
+        persist_desired_node_state_v1(
+            DesiredNodeStateV1::Running,
+            "user_start",
+        )?;
 
         clear_node_service_logs();
         runtime.stop.store(false, Ordering::Release);
@@ -460,13 +726,196 @@ mod desktop {
         current_node_service_status(&runtime)
     }
 
+
+    #[cfg(target_os = "windows")]
+    #[tauri::command]
+    fn stop_node(
+        runtime: tauri::State<'_, NodeRuntimeState>,
+    ) -> Result<NodeServiceStatus, String> {
+        persist_desired_node_state_v1(
+            DesiredNodeStateV1::UserStopped,
+            "user_stop",
+        )?;
+
+        current_node_service_status(&runtime)
+    }
+
+    #[cfg(not(target_os = "windows"))]
     #[tauri::command]
     fn stop_node(runtime: tauri::State<'_, NodeRuntimeState>) -> Result<NodeServiceStatus, String> {
+        persist_desired_node_state_v1(
+            DesiredNodeStateV1::UserStopped,
+            "user_stop",
+        )?;
         if runtime.running.load(Ordering::Acquire) {
             runtime.stop.store(true, Ordering::Release);
         }
 
         current_node_service_status(&runtime)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn update_task_control_v1(
+        mode: &str,
+    ) -> Result<(), String> {
+        use std::os::windows::process::CommandExt;
+
+        let exe =
+            std::env::current_exe()
+                .map_err(|_| "update_current_exe_failed".to_string())?;
+
+        let root =
+            exe.parent()
+                .ok_or_else(|| "update_install_dir_missing".to_string())?;
+
+        let supervisor =
+            root.join("edgeswarm-node-supervisor.exe");
+
+        let script =
+            root.join("resources")
+                .join("windows")
+                .join("supervisor-task.ps1");
+
+        if !script.is_file() {
+            return Err("update_task_script_missing".into());
+        }
+
+        let status =
+            std::process::Command::new("powershell.exe")
+                .creation_flags(0x08000000)
+                .arg("-NoProfile")
+                .arg("-ExecutionPolicy")
+                .arg("Bypass")
+                .arg("-File")
+                .arg(script)
+                .arg("-Mode")
+                .arg(mode)
+                .arg("-SupervisorPath")
+                .arg(supervisor)
+                .arg("-AppPath")
+                .arg(exe)
+                .status()
+                .map_err(|_| "update_task_control_launch_failed".to_string())?;
+
+        if !status.success() {
+            return Err(format!(
+                "update_task_control_failed:{}",
+                status.code().unwrap_or(-1)
+            ));
+        }
+
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    async fn windows_background_update_check_v1(
+        app: tauri::AppHandle,
+        endpoint_override: Option<String>,
+    ) -> Result<(), String> {
+        use tauri_plugin_updater::UpdaterExt;
+
+        println!("BACKGROUND_UPDATE_CHECK=true");
+
+        let mut updater_builder =
+            app.updater_builder()
+                .restart_after_install(false);
+
+        if let Some(endpoint_text) =
+            endpoint_override
+        {
+            let endpoint =
+                endpoint_text
+                    .parse()
+                    .map_err(|e| {
+                        format!(
+                            "background_update_endpoint_invalid:{e}"
+                        )
+                    })?;
+
+            updater_builder =
+                updater_builder
+                    .endpoints(vec![endpoint])
+                    .map_err(|e| {
+                        format!(
+                            "background_update_endpoint_failed:{e}"
+                        )
+                    })?;
+
+            println!(
+                "BACKGROUND_UPDATE_ENDPOINT_OVERRIDE=true"
+            );
+        }
+
+        let updater =
+            updater_builder
+                .build()
+                .map_err(|e| format!("background_updater_build_failed:{e}"))?;
+
+        let Some(update) =
+            updater
+                .check()
+                .await
+                .map_err(|e| format!("background_update_check_failed:{e}"))?
+        else {
+            println!("BACKGROUND_UPDATE_AVAILABLE=false");
+            return Ok(());
+        };
+
+        println!("BACKGROUND_UPDATE_AVAILABLE=true");
+        println!("BACKGROUND_UPDATE_VERSION={}", update.version);
+
+        let bytes =
+            update
+                .download(
+                    |chunk, total| {
+                        println!(
+                            "BACKGROUND_UPDATE_DOWNLOAD={chunk}|TOTAL={total:?}"
+                        );
+                    },
+                    || {
+                        println!(
+                            "BACKGROUND_UPDATE_DOWNLOAD_COMPLETE=true"
+                        );
+                    },
+                )
+                .await
+                .map_err(|e| {
+                    format!("background_update_download_failed:{e}")
+                })?;
+
+        // Signature verification is completed by Tauri before
+        // download() returns successfully.
+        println!("BACKGROUND_UPDATE_SIGNATURE_VERIFIED=true");
+
+        // Only stop paid-work processes after the complete signed
+        // updater package is safely available locally.
+        update_task_control_v1("PauseForUpdate")?;
+
+        println!("BACKGROUND_UPDATE_PROVIDER_PAUSED=true");
+
+        let update =
+            update.restart_after_install(false);
+
+        match update.install(bytes) {
+            Ok(()) => {
+                println!(
+                    "BACKGROUND_UPDATE_INSTALL_DISPATCHED=true"
+                );
+
+                Ok(())
+            }
+
+            Err(error) => {
+                // Installation did not launch successfully.
+                // Restore the existing background provider.
+                let _ =
+                    update_task_control_v1("Install");
+
+                Err(format!(
+                    "background_update_install_failed:{error}"
+                ))
+            }
+        }
     }
 
     async fn desktop_update_check_v1(
@@ -507,19 +956,104 @@ mod desktop {
             .plugin(tauri_plugin_opener::init())
             .plugin(tauri_plugin_updater::Builder::new().build())
             .setup(|app| {
-                let handle = app.handle().clone();
+                #[cfg(target_os = "windows")]
+                {
+                    let args =
+                        std::env::args()
+                            .collect::<Vec<_>>();
 
-                std::thread::spawn(move || loop {
-                    let check_handle = handle.clone();
+                    let background_update =
+                        args.iter()
+                            .any(|arg| {
+                                arg == "--background-update-check"
+                            });
 
-                    tauri::async_runtime::block_on(async move {
-                        if let Err(error) = desktop_update_check_v1(check_handle).await {
-                            println!("DESKTOP_UPDATE_ERROR={error}");
-                        }
+                    let background_update_endpoint =
+                        args.windows(2)
+                            .find_map(|pair| {
+                                if pair[0] ==
+                                    "--background-update-endpoint"
+                                {
+                                    Some(pair[1].clone())
+                                } else {
+                                    None
+                                }
+                            });
+
+                    if background_update {
+                        let handle =
+                            app.handle().clone();
+
+                        tauri::async_runtime::spawn(
+                            async move {
+                                // BACKGROUND_UPDATE_EXIT_STATUS_V1
+                                let exit_code =
+                                    match windows_background_update_check_v1(
+                                        handle.clone(),
+                                        background_update_endpoint,
+                                    ).await
+                                    {
+                                        Ok(()) => {
+                                            println!(
+                                                "BACKGROUND_UPDATE_RESULT=success"
+                                            );
+
+                                            0
+                                        }
+
+                                        Err(error) => {
+                                            eprintln!(
+                                                "BACKGROUND_UPDATE_ERROR={error}"
+                                            );
+
+                                            1
+                                        }
+                                    };
+
+                                handle.exit(exit_code);
+                            }
+                        );
+
+                        return Ok(());
+                    }
+
+                    if let Some(window) =
+                        app.get_webview_window("main")
+                    {
+                        window.show()?;
+                    }
+                }
+
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let handle =
+                        app.handle().clone();
+
+                    std::thread::spawn(move || loop {
+                        let check_handle =
+                            handle.clone();
+
+                        tauri::async_runtime::block_on(
+                            async move {
+                                if let Err(error) =
+                                    desktop_update_check_v1(
+                                        check_handle
+                                    ).await
+                                {
+                                    println!(
+                                        "DESKTOP_UPDATE_ERROR={error}"
+                                    );
+                                }
+                            }
+                        );
+
+                        std::thread::sleep(
+                            std::time::Duration::from_secs(
+                                60 * 60
+                            )
+                        );
                     });
-
-                    std::thread::sleep(std::time::Duration::from_secs(60 * 60));
-                });
+                }
 
                 Ok(())
             })
@@ -530,6 +1064,7 @@ mod desktop {
                 auth_verify,
                 provider_ledger_sync,
                 node_service_status,
+                request_capacity_test,
                 start_node,
                 stop_node
             ])

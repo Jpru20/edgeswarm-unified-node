@@ -374,3 +374,463 @@ button:disabled { cursor: default; }
   border-color: #00e6c3 !important;
   color: #ffffff !important;
 }
+
+
+/* CAPACITY_CERTIFICATION_PROGRESS_UI_V1 */
+.certification-panel {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.certification-title {
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.certification-summary,
+.certification-result {
+  margin: 4px 0;
+}
+
+.certification-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  line-height: 1.5;
+}
+
+/* CAPACITY_TEST_CONTROL_UI_V1 */
+.capacity-test-button {
+  margin-top: 8px;
+}
+
+.capacity-test-note {
+  margin-top: 6px;
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+.certified-capacity-summary {
+  margin-top: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* ==========================================================
+   SWARM MODERN PROVIDER DASHBOARD V1
+   ========================================================== */
+
+.dashboard-modern {
+  min-height: 100vh;
+  height: 100vh;
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: 24px;
+  background:
+    radial-gradient(circle at top left, #eeeaff 0, transparent 34%),
+    #f5f5f7;
+  color: #1d1d24;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system,
+    BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.swarm-shell {
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+  padding-bottom: 32px;
+}
+
+.swarm-topbar,
+.swarm-brand,
+.swarm-topbar-meta,
+.swarm-card-heading {
+  display: flex;
+  align-items: center;
+}
+
+.swarm-topbar,
+.swarm-card-heading {
+  justify-content: space-between;
+}
+
+.swarm-topbar {
+  margin-bottom: 18px;
+}
+
+.swarm-brand {
+  gap: 10px;
+}
+
+.swarm-brand-mark {
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  background: #6754e8;
+  color: white;
+  font-weight: 800;
+  font-size: 18px;
+  box-shadow: 0 6px 18px rgba(103, 84, 232, 0.25);
+}
+
+.swarm-brand-name {
+  font-size: 18px;
+  font-weight: 750;
+}
+
+.swarm-brand-subtitle,
+.swarm-muted {
+  color: #777782;
+  font-size: 12px;
+}
+
+.swarm-topbar-meta {
+  gap: 8px;
+}
+
+.swarm-version,
+.swarm-status-pill,
+.swarm-model-badge,
+.swarm-live-badge {
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.swarm-version {
+  background: #ececf1;
+  color: #65656e;
+}
+
+.swarm-status-pill {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  background: #ececf1;
+}
+
+.swarm-status-pill.online {
+  background: #e7f7ed;
+  color: #178746;
+}
+
+.swarm-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.swarm-hero,
+.swarm-card,
+.swarm-diagnostics {
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(25, 25, 35, 0.06);
+  box-shadow: 0 10px 34px rgba(28, 25, 45, 0.06);
+}
+
+.swarm-hero {
+  border-radius: 26px;
+  padding: 24px;
+  margin-bottom: 12px;
+  display: flex;
+  justify-content: space-between;
+  gap: 22px;
+  align-items: center;
+}
+
+.swarm-hero h1,
+.swarm-card h2 {
+  margin: 3px 0 0;
+  color: #1c1c23;
+}
+
+.swarm-hero h1 {
+  font-size: 27px;
+  line-height: 1.08;
+}
+
+.swarm-hero p,
+.swarm-card-description,
+.swarm-activity-message {
+  color: #6f6f79;
+  line-height: 1.45;
+}
+
+.swarm-hero p {
+  margin: 8px 0 0;
+  font-size: 13px;
+}
+
+.swarm-eyebrow {
+  color: #85858f;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  font-weight: 800;
+}
+
+.swarm-primary-button {
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 14px;
+  padding: 12px 18px;
+  background: #6754e8;
+  color: white;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.swarm-primary-button.stop {
+  background: #24242c;
+}
+
+.swarm-primary-button:disabled,
+.swarm-text-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.swarm-card {
+  border-radius: 20px;
+  padding: 20px;
+  margin-bottom: 12px;
+}
+
+.swarm-card h2 {
+  font-size: 17px;
+}
+
+.swarm-card-description {
+  margin: 8px 0 16px;
+  font-size: 13px;
+}
+
+.swarm-metric-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.swarm-metric-value {
+  margin-top: 8px;
+  font-size: 30px;
+  font-weight: 780;
+  letter-spacing: -0.04em;
+}
+
+.swarm-text-button {
+  border: 0;
+  padding: 8px 0 0;
+  background: transparent;
+  color: #6754e8;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.swarm-model-badge {
+  max-width: 44%;
+  text-align: right;
+  background: #f0eff5;
+  color: #757580;
+}
+
+.swarm-model-badge.ready {
+  background: #e9f7ee;
+  color: #188246;
+}
+
+.swarm-detail-list {
+  margin-top: 16px;
+}
+
+.swarm-detail-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 12px 0;
+  border-top: 1px solid #efeff2;
+  font-size: 13px;
+}
+
+.swarm-detail-row span {
+  color: #797982;
+}
+
+.swarm-detail-row strong {
+  max-width: 65%;
+  text-align: right;
+}
+
+.swarm-activity-indicator {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #b9b9c1;
+}
+
+.swarm-activity-indicator.active {
+  background: #25a55b;
+  box-shadow: 0 0 0 5px rgba(37, 165, 91, 0.1);
+}
+
+.swarm-activity-message {
+  margin: 10px 0 0;
+  font-size: 13px;
+}
+
+.swarm-certification-card {
+  border-color: rgba(103, 84, 232, 0.16);
+}
+
+.swarm-live-badge {
+  background: #eeeaff;
+  color: #6754e8;
+}
+
+.swarm-cert-list {
+  margin-top: 10px;
+}
+
+.swarm-cert-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 11px 0;
+  border-top: 1px solid #efeff2;
+}
+
+.swarm-cert-row div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.swarm-cert-row div span {
+  color: #878791;
+  font-size: 11px;
+}
+
+.swarm-cert-state {
+  border-radius: 999px;
+  padding: 5px 9px;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.swarm-cert-state.passed {
+  background: #e8f7ed;
+  color: #168347;
+}
+
+.swarm-cert-state.testing {
+  background: #eeeaff;
+  color: #6754e8;
+}
+
+.swarm-cert-state.rejected {
+  background: #fbecec;
+  color: #b54848;
+}
+
+.swarm-cert-state.waiting {
+  background: #f1f1f4;
+  color: #8b8b95;
+}
+
+.swarm-progress-track {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #ececf1;
+  margin-top: 16px;
+}
+
+.swarm-progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: #6754e8;
+  transition: width 200ms ease;
+}
+
+.swarm-diagnostics {
+  border-radius: 18px;
+  margin-top: 12px;
+  overflow: hidden;
+}
+
+.swarm-diagnostics summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 16px 18px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.swarm-diagnostics summary::-webkit-details-marker {
+  display: none;
+}
+
+.swarm-diagnostics-console {
+  max-height: 220px;
+  overflow: auto;
+  padding: 14px 16px;
+  background: #181820;
+  color: #c9c9d0;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.swarm-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 18px 4px 0;
+  color: #8b8b94;
+  font-size: 11px;
+}
+
+@media (max-width: 560px) {
+  .dashboard-modern {
+    padding: 18px;
+  }
+
+  .swarm-hero {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .swarm-primary-button {
+    width: 100%;
+  }
+
+  .swarm-metric-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .swarm-brand-subtitle,
+  .swarm-version {
+    display: none;
+  }
+}
+
+
+.swarm-brand-logo {
+  width: 46px;
+  height: 46px;
+  border-radius: 14px;
+  object-fit: cover;
+  flex: 0 0 auto;
+  box-shadow: 0 7px 20px rgba(31, 43, 120, 0.18);
+}

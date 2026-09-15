@@ -7,7 +7,7 @@ use reqwest::{
     header::{HeaderValue, AUTHORIZATION},
 };
 use serde_json::json;
-use std::{env, time::Duration};
+use std::{env, thread, time::Duration};
 
 #[derive(Debug)]
 pub struct SupabaseAuthClient {
@@ -156,22 +156,64 @@ impl SupabaseAuthClient {
 
         auth_value.set_sensitive(true);
 
-        let response = self
-            .http
-            .post(format!(
-                "{}/auth/v1/token?grant_type=refresh_token",
-                self.supabase_url
-            ))
-            .header("apikey", &self.anon_key)
-            .header(AUTHORIZATION, auth_value)
-            .json(&json!({
-                "refresh_token": refresh_token
-            }))
-            .send()
-            .map_err(|_| {
-                "supabase_refresh_request_failed"
-                    .to_string()
-            })?;
+        let refresh_url = format!(
+            "{}/auth/v1/token?grant_type=refresh_token",
+            self.supabase_url
+        );
+
+        let mut response = None;
+        let mut last_transport_error = None;
+
+        for attempt in 1..=3u8 {
+            match self
+                .http
+                .post(&refresh_url)
+                .header("apikey", &self.anon_key)
+                .header(AUTHORIZATION, auth_value.clone())
+                .json(&json!({
+                    "refresh_token": refresh_token.as_str()
+                }))
+                .send()
+            {
+                Ok(value) => {
+                    response = Some(value);
+                    break;
+                }
+
+                Err(error) => {
+                    let detail =
+                        error.to_string().replace('\n', " ");
+
+                    eprintln!(
+                        "SUPABASE_REFRESH_TRANSPORT_FAILURE_ATTEMPT={attempt}|DETAIL={detail}"
+                    );
+
+                    last_transport_error = Some(detail);
+
+                    if attempt < 3 {
+                        let delay_ms =
+                            if attempt == 1 { 500 } else { 1500 };
+
+                        println!(
+                            "SUPABASE_REFRESH_RETRY_MS={delay_ms}"
+                        );
+
+                        thread::sleep(
+                            Duration::from_millis(delay_ms)
+                        );
+                    }
+                }
+            }
+        }
+
+        let response = response.ok_or_else(|| {
+            format!(
+                "supabase_refresh_request_failed:{}",
+                last_transport_error.unwrap_or_else(|| {
+                    "unknown_transport_error".into()
+                })
+            )
+        })?;
 
         if !response.status().is_success() {
             return Err(format!(

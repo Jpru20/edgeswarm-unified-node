@@ -4,7 +4,13 @@ use crate::core::{
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeSet, fs};
+use std::{
+    collections::BTreeSet,
+    fs,
+    sync::OnceLock,
+    time::Instant,
+};
+use sysinfo::Disks;
 
 fn unified_runtime_sha256_v1() -> Option<String> {
     let path = std::env::current_exe().ok()?;
@@ -26,6 +32,123 @@ fn unified_architecture_v1() -> String {
     }.to_string()
 }
 
+
+static HEARTBEAT_PROCESS_STARTED_V1: OnceLock<Instant> =
+    OnceLock::new();
+
+fn process_uptime_sec_v1() -> u64 {
+    HEARTBEAT_PROCESS_STARTED_V1
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_secs()
+}
+
+fn model_disk_free_gb_v1() -> u64 {
+    let root =
+        crate::core::model_provisioning::model_root_v1();
+
+    let disks =
+        Disks::new_with_refreshed_list();
+
+    let matched =
+        disks
+            .list()
+            .iter()
+            .filter(|disk| {
+                root.starts_with(
+                    disk.mount_point()
+                )
+            })
+            .max_by_key(|disk| {
+                disk
+                    .mount_point()
+                    .components()
+                    .count()
+            });
+
+    matched
+        .map(|disk| {
+            disk.available_space() /
+                1024 /
+                1024 /
+                1024
+        })
+        .or_else(|| {
+            disks
+                .list()
+                .iter()
+                .map(|disk| {
+                    disk.available_space() /
+                        1024 /
+                        1024 /
+                        1024
+                })
+                .max()
+        })
+        .unwrap_or(0)
+}
+
+pub fn selected_model_size_gb_v1(
+    selected_model: &str,
+) -> Option<f64> {
+    let root =
+        crate::core::model_provisioning::model_root_v1();
+
+    crate::core::model_discovery::discover_models(&root)
+        .into_iter()
+        .find(|model| {
+            model.selected_model ==
+                selected_model
+        })
+        .and_then(|model| {
+            fs::metadata(model.path).ok()
+        })
+        .map(|metadata| {
+            metadata.len() as f64 /
+                1024.0 /
+                1024.0 /
+                1024.0
+        })
+}
+
+fn gpu_vendor_v1(
+    device_name: Option<&str>,
+    acceleration_backend: &str,
+) -> Option<String> {
+    let name =
+        device_name
+            .unwrap_or("")
+            .to_ascii_lowercase();
+
+    let backend =
+        acceleration_backend
+            .to_ascii_lowercase();
+
+    if name.contains("nvidia") ||
+        backend.contains("cuda")
+    {
+        return Some("NVIDIA".into());
+    }
+
+    if name.contains("amd") ||
+        name.contains("radeon")
+    {
+        return Some("AMD".into());
+    }
+
+    if name.contains("intel") {
+        return Some("Intel".into());
+    }
+
+    if name.contains("apple") ||
+        backend.contains("metal")
+    {
+        return Some("Apple".into());
+    }
+
+    None
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProductionModelCapacityV1 {
@@ -38,6 +161,116 @@ pub struct ProductionModelCapacityV1 {
     pub certified_concurrency: Option<u16>,
 }
 
+// WINDOWS_UPDATE_LIFECYCLE_HEARTBEAT_V1
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductionUpdateLifecycleV1 {
+    pub schema_version: u8,
+    pub phase: String,
+    pub from_version: String,
+    pub to_version: String,
+    pub started_at_unix_ms: u64,
+    pub updated_at_unix_ms: u64,
+}
+
+#[cfg(target_os = "windows")]
+fn active_update_lifecycle_v1(
+    current_version: &str,
+) -> Option<ProductionUpdateLifecycleV1> {
+    let exe = std::env::current_exe().ok()?;
+    let install_dir = exe.parent()?;
+    let path = install_dir.join("update-lifecycle.json");
+
+    let file_metadata = std::fs::metadata(&path).ok()?;
+    let modified = file_metadata.modified().ok()?;
+    let age = modified.elapsed().ok()?;
+
+    // Never allow an abandoned updater marker to keep the node
+    // permanently in an updating state.
+    if age.as_secs() > 20 * 60 {
+        return None;
+    }
+
+    let raw = std::fs::read_to_string(&path).ok()?;
+
+    // UPDATE_LIFECYCLE_BOM_TOLERANCE_V1
+    // Windows PowerShell 5.1 can emit an UTF-8 BOM. Accept both forms
+    // so update telemetry cannot silently disappear because of encoding.
+    let raw =
+        raw.trim_start_matches('\u{feff}');
+
+    let value: serde_json::Value =
+        serde_json::from_str(raw).ok()?;
+
+    let phase = value
+        .get("phase")?
+        .as_str()?
+        .trim()
+        .to_ascii_lowercase();
+
+    if !matches!(
+        phase.as_str(),
+        "preparing"
+            | "downloading"
+            | "verifying"
+            | "updating"
+            | "installing"
+            | "restarting"
+    ) {
+        return None;
+    }
+
+    let from_version = value
+        .get("fromVersion")?
+        .as_str()?
+        .trim()
+        .to_string();
+
+    let to_version = value
+        .get("toVersion")?
+        .as_str()?
+        .trim()
+        .to_string();
+
+    if to_version
+        .trim_start_matches('v')
+        .eq_ignore_ascii_case(
+            current_version.trim_start_matches('v')
+        )
+    {
+        return None;
+    }
+
+    Some(ProductionUpdateLifecycleV1 {
+        schema_version: value
+            .get("schemaVersion")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1) as u8,
+
+        phase,
+
+        from_version,
+        to_version,
+
+        started_at_unix_ms: value
+            .get("startedAtUnixMs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+
+        updated_at_unix_ms: value
+            .get("updatedAtUnixMs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+fn active_update_lifecycle_v1(
+    _current_version: &str,
+) -> Option<ProductionUpdateLifecycleV1> {
+    None
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProductionHeartbeatMetadataV1 {
@@ -47,6 +280,10 @@ pub struct ProductionHeartbeatMetadataV1 {
     pub package_type: String,
     pub runtime_sha256: Option<String>,
     pub public_release_safe: bool,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_lifecycle: Option<ProductionUpdateLifecycleV1>,
+
     pub model_capacity_v1: Vec<ProductionModelCapacityV1>,
 }
 
@@ -66,8 +303,19 @@ pub struct ProductionHeartbeatV1 {
 
     pub cpu_name: String,
     pub ram_gb: f64,
+    pub disk_free_gb: u64,
+    pub uptime_sec: u64,
+
+    pub gpu_vendor: Option<String>,
+    pub gpu_name: Option<String>,
+    pub gpu_memory_mb: Option<u64>,
+
+    pub cuda_available: bool,
+    pub vulkan_available: bool,
+    pub metal_available: bool,
 
     pub model_id: Option<String>,
+    pub model_size_gb: Option<f64>,
     pub model_status: String,
     pub model_capability: Option<String>,
     pub runtime: Option<String>,
@@ -80,6 +328,36 @@ pub struct ProductionHeartbeatV1 {
 }
 
 impl ProductionHeartbeatV1 {
+    // LIVE_UPDATE_LIFECYCLE_REFRESH_V1
+    //
+    // Production node_service keeps a long-lived base heartbeat.
+    // Update lifecycle is dynamic, so refresh it immediately before
+    // every network send instead of only when the heartbeat is created.
+    pub fn refresh_update_lifecycle_v1(&mut self) {
+        let lifecycle =
+            active_update_lifecycle_v1(
+                &self.app_version
+            );
+
+        if let Some(value) = lifecycle {
+            self.metadata.update_lifecycle =
+                Some(value);
+
+            self.status =
+                "updating".into();
+        } else {
+            self.metadata.update_lifecycle =
+                None;
+
+            if self.status
+                .eq_ignore_ascii_case("updating")
+            {
+                self.status =
+                    "online".into();
+            }
+        }
+    }
+
     pub fn from_node_state(
         state: &NodeState,
         app_version: &str,
@@ -161,14 +439,38 @@ impl ProductionHeartbeatV1 {
             })
             .collect();
 
-        // PRODUCTION_SERIAL_RUNNER_CONCURRENCY_V1
-        //
-        // Capacity certification may prove that a model can sustain
-        // concurrency > 1. Preserve that result in per-model capacity
-        // metadata, but the current production node service executes
-        // one claimed task at a time. Do not advertise assignment
-        // concurrency that the runner cannot actually service.
-        let concurrency_limit = 1_u16;
+        // PRODUCTION_CERTIFIED_CONCURRENCY_V1
+        // The production dispatcher now executes up to the
+        // certified concurrency of the active primary model.
+        let concurrency_limit =
+            primary
+                .and_then(|model| {
+                    model.certified_concurrency
+                })
+                .unwrap_or(1)
+                .max(1)
+                .min(5);
+
+        let acceleration_backend =
+            state.acceleration.backend
+                .to_ascii_lowercase();
+
+        let primary_model_size_gb =
+            primary.and_then(|model| {
+                selected_model_size_gb_v1(
+                    &model.selected_model
+                )
+            });
+
+        let update_lifecycle =
+            active_update_lifecycle_v1(app_version);
+
+        let heartbeat_status =
+            if update_lifecycle.is_some() {
+                "updating".to_string()
+            } else {
+                "online".to_string()
+            };
 
         Self {
             hardware_id:
@@ -191,7 +493,7 @@ impl ProductionHeartbeatV1 {
             capabilities,
 
             status:
-                "online".into(),
+                heartbeat_status,
 
             current_task_ids:
                 current_task_ids.to_vec(),
@@ -207,10 +509,44 @@ impl ProductionHeartbeatV1 {
                     / 1024.0
                     / 1024.0,
 
+            disk_free_gb:
+                model_disk_free_gb_v1(),
+
+            uptime_sec:
+                process_uptime_sec_v1(),
+
+            gpu_vendor:
+                gpu_vendor_v1(
+                    state.acceleration
+                        .device_name
+                        .as_deref(),
+                    &state.acceleration.backend,
+                ),
+
+            gpu_name:
+                state.acceleration.device_name.clone(),
+
+            gpu_memory_mb:
+                state.acceleration
+                    .vram_bytes
+                    .map(|bytes| bytes / 1024 / 1024),
+
+            cuda_available:
+                acceleration_backend.contains("cuda"),
+
+            vulkan_available:
+                acceleration_backend.contains("vulkan"),
+
+            metal_available:
+                acceleration_backend.contains("metal"),
+
             model_id:
                 primary.map(|model| {
                     model.selected_model.clone()
                 }),
+
+            model_size_gb:
+                primary_model_size_gb,
 
             model_status:
                 if primary.is_some() {
@@ -258,6 +594,8 @@ impl ProductionHeartbeatV1 {
 
                 public_release_safe:
                     false,
+
+                update_lifecycle,
 
                 model_capacity_v1,
             },

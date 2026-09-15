@@ -9,7 +9,8 @@ use crate::core::{
     production_heartbeat::ProductionHeartbeatV1,
     production_inference::ProductionLlamaClient,
     production_task_http::{
-        poll_once, read_auth, send_heartbeat, send_stream_frame_with_retry, submit_with_retry,
+        poll_once, poll_once_with_limit, read_auth, send_heartbeat,
+        send_stream_frame_with_retry, submit_with_retry,
     },
     real_capacity_certification::certify_model_path_v1,
     result_signing,
@@ -82,6 +83,88 @@ fn first_task(mut r: GetJobsResponse) -> Option<TaskEnvelope> {
     } else {
         r.task
     }
+}
+
+fn tasks_from_poll_v1(
+    mut response: GetJobsResponse,
+) -> Vec<TaskEnvelope> {
+    if !response.tasks.is_empty() {
+        return response.tasks;
+    }
+
+    response.task.take().into_iter().collect()
+}
+
+fn certified_concurrency_for_model_v1(
+    state: &NodeState,
+    selected_model: &str,
+) -> u16 {
+    state
+        .models
+        .iter()
+        .find(|model| {
+            model.selected_model == selected_model
+                && model.status == "ready"
+                && model.capacity_status
+                    == crate::core::capacity::CapacityStatus::Certified
+        })
+        .and_then(|model| model.certified_concurrency)
+        .unwrap_or(1)
+        .max(1)
+        .min(5)
+}
+
+fn apply_active_model_heartbeat_v1(
+    heartbeat: &mut ProductionHeartbeatV1,
+    state: &NodeState,
+    selected_model: &str,
+) -> Result<u16, String> {
+    let model = state
+        .models
+        .iter()
+        .find(|model| {
+            model.selected_model == selected_model
+                && model.status == "ready"
+                && model.capacity_status
+                    == crate::core::capacity::CapacityStatus::Certified
+        })
+        .ok_or_else(|| {
+            format!(
+                "active_certified_model_missing:{selected_model}"
+            )
+        })?;
+
+    let concurrency = model
+        .certified_concurrency
+        .unwrap_or(1)
+        .max(1)
+        .min(5);
+
+    heartbeat.model_id =
+        Some(model.selected_model.clone());
+
+    heartbeat.model_size_gb =
+        crate::core::production_heartbeat::
+            selected_model_size_gb_v1(
+                selected_model
+            );
+
+    heartbeat.model_status =
+        "ready".into();
+
+    heartbeat.model_capability =
+        Some(model.capability.clone());
+
+    heartbeat.runtime =
+        Some(model.runtime.clone());
+
+    heartbeat.runtime_acceleration =
+        model.acceleration.clone();
+
+    heartbeat.concurrency_limit =
+        concurrency;
+
+    Ok(concurrency)
 }
 
 fn resolve_active_model_path_v1(selected_model: &str) -> Result<String, String> {
@@ -519,6 +602,530 @@ fn provision_fresh_model_v1(state: &NodeState) -> Result<bool, String> {
     Ok(true)
 }
 
+struct TaskWorkerOutcomeV1 {
+    correction_requested: bool,
+}
+
+fn run_claimed_task_worker_v1(
+    task: TaskEnvelope,
+    llama: Option<ProductionLlamaClient>,
+    mut auth: crate::core::production_task_http::LocalAuth,
+    wallet_address: String,
+    hardware: String,
+    private_key: Zeroizing<String>,
+    active_selected_model: Option<String>,
+    active_capability: Option<String>,
+    active_runtime: Option<String>,
+    runtime_acceleration: String,
+    poll_capabilities: Vec<String>,
+    stop: Arc<AtomicBool>,
+) -> Result<TaskWorkerOutcomeV1, String> {
+    let auth_client = SupabaseAuthClient::from_env()?;
+
+    let http = Client::builder()
+        .timeout(Duration::from_secs(65))
+        .build()
+        .map_err(|_| "backend_http_client_failed".to_string())?;
+
+    let task_id = task.task_id_text();
+
+let provider_email_for_task_v1 = auth.provider_email.clone();
+
+let stream_requested_v1 = task_realtime_neural_streaming_v1(&task);
+
+let mut stream_enabled_v1 = false;
+let mut stream_sequence_v1 = 0_u64;
+let mut stream_buffer_v1 = String::new();
+let mut stream_last_flush_v1 = Instant::now();
+
+// ASYNC_NODE_STREAM_SENDER_V1
+//
+// The llama.cpp SSE reader only queues frames.
+// A dedicated worker performs authenticated HTTP delivery so
+// network latency cannot stall local token generation.
+let mut stream_sender_v1 = None;
+let mut stream_worker_v1 = None;
+
+if stream_requested_v1 {
+    let (sender_v1, receiver_v1) = mpsc::channel::<(String, u64, Value)>();
+
+    let task_id_for_stream_v1 = task.task_id.clone();
+
+    let provider_for_stream_v1 = provider_email_for_task_v1.clone();
+
+    let hardware_for_stream_v1 = hardware.clone();
+
+    let mut stream_auth_v1 = auth.clone();
+
+    let stream_http_v1 = Client::builder()
+        // NODE_STREAM_FRAME_TIMEOUT_V2
+        // Stream delivery runs on its own worker and must tolerate
+        // private Realtime subscription/auth setup on the first frame.
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|_| "stream_http_client_build_failed".to_string())?;
+
+    let worker_v1 = thread::spawn(move || {
+        let stream_auth_client_v1 = match SupabaseAuthClient::from_env() {
+            Ok(client) => client,
+
+            Err(error) => {
+                println!("STREAM_WORKER_AUTH_CLIENT_FAILED={error}");
+                return;
+            }
+        };
+
+        for (event_v1, sequence_v1, payload_v1) in receiver_v1 {
+            match send_stream_frame_with_retry(
+                &stream_http_v1,
+                &stream_auth_client_v1,
+                &mut stream_auth_v1,
+                &task_id_for_stream_v1,
+                &provider_for_stream_v1,
+                &hardware_for_stream_v1,
+                &event_v1,
+                sequence_v1,
+                payload_v1,
+            ) {
+                Ok(status) => {
+                    println!(
+                        "STREAM_FRAME_HTTP_STATUS={} EVENT={} SEQUENCE={}",
+                        status, event_v1, sequence_v1
+                    );
+                }
+
+                Err(error) => {
+                    println!(
+                        "STREAM_WORKER_FAILED={} EVENT={} SEQUENCE={}",
+                        error, event_v1, sequence_v1
+                    );
+                    println!("STREAMING_NON_FATAL=true");
+                    break;
+                }
+            }
+        }
+
+        println!("STREAM_WORKER_STOPPED=true");
+    });
+
+    stream_sender_v1 = Some(sender_v1);
+
+    stream_worker_v1 = Some(worker_v1);
+
+    stream_sequence_v1 = 1;
+
+    let queued_v1 = stream_sender_v1
+        .as_ref()
+        .map(|sender| {
+            sender
+                .send((
+                    "generation.started".into(),
+                    stream_sequence_v1,
+                    json!({
+                        "modelIdUsed":
+                            active_selected_model,
+                        "requiredModel":
+                            task.required_model
+                    }),
+                ))
+                .is_ok()
+        })
+        .unwrap_or(false);
+
+    if queued_v1 {
+        stream_enabled_v1 = true;
+
+        println!("STREAM_GENERATION_STARTED_QUEUED=true");
+    } else {
+        println!("STREAM_GENERATION_STARTED_QUEUED=false");
+    }
+}
+
+let use_streaming_execution_v1 = stream_enabled_v1;
+
+let mut stream_callback_v1 = |delta: &str| {
+    if !stream_enabled_v1 {
+        return;
+    }
+
+    stream_buffer_v1.push_str(delta);
+
+    let should_flush_v1 = stream_buffer_v1.chars().count() >= 96
+        || stream_last_flush_v1.elapsed() >= Duration::from_millis(250)
+        || delta.contains('\n');
+
+    if !should_flush_v1 {
+        return;
+    }
+
+    let text_v1 = std::mem::take(&mut stream_buffer_v1);
+
+    stream_sequence_v1 += 1;
+
+    let queued_v1 = stream_sender_v1
+        .as_ref()
+        .map(|sender| {
+            sender
+                .send((
+                    "chunk".into(),
+                    stream_sequence_v1,
+                    json!({
+                        "text": text_v1
+                    }),
+                ))
+                .is_ok()
+        })
+        .unwrap_or(false);
+
+    if queued_v1 {
+        stream_last_flush_v1 = Instant::now();
+    } else {
+        println!("STREAM_CHUNK_QUEUE_FAILED=true");
+
+        stream_enabled_v1 = false;
+        stream_buffer_v1.clear();
+    }
+};
+
+let submit_payload = build_task_submit_payload(
+    &task,
+    llama.as_ref(),
+    &provider_email_for_task_v1,
+    &wallet_address,
+    &hardware,
+    private_key.as_str(),
+    active_selected_model.as_deref(),
+    active_capability.as_deref(),
+    active_runtime.as_deref(),
+    &runtime_acceleration,
+    use_streaming_execution_v1,
+    if use_streaming_execution_v1 {
+        Some(&mut stream_callback_v1 as &mut dyn FnMut(&str))
+    } else {
+        None
+    },
+)?;
+
+drop(stream_callback_v1);
+
+if (stream_enabled_v1 && !stream_buffer_v1.is_empty()) {
+    let text_v1 = std::mem::take(&mut stream_buffer_v1);
+
+    stream_sequence_v1 += 1;
+
+    let queued_v1 = stream_sender_v1
+        .as_ref()
+        .map(|sender| {
+            sender
+                .send((
+                    "chunk".into(),
+                    stream_sequence_v1,
+                    json!({
+                        "text": text_v1
+                    }),
+                ))
+                .is_ok()
+        })
+        .unwrap_or(false);
+
+    if !queued_v1 {
+        println!("STREAM_FINAL_CHUNK_QUEUE_FAILED=true");
+
+        stream_enabled_v1 = false;
+    }
+}
+
+if stream_enabled_v1 {
+    let inference_succeeded_v1 = submit_payload
+        .pointer("/payload/status")
+        .and_then(Value::as_str)
+        == Some("success");
+
+    stream_sequence_v1 += 1;
+
+    let terminal_event_v1 = if inference_succeeded_v1 {
+        "generation.completed"
+    } else {
+        "generation.error"
+    };
+
+    let terminal_payload_v1 = if inference_succeeded_v1 {
+        json!({
+            "outputComplete": true
+        })
+    } else {
+        json!({
+            "code":
+                "neural_inference_failed"
+        })
+    };
+
+    let queued_v1 = stream_sender_v1
+        .as_ref()
+        .map(|sender| {
+            sender
+                .send((
+                    terminal_event_v1.into(),
+                    stream_sequence_v1,
+                    terminal_payload_v1,
+                ))
+                .is_ok()
+        })
+        .unwrap_or(false);
+
+    if !queued_v1 {
+        println!("STREAM_TERMINAL_QUEUE_FAILED=true");
+    }
+}
+
+// Closing the sender drains the queue and stops the worker.
+// Join before submit-result so generation.completed cannot
+// arrive after the backend has already emitted verified ready.
+drop(stream_sender_v1);
+
+if let Some(worker_v1) = stream_worker_v1 {
+    if worker_v1.join().is_err() {
+        println!("STREAM_WORKER_JOIN_FAILED=true");
+        println!("STREAMING_NON_FATAL=true");
+    }
+}
+
+let outcome = submit_with_retry(&http, &auth_client, &mut auth, &submit_payload)?;
+
+println!("RESULT_SUBMIT_HTTP_STATUS={}", outcome.status);
+
+let correction_requested_v1 =
+    outcome.status == 202
+        && outcome
+            .body
+            .get("correctionRequested")
+            .and_then(Value::as_bool)
+            == Some(true);
+
+println!(
+    "CORRECTION_REQUESTED={}",
+    correction_requested_v1
+);
+
+if correction_requested_v1 {
+    println!(
+        "CORRECTION_REDELIVERY_DEFERRED_TO_DISPATCHER=true"
+    );
+}
+
+    Ok(TaskWorkerOutcomeV1 {
+        correction_requested: correction_requested_v1,
+    })
+}
+
+
+fn run_capacity_test_at_idle_v1(
+    state: &mut NodeState,
+    active_selected_model: &Option<String>,
+    runtime_acceleration: &mut String,
+    base_heartbeat: &mut ProductionHeartbeatV1,
+    managed_llama: &mut Option<ManagedLlamaProcess>,
+    llama: &mut Option<ProductionLlamaClient>,
+    operational_limit: &mut u16,
+    single_task_mode_v1: bool,
+) -> Result<(), String> {
+    println!("CAPACITY_TEST_IDLE_BARRIER_REACHED=true");
+
+    if env::var("EDGESWARM_LLAMA_BASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .is_some()
+    {
+        crate::core::certification_progress::
+            certification_error_v1(
+                "capacity_test_external_runtime_unsupported"
+            );
+
+        println!(
+            "CAPACITY_TEST_REJECTED=external_runtime"
+        );
+
+        return Ok(());
+    }
+
+    let Some(selected_model_v1) =
+        active_selected_model.clone()
+    else {
+        crate::core::certification_progress::
+            certification_error_v1(
+                "capacity_test_neural_model_missing"
+            );
+
+        println!(
+            "CAPACITY_TEST_REJECTED=neural_model_missing"
+        );
+
+        return Ok(());
+    };
+
+    let model_path_v1 =
+        match resolve_active_model_path_v1(
+            &selected_model_v1
+        ) {
+            Ok(path) => path,
+            Err(error) => {
+                crate::core::certification_progress::
+                    certification_error_v1(
+                        error.clone()
+                    );
+                return Ok(());
+            }
+        };
+
+    let runtime_path_v1 =
+        match resolve_llama_server_path_v1() {
+            Ok(path) => path,
+            Err(error) => {
+                crate::core::certification_progress::
+                    certification_error_v1(
+                        error.clone()
+                    );
+                return Ok(());
+            }
+        };
+
+    println!("CAPACITY_TEST_PRODUCTION_RUNTIME_PAUSING=true");
+
+    *llama = None;
+    *managed_llama = None;
+
+    thread::sleep(Duration::from_millis(250));
+
+    println!("CAPACITY_TEST_CERTIFICATION_STARTED=true");
+
+    let cert_result_v1 =
+        std::panic::catch_unwind(
+            std::panic::AssertUnwindSafe(|| {
+                certify_model_path_v1(
+                    model_path_v1
+                        .to_string(),
+                    runtime_path_v1
+                        .to_string_lossy()
+                        .to_string(),
+                )
+            }),
+        );
+
+    println!("CAPACITY_TEST_PRODUCTION_RUNTIME_RESTORING=true");
+
+    *state = NodeState::detect();
+
+    let restart_model_path_v1 =
+        resolve_active_model_path_v1(
+            &selected_model_v1
+        )
+        .map_err(|error| {
+            format!(
+                "capacity_test_runtime_restore_model_failed:{error}"
+            )
+        })?;
+
+    let config_v1 =
+        execution_config_for_certified_model_v1(
+            restart_model_path_v1,
+            runtime_acceleration.as_str(),
+        )
+        .map_err(|error| {
+            format!(
+                "capacity_test_runtime_restore_config_failed:{error}"
+            )
+        })?;
+
+    let runtime_v1 =
+        ManagedLlamaProcess::start(&config_v1)
+            .map_err(|error| {
+                format!(
+                    "capacity_test_runtime_restore_start_failed:{error}"
+                )
+            })?;
+
+    *runtime_acceleration =
+        runtime_v1.acceleration().to_string();
+
+    let client_v1 =
+        ProductionLlamaClient::new(
+            runtime_v1.base_url().to_string()
+        )
+        .map_err(|error| {
+            format!(
+                "capacity_test_runtime_restore_client_failed:{error}"
+            )
+        })?;
+
+    client_v1.health_check()
+        .map_err(|error| {
+            format!(
+                "capacity_test_runtime_restore_health_failed:{error}"
+            )
+        })?;
+
+    *managed_llama = Some(runtime_v1);
+    *llama = Some(client_v1);
+
+    apply_active_model_heartbeat_v1(
+        base_heartbeat,
+        state,
+        &selected_model_v1,
+    )?;
+
+    base_heartbeat.runtime_acceleration =
+        runtime_acceleration.clone();
+
+    *operational_limit =
+        certified_concurrency_for_model_v1(
+            state,
+            &selected_model_v1,
+        );
+
+    if single_task_mode_v1 {
+        *operational_limit = 1;
+    }
+
+    base_heartbeat.concurrency_limit =
+        *operational_limit;
+
+    println!("CAPACITY_TEST_PRODUCTION_RUNTIME_RESTORED=true");
+    println!(
+        "CAPACITY_TEST_NEW_OPERATIONAL_LIMIT={}",
+        operational_limit
+    );
+
+    match cert_result_v1 {
+        Ok(Ok(())) => {
+            println!("CAPACITY_TEST_RESULT=pass");
+        }
+
+        Ok(Err(error)) => {
+            crate::core::certification_progress::
+                certification_error_v1(
+                    error.clone()
+                );
+
+            println!(
+                "CAPACITY_TEST_RESULT=failed_nonfatal|ERROR={error}"
+            );
+        }
+
+        Err(_) => {
+            crate::core::certification_progress::
+                certification_error_v1(
+                    "capacity_test_panicked"
+                );
+
+            println!(
+                "CAPACITY_TEST_RESULT=panicked_nonfatal"
+            );
+        }
+    }
+
+    Ok(())
+}
+
 pub fn run_node_service(
     stop: Arc<AtomicBool>,
     mut wallet_password: Zeroizing<String>,
@@ -635,8 +1242,84 @@ pub fn run_node_service(
         println!("MODEL_STATE_REFRESHED=true");
     }
 
-    if base_heartbeat.concurrency_limit != 1 {
-        return Err("runner_capacity_gate_failed".into());
+    // AUTOMATIC_CAPACITY_CERTIFICATION_V1
+    // Only models lacking a valid certificate or requiring
+    // revalidation are benchmarked. Valid certificates are reused.
+    let auto_cert_models_v1 = state
+        .models
+        .iter()
+        .filter(|model_v1| {
+            matches!(
+                model_v1.capacity_status,
+                crate::core::capacity::CapacityStatus::Uncertified
+                    | crate::core::capacity::CapacityStatus::RevalidationRequired
+            )
+        })
+        .map(|model_v1| model_v1.selected_model.clone())
+        .collect::<Vec<_>>();
+
+    println!(
+        "AUTOMATIC_CAPACITY_CERTIFICATION_REQUIRED={}",
+        !auto_cert_models_v1.is_empty()
+    );
+
+    if !auto_cert_models_v1.is_empty() {
+        let runtime_path_v1 =
+            resolve_llama_server_path_v1()?
+                .to_string_lossy()
+                .to_string();
+
+        set_model_download_stage_v1("certifying");
+
+        let mut auto_cert_error_v1: Option<String> = None;
+
+        for selected_model_v1 in auto_cert_models_v1 {
+            println!(
+                "AUTOMATIC_CAPACITY_CERTIFICATION_MODEL={selected_model_v1}"
+            );
+
+            let result_v1 =
+                resolve_active_model_path_v1(&selected_model_v1)
+                    .and_then(|model_path_v1| {
+                        certify_model_path_v1(
+                            model_path_v1,
+                            runtime_path_v1.clone(),
+                        )
+                    });
+
+            if let Err(error_v1) = result_v1 {
+                println!(
+                    "AUTOMATIC_CAPACITY_CERTIFICATION_ERROR={error_v1}"
+                );
+
+                crate::core::certification_progress::
+                    certification_error_v1(error_v1.clone());
+
+                auto_cert_error_v1 = Some(error_v1);
+                break;
+            }
+        }
+
+        if auto_cert_error_v1.is_some() {
+            set_model_download_stage_v1("error");
+        } else {
+            set_model_download_stage_v1("ready");
+        }
+
+        state = NodeState::detect();
+
+        base_heartbeat =
+            ProductionHeartbeatV1::from_node_state(
+                &state,
+                env!("CARGO_PKG_VERSION"),
+                "laptop",
+                &[],
+            );
+
+        println!(
+            "AUTOMATIC_CAPACITY_CERTIFICATION_COMPLETE={}",
+            auto_cert_error_v1.is_none()
+        );
     }
 
     let mut active_selected_model = base_heartbeat.model_id.clone();
@@ -719,12 +1402,44 @@ pub fn run_node_service(
         None
     };
 
+    let single_task_mode_v1 = env::var("EDGESWARM_SINGLE_TASK")
+        .map(|value| value.trim() == "1")
+        .unwrap_or(false);
+
+    let mut operational_limit_v1 = 1_u16;
+
+    if let Some(selected_model_v1) = active_selected_model.as_deref() {
+        operational_limit_v1 = apply_active_model_heartbeat_v1(
+            &mut base_heartbeat,
+            &state,
+            selected_model_v1,
+        )?;
+
+        base_heartbeat.runtime_acceleration =
+            runtime_acceleration.clone();
+    }
+
+    if single_task_mode_v1 {
+        operational_limit_v1 = 1;
+        base_heartbeat.concurrency_limit = 1;
+    }
+
+    println!(
+        "ACTIVE_EXECUTION_CERTIFIED_CONCURRENCY={}",
+        operational_limit_v1
+    );
+
     let http = Client::builder()
         .timeout(Duration::from_secs(65))
         .build()
         .map_err(|_| "backend_http_client_failed".to_string())?;
 
-    let readiness_status = send_heartbeat(&http, &auth_client, &mut auth, &base_heartbeat)?;
+    let readiness_status = send_heartbeat(
+        &http,
+        &auth_client,
+        &mut auth,
+        &base_heartbeat,
+    )?;
 
     println!("READINESS_HEARTBEAT_HTTP_STATUS={readiness_status}");
 
@@ -740,588 +1455,1175 @@ pub fn run_node_service(
     let mut last_idle_heartbeat = Instant::now();
     let mut last_block_reason: Option<String> = None;
 
+    // Claimed tasks discovered during correction redelivery are never
+    // discarded. They remain dispatcher-owned until an execution slot
+    // is available.
+    let mut queued_claimed_tasks_v1: Vec<TaskEnvelope> = Vec::new();
+
     loop {
-        // Graceful stop boundary: never claim another task after
-        // the user requests STOP.
-        if stop.load(Ordering::Acquire) {
+        if stop.load(Ordering::Acquire)
+            && queued_claimed_tasks_v1.is_empty()
+        {
             println!("NODE_SERVICE_STOP_REQUESTED=true");
             println!("NODE_SERVICE_STOPPED=true");
             return Ok(());
         }
 
-        let poll = match poll_once(
-            &http,
-            &auth_client,
-            &mut auth,
-            &hardware,
-            &poll_capabilities,
-        ) {
-            Ok(poll) => poll,
-
-            Err(error) if transient_node_transport_error_v1(&error) => {
-                println!("POLL_TRANSIENT_ERROR={error}");
-                println!("POLL_RETRYING=true");
-
-                for _ in 0..20 {
-                    if stop.load(Ordering::Acquire) {
-                        println!("NODE_SERVICE_STOP_REQUESTED=true");
-                        println!("NODE_SERVICE_STOPPED=true");
-                        return Ok(());
-                    }
-
-                    thread::sleep(Duration::from_millis(100));
-                }
-
-                continue;
-            }
-
-            Err(error) => return Err(error),
-        };
-
-        if poll.blocked {
-            let reason = poll
-                .block_reason
-                .as_deref()
-                .unwrap_or("unspecified")
-                .to_string();
-
-            if last_block_reason.as_deref() != Some(reason.as_str()) {
-                println!("TASK_CLAIMED=false");
-                println!("POLL_BLOCKED=true");
-                println!("POLL_BLOCK_REASON={reason}");
-                println!(
-                    "POLL_BLOCK_MESSAGE={}",
-                    poll.message.as_deref().unwrap_or("")
-                );
-                println!("NODE_WAITING_FOR_ASSIGNMENT_APPROVAL=true");
-                last_block_reason = Some(reason);
-            }
-
-            if last_idle_heartbeat.elapsed() >= Duration::from_secs(15) {
-                let status = send_heartbeat(&http, &auth_client, &mut auth, &base_heartbeat)?;
-                println!("IDLE_HEARTBEAT_HTTP_STATUS={status}");
-                last_idle_heartbeat = Instant::now();
-            }
-
-            for _ in 0..20 {
-                if stop.load(Ordering::Acquire) {
-                    println!("NODE_SERVICE_STOP_REQUESTED=true");
-                    println!("NODE_SERVICE_STOPPED=true");
-                    return Ok(());
-                }
-                thread::sleep(Duration::from_millis(100));
-            }
-
-            continue;
-        }
-
-        if last_block_reason.take().is_some() {
-            println!("POLL_BLOCKED=false");
-            println!("NODE_WAITING_FOR_ASSIGNMENT_APPROVAL=false");
-            println!("POLL_ASSIGNMENT_ELIGIBILITY_RESTORED=true");
-        }
-
-        let Some(task) = first_task(poll) else {
-            if last_idle_heartbeat.elapsed() >= Duration::from_secs(15) {
-                match send_heartbeat(&http, &auth_client, &mut auth, &base_heartbeat) {
-                    Ok(status) => {
-                        println!("IDLE_HEARTBEAT_HTTP_STATUS={status}");
-                    }
-
-                    Err(error) if transient_node_transport_error_v1(&error) => {
-                        println!("IDLE_HEARTBEAT_TRANSIENT_ERROR={error}");
-                        println!("IDLE_HEARTBEAT_RETRYING=true");
-                    }
-
-                    Err(error) => return Err(error),
-                }
-
-                last_idle_heartbeat = Instant::now();
-            }
-
-            // Keep idle STOP response quick without interrupting
-            // an active task lifecycle.
-            for _ in 0..10 {
-                if stop.load(Ordering::Acquire) {
-                    println!("NODE_SERVICE_STOP_REQUESTED=true");
-                    println!("NODE_SERVICE_STOPPED=true");
-                    return Ok(());
-                }
-
-                thread::sleep(Duration::from_millis(100));
-            }
-
-            continue;
-        };
-
-        let task_id = task.task_id_text();
-
-        println!("TASK_CLAIMED=true");
-        println!("TASK_ID={task_id}");
-
-        let mut active = ProductionHeartbeatV1::from_node_state(
-            &state,
-            env!("CARGO_PKG_VERSION"),
-            "laptop",
-            &[],
-        );
-
-        active.current_task_ids = vec![task_id.clone()];
-
-        match send_heartbeat(&http, &auth_client, &mut auth, &active) {
-            Ok(status) => println!("ACTIVE_HEARTBEAT_HTTP_STATUS={status}"),
-
-            Err(_) => {
-                println!("ACTIVE_HEARTBEAT_FAILED=true");
-
-                let failure = failure_payload(
-                    &task,
-                    &auth.provider_email,
-                    &public_wallet.wallet_address,
-                    &hardware,
-                    private_key.as_str(),
-                    "active_task_heartbeat_failed",
-                )?;
-
-                let outcome = submit_with_retry(&http, &auth_client, &mut auth, &failure)?;
-
-                println!("FAILURE_RESULT_HTTP_STATUS={}", outcome.status);
-                println!("TASK_LIFECYCLE_STOPPED_AFTER_HEARTBEAT_FAILURE=true");
-                return Ok(());
-            }
-        }
-
-        let current_active_model_v1 = active_selected_model.as_deref().and_then(|selected| {
-            state.models.iter().find(|model| model.selected_model == selected).map(|model| {
-                crate::core::execution_model::ActiveModelV1 {
-                    selected_model: model.selected_model.clone(),
-                    capability: model.capability.clone(),
-                    runtime: model.runtime.clone(),
-                    tier: model.tier,
-                }
-            })
-        });
-
-        let task_execution_model_v1 =
-            crate::core::execution_model::certified_model_for_task(
-                &state, &task, current_active_model_v1.as_ref(),
-            )?;
-
-        if let Some(target) = task_execution_model_v1 {
-            let switch_required =
-                crate::core::execution_model::runtime_switch_required(
-                    active_selected_model.as_deref(),
-                    &target,
-                );
-
-            println!("TASK_EXECUTION_MODEL={}", target.selected_model);
-            println!("MODEL_RUNTIME_SWITCH_REQUIRED={switch_required}");
-
-            if switch_required {
-                if env::var("EDGESWARM_LLAMA_BASE_URL")
-                    .ok().filter(|v| !v.trim().is_empty()).is_some()
-                {
-                    return Err("external_runtime_model_switch_unsupported".into());
-                }
-
-                llama = None;
-                _managed_llama = None;
-
-                let model_path = resolve_active_model_path_v1(&target.selected_model)?;
-                let desired_acceleration = state
-                    .models
-                    .iter()
-                    .find(|model| {
-                        model.selected_model
-                            == target.selected_model
-                    })
-                    .map(|model| model.acceleration.clone())
-                    .ok_or_else(|| {
-                        format!(
-                            "certified_model_state_missing:{}",
-                            target.selected_model
-                        )
-                    })?;
-
-                let config =
-                    execution_config_for_certified_model_v1(
-                        model_path,
-                        &desired_acceleration,
-                    )?;
-
-                let runtime =
-                    ManagedLlamaProcess::start(&config)?;
-
-                runtime_acceleration =
-                    runtime.acceleration().to_string();
-
-                let client =
-                    ProductionLlamaClient::new(
-                        runtime.base_url().to_string()
-                    )?;
-
-                client.health_check()?;
-
-                _managed_llama = Some(runtime);
-                llama = Some(client);
-                active_selected_model = Some(target.selected_model.clone());
-                active_capability = Some(target.capability.clone());
-                active_runtime = Some(target.runtime.clone());
-
-                println!("ACTIVE_EXECUTION_MODEL={}", target.selected_model);
-                println!("MODEL_RUNTIME_SWITCH_COMPLETE=true");
-            }
-        }
-        let provider_email_for_task_v1 = auth.provider_email.clone();
-
-        let stream_requested_v1 = task_realtime_neural_streaming_v1(&task);
-
-        let mut stream_enabled_v1 = false;
-        let mut stream_sequence_v1 = 0_u64;
-        let mut stream_buffer_v1 = String::new();
-        let mut stream_last_flush_v1 = Instant::now();
-
-        // ASYNC_NODE_STREAM_SENDER_V1
-        //
-        // The llama.cpp SSE reader only queues frames.
-        // A dedicated worker performs authenticated HTTP delivery so
-        // network latency cannot stall local token generation.
-        let mut stream_sender_v1 = None;
-        let mut stream_worker_v1 = None;
-
-        if stream_requested_v1 {
-            let (sender_v1, receiver_v1) = mpsc::channel::<(String, u64, Value)>();
-
-            let task_id_for_stream_v1 = task.task_id.clone();
-
-            let provider_for_stream_v1 = provider_email_for_task_v1.clone();
-
-            let hardware_for_stream_v1 = hardware.clone();
-
-            let mut stream_auth_v1 = auth.clone();
-
-            let stream_http_v1 = Client::builder()
-                // NODE_STREAM_FRAME_TIMEOUT_V2
-                // Stream delivery runs on its own worker and must tolerate
-                // private Realtime subscription/auth setup on the first frame.
-                .timeout(Duration::from_secs(15))
-                .build()
-                .map_err(|_| "stream_http_client_build_failed".to_string())?;
-
-            let worker_v1 = thread::spawn(move || {
-                let stream_auth_client_v1 = match SupabaseAuthClient::from_env() {
-                    Ok(client) => client,
-
-                    Err(error) => {
-                        println!("STREAM_WORKER_AUTH_CLIENT_FAILED={error}");
-                        return;
-                    }
-                };
-
-                for (event_v1, sequence_v1, payload_v1) in receiver_v1 {
-                    match send_stream_frame_with_retry(
-                        &stream_http_v1,
-                        &stream_auth_client_v1,
-                        &mut stream_auth_v1,
-                        &task_id_for_stream_v1,
-                        &provider_for_stream_v1,
-                        &hardware_for_stream_v1,
-                        &event_v1,
-                        sequence_v1,
-                        payload_v1,
-                    ) {
-                        Ok(status) => {
-                            println!(
-                                "STREAM_FRAME_HTTP_STATUS={} EVENT={} SEQUENCE={}",
-                                status, event_v1, sequence_v1
-                            );
-                        }
-
-                        Err(error) => {
-                            println!(
-                                "STREAM_WORKER_FAILED={} EVENT={} SEQUENCE={}",
-                                error, event_v1, sequence_v1
-                            );
-                            println!("STREAMING_NON_FATAL=true");
-                            break;
-                        }
-                    }
-                }
-
-                println!("STREAM_WORKER_STOPPED=true");
-            });
-
-            stream_sender_v1 = Some(sender_v1);
-
-            stream_worker_v1 = Some(worker_v1);
-
-            stream_sequence_v1 = 1;
-
-            let queued_v1 = stream_sender_v1
-                .as_ref()
-                .map(|sender| {
-                    sender
-                        .send((
-                            "generation.started".into(),
-                            stream_sequence_v1,
-                            json!({
-                                "modelIdUsed":
-                                    active_selected_model,
-                                "requiredModel":
-                                    task.required_model
-                            }),
-                        ))
-                        .is_ok()
-                })
-                .unwrap_or(false);
-
-            if queued_v1 {
-                stream_enabled_v1 = true;
-
-                println!("STREAM_GENERATION_STARTED_QUEUED=true");
-            } else {
-                println!("STREAM_GENERATION_STARTED_QUEUED=false");
-            }
-        }
-
-        let use_streaming_execution_v1 = stream_enabled_v1;
-
-        let mut stream_callback_v1 = |delta: &str| {
-            if !stream_enabled_v1 {
-                return;
-            }
-
-            stream_buffer_v1.push_str(delta);
-
-            let should_flush_v1 = stream_buffer_v1.chars().count() >= 96
-                || stream_last_flush_v1.elapsed() >= Duration::from_millis(250)
-                || delta.contains('\n');
-
-            if !should_flush_v1 {
-                return;
-            }
-
-            let text_v1 = std::mem::take(&mut stream_buffer_v1);
-
-            stream_sequence_v1 += 1;
-
-            let queued_v1 = stream_sender_v1
-                .as_ref()
-                .map(|sender| {
-                    sender
-                        .send((
-                            "chunk".into(),
-                            stream_sequence_v1,
-                            json!({
-                                "text": text_v1
-                            }),
-                        ))
-                        .is_ok()
-                })
-                .unwrap_or(false);
-
-            if queued_v1 {
-                stream_last_flush_v1 = Instant::now();
-            } else {
-                println!("STREAM_CHUNK_QUEUE_FAILED=true");
-
-                stream_enabled_v1 = false;
-                stream_buffer_v1.clear();
-            }
-        };
-
-        let submit_payload = build_task_submit_payload(
-            &task,
-            llama.as_ref(),
-            &provider_email_for_task_v1,
-            &public_wallet.wallet_address,
-            &hardware,
-            private_key.as_str(),
-            active_selected_model.as_deref(),
-            active_capability.as_deref(),
-            active_runtime.as_deref(),
-            &runtime_acceleration,
-            use_streaming_execution_v1,
-            if use_streaming_execution_v1 {
-                Some(&mut stream_callback_v1 as &mut dyn FnMut(&str))
-            } else {
-                None
-            },
-        )?;
-
-        drop(stream_callback_v1);
-
-        if (stream_enabled_v1 && !stream_buffer_v1.is_empty()) {
-            let text_v1 = std::mem::take(&mut stream_buffer_v1);
-
-            stream_sequence_v1 += 1;
-
-            let queued_v1 = stream_sender_v1
-                .as_ref()
-                .map(|sender| {
-                    sender
-                        .send((
-                            "chunk".into(),
-                            stream_sequence_v1,
-                            json!({
-                                "text": text_v1
-                            }),
-                        ))
-                        .is_ok()
-                })
-                .unwrap_or(false);
-
-            if !queued_v1 {
-                println!("STREAM_FINAL_CHUNK_QUEUE_FAILED=true");
-
-                stream_enabled_v1 = false;
-            }
-        }
-
-        if stream_enabled_v1 {
-            let inference_succeeded_v1 = submit_payload
-                .pointer("/payload/status")
-                .and_then(Value::as_str)
-                == Some("success");
-
-            stream_sequence_v1 += 1;
-
-            let terminal_event_v1 = if inference_succeeded_v1 {
-                "generation.completed"
-            } else {
-                "generation.error"
-            };
-
-            let terminal_payload_v1 = if inference_succeeded_v1 {
-                json!({
-                    "outputComplete": true
-                })
-            } else {
-                json!({
-                    "code":
-                        "neural_inference_failed"
-                })
-            };
-
-            let queued_v1 = stream_sender_v1
-                .as_ref()
-                .map(|sender| {
-                    sender
-                        .send((
-                            terminal_event_v1.into(),
-                            stream_sequence_v1,
-                            terminal_payload_v1,
-                        ))
-                        .is_ok()
-                })
-                .unwrap_or(false);
-
-            if !queued_v1 {
-                println!("STREAM_TERMINAL_QUEUE_FAILED=true");
-            }
-        }
-
-        // Closing the sender drains the queue and stops the worker.
-        // Join before submit-result so generation.completed cannot
-        // arrive after the backend has already emitted verified ready.
-        drop(stream_sender_v1);
-
-        if let Some(worker_v1) = stream_worker_v1 {
-            if worker_v1.join().is_err() {
-                println!("STREAM_WORKER_JOIN_FAILED=true");
-                println!("STREAMING_NON_FATAL=true");
-            }
-        }
-
-        let outcome = submit_with_retry(&http, &auth_client, &mut auth, &submit_payload)?;
-
-        println!("RESULT_SUBMIT_HTTP_STATUS={}", outcome.status);
-
-        if outcome.status == 202
-            && outcome
-                .body
-                .get("correctionRequested")
-                .and_then(Value::as_bool)
-                == Some(true)
+        if crate::core::capacity_test_control::
+            capacity_test_request_pending_v1()
         {
-            println!("CORRECTION_REQUESTED=true");
+            if !queued_claimed_tasks_v1.is_empty() {
+                println!(
+                    "CAPACITY_TEST_REQUEST_DEFERRED=claimed_queue"
+                );
+            } else {
+                match crate::core::capacity_test_control::
+                    take_capacity_test_request_v1()
+                {
+                    Ok(true) => {
+                        println!(
+                            "CAPACITY_TEST_REQUEST_CONSUMED=true"
+                        );
 
-            let correction = first_task(poll_once(
+                        run_capacity_test_at_idle_v1(
+                            &mut state,
+                            &active_selected_model,
+                            &mut runtime_acceleration,
+                            &mut base_heartbeat,
+                            &mut _managed_llama,
+                            &mut llama,
+                            &mut operational_limit_v1,
+                            single_task_mode_v1,
+                        )?;
+
+                        let status_v1 = send_heartbeat(
+                            &http,
+                            &auth_client,
+                            &mut auth,
+                            &base_heartbeat,
+                        )?;
+
+                        println!(
+                            "CAPACITY_TEST_POST_HEARTBEAT_HTTP_STATUS={status_v1}"
+                        );
+
+                        last_idle_heartbeat =
+                            Instant::now();
+
+                        continue;
+                    }
+
+                    Ok(false) => {}
+
+                    Err(error_v1) => {
+                        crate::core::certification_progress::
+                            certification_error_v1(
+                                error_v1.clone()
+                            );
+
+                        println!(
+                            "CAPACITY_TEST_REQUEST_ERROR={error_v1}"
+                        );
+                    }
+                }
+            }
+        }
+
+        let tasks_v1 = if !queued_claimed_tasks_v1.is_empty() {
+            let take_v1 = usize::min(
+                usize::from(operational_limit_v1),
+                queued_claimed_tasks_v1.len(),
+            );
+
+            queued_claimed_tasks_v1
+                .drain(0..take_v1)
+                .collect::<Vec<_>>()
+        } else {
+            let poll_v1 = match poll_once_with_limit(
                 &http,
                 &auth_client,
                 &mut auth,
                 &hardware,
                 &poll_capabilities,
-            )?)
-            .ok_or_else(|| "correction_redelivery_missing".to_string())?;
+                operational_limit_v1,
+            ) {
+                Ok(poll_v1) => poll_v1,
 
-            if correction.task_id_text() != task_id {
-                return Err("correction_wrong_task".into());
+                Err(error_v1)
+                    if transient_node_transport_error_v1(&error_v1) =>
+                {
+                    println!("POLL_TRANSIENT_ERROR={error_v1}");
+                    println!("POLL_RETRYING=true");
+
+                    for _ in 0..20 {
+                        if stop.load(Ordering::Acquire) {
+                            println!(
+                                "NODE_SERVICE_STOP_REQUESTED=true"
+                            );
+                            println!("NODE_SERVICE_STOPPED=true");
+                            return Ok(());
+                        }
+
+                        thread::sleep(Duration::from_millis(100));
+                    }
+
+                    continue;
+                }
+
+                Err(error_v1) => return Err(error_v1),
+            };
+
+            if poll_v1.blocked {
+                let reason_v1 = poll_v1
+                    .block_reason
+                    .as_deref()
+                    .unwrap_or("unspecified")
+                    .to_string();
+
+                if last_block_reason.as_deref()
+                    != Some(reason_v1.as_str())
+                {
+                    println!("TASK_CLAIMED=false");
+                    println!("POLL_BLOCKED=true");
+                    println!("POLL_BLOCK_REASON={reason_v1}");
+                    println!(
+                        "POLL_BLOCK_MESSAGE={}",
+                        poll_v1.message.as_deref().unwrap_or("")
+                    );
+                    println!(
+                        "NODE_WAITING_FOR_ASSIGNMENT_APPROVAL=true"
+                    );
+
+                    last_block_reason = Some(reason_v1);
+                }
+
+                if last_idle_heartbeat.elapsed()
+                    >= Duration::from_secs(15)
+                {
+                    let status_v1 = send_heartbeat(
+                        &http,
+                        &auth_client,
+                        &mut auth,
+                        &base_heartbeat,
+                    )?;
+
+                    println!(
+                        "IDLE_HEARTBEAT_HTTP_STATUS={status_v1}"
+                    );
+
+                    last_idle_heartbeat = Instant::now();
+                }
+
+                thread::sleep(Duration::from_millis(500));
+                continue;
             }
 
-            let payload = build_task_submit_payload(
-                &correction,
-                llama.as_ref(),
-                &auth.provider_email,
-                &public_wallet.wallet_address,
-                &hardware,
-                private_key.as_str(),
-                active_selected_model.as_deref(),
-                active_capability.as_deref(),
-                active_runtime.as_deref(),
-                &runtime_acceleration,
-                false,
-                None,
-            )?;
+            if last_block_reason.take().is_some() {
+                println!("POLL_BLOCKED=false");
+                println!(
+                    "NODE_WAITING_FOR_ASSIGNMENT_APPROVAL=false"
+                );
+                println!(
+                    "POLL_ASSIGNMENT_ELIGIBILITY_RESTORED=true"
+                );
+            }
 
-            let correction_outcome = submit_with_retry(&http, &auth_client, &mut auth, &payload)?;
+            tasks_from_poll_v1(poll_v1)
+        };
 
-            println!(
-                "CORRECTION_RESULT_HTTP_STATUS={}",
-                correction_outcome.status
-            );
-        } else {
-            println!("CORRECTION_REQUESTED=false");
+        if tasks_v1.is_empty() {
+            if last_idle_heartbeat.elapsed()
+                >= Duration::from_secs(15)
+            {
+                match send_heartbeat(
+                    &http,
+                    &auth_client,
+                    &mut auth,
+                    &base_heartbeat,
+                ) {
+                    Ok(status_v1) => {
+                        println!(
+                            "IDLE_HEARTBEAT_HTTP_STATUS={status_v1}"
+                        );
+                    }
+
+                    Err(error_v1)
+                        if transient_node_transport_error_v1(
+                            &error_v1
+                        ) =>
+                    {
+                        println!(
+                            "IDLE_HEARTBEAT_TRANSIENT_ERROR={error_v1}"
+                        );
+                    }
+
+                    Err(error_v1) => return Err(error_v1),
+                }
+
+                last_idle_heartbeat = Instant::now();
+            }
+
+            thread::sleep(Duration::from_millis(500));
+            continue;
         }
 
-        let clear = ProductionHeartbeatV1::from_node_state(
-            &state,
-            env!("CARGO_PKG_VERSION"),
-            "laptop",
-            &[],
+        // Determine one neural execution model for this concurrent
+        // batch. Any already-claimed task targeting another model is
+        // retained locally for the next drained batch.
+        let current_active_model_v1 =
+            active_selected_model.as_deref().and_then(|selected_v1| {
+                state
+                    .models
+                    .iter()
+                    .find(|model_v1| {
+                        model_v1.selected_model == selected_v1
+                    })
+                    .map(|model_v1| {
+                        crate::core::execution_model::ActiveModelV1 {
+                            selected_model:
+                                model_v1.selected_model.clone(),
+                            capability:
+                                model_v1.capability.clone(),
+                            runtime:
+                                model_v1.runtime.clone(),
+                            tier:
+                                model_v1.tier,
+                        }
+                    })
+            });
+
+        let mut batch_model_v1: Option<String> = None;
+        let mut executable_tasks_v1 = Vec::new();
+
+        for task_v1 in tasks_v1 {
+            let target_v1 =
+                crate::core::execution_model::certified_model_for_task(
+                    &state,
+                    &task_v1,
+                    current_active_model_v1.as_ref(),
+                )?;
+
+            if let Some(target_v1) = target_v1 {
+                if let Some(batch_model_id_v1) =
+                    batch_model_v1.as_deref()
+                {
+                    if batch_model_id_v1
+                        != target_v1.selected_model
+                    {
+                        println!(
+                            "CLAIMED_TASK_DEFERRED_FOR_MODEL_AFFINITY={}",
+                            task_v1.task_id_text()
+                        );
+
+                        queued_claimed_tasks_v1.push(task_v1);
+                        continue;
+                    }
+                } else {
+                    batch_model_v1 =
+                        Some(target_v1.selected_model.clone());
+                }
+            }
+
+            executable_tasks_v1.push(task_v1);
+        }
+
+        if let Some(batch_model_id_v1) =
+            batch_model_v1.as_deref()
+        {
+            let target_state_v1 = state
+                .models
+                .iter()
+                .find(|model_v1| {
+                    model_v1.selected_model == batch_model_id_v1
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "certified_model_state_missing:{}",
+                        batch_model_id_v1
+                    )
+                })?;
+
+            let target_v1 =
+                crate::core::execution_model::ActiveModelV1 {
+                    selected_model:
+                        target_state_v1.selected_model.clone(),
+                    capability:
+                        target_state_v1.capability.clone(),
+                    runtime:
+                        target_state_v1.runtime.clone(),
+                    tier:
+                        target_state_v1.tier,
+                };
+
+            let switch_required_v1 =
+                crate::core::execution_model::runtime_switch_required(
+                    active_selected_model.as_deref(),
+                    &target_v1,
+                );
+
+            println!(
+                "MODEL_RUNTIME_SWITCH_REQUIRED={switch_required_v1}"
+            );
+
+            if switch_required_v1 {
+                if env::var("EDGESWARM_LLAMA_BASE_URL")
+                    .ok()
+                    .filter(|value_v1| !value_v1.trim().is_empty())
+                    .is_some()
+                {
+                    return Err(
+                        "external_runtime_model_switch_unsupported".into()
+                    );
+                }
+
+                llama = None;
+                _managed_llama = None;
+
+                let model_path_v1 =
+                    resolve_active_model_path_v1(batch_model_id_v1)?;
+
+                let desired_acceleration_v1 =
+                    target_state_v1.acceleration.clone();
+
+                let config_v1 =
+                    execution_config_for_certified_model_v1(
+                        model_path_v1,
+                        &desired_acceleration_v1,
+                    )?;
+
+                let runtime_v1 =
+                    ManagedLlamaProcess::start(&config_v1)?;
+
+                runtime_acceleration =
+                    runtime_v1.acceleration().to_string();
+
+                let client_v1 = ProductionLlamaClient::new(
+                    runtime_v1.base_url().to_string(),
+                )?;
+
+                client_v1.health_check()?;
+
+                _managed_llama = Some(runtime_v1);
+                llama = Some(client_v1);
+
+                active_selected_model =
+                    Some(target_v1.selected_model.clone());
+
+                active_capability =
+                    Some(target_v1.capability.clone());
+
+                active_runtime =
+                    Some(target_v1.runtime.clone());
+
+                operational_limit_v1 =
+                    certified_concurrency_for_model_v1(
+                        &state,
+                        batch_model_id_v1,
+                    );
+
+                if single_task_mode_v1 {
+                    operational_limit_v1 = 1;
+                }
+
+                apply_active_model_heartbeat_v1(
+                    &mut base_heartbeat,
+                    &state,
+                    batch_model_id_v1,
+                )?;
+
+                base_heartbeat.concurrency_limit =
+                    operational_limit_v1;
+
+                base_heartbeat.runtime_acceleration =
+                    runtime_acceleration.clone();
+
+                println!(
+                    "ACTIVE_EXECUTION_MODEL={}",
+                    batch_model_id_v1
+                );
+
+                println!(
+                    "ACTIVE_EXECUTION_CERTIFIED_CONCURRENCY={}",
+                    operational_limit_v1
+                );
+
+                println!("MODEL_RUNTIME_SWITCH_COMPLETE=true");
+            }
+        }
+
+        if executable_tasks_v1.len()
+            > usize::from(operational_limit_v1)
+        {
+            let overflow_v1 = executable_tasks_v1
+                .split_off(usize::from(operational_limit_v1));
+
+            let mut next_queue_v1 = overflow_v1;
+            next_queue_v1.extend(queued_claimed_tasks_v1);
+
+            queued_claimed_tasks_v1 = next_queue_v1;
+        }
+
+        if executable_tasks_v1.is_empty() {
+            continue;
+        }
+
+        let active_ids_v1 = executable_tasks_v1
+            .iter()
+            .map(TaskEnvelope::task_id_text)
+            .collect::<Vec<_>>();
+
+        let mut active_heartbeat_v1 =
+            ProductionHeartbeatV1::from_node_state(
+                &state,
+                env!("CARGO_PKG_VERSION"),
+                "laptop",
+                &active_ids_v1,
+            );
+
+        if let Some(selected_model_v1) =
+            active_selected_model.as_deref()
+        {
+            apply_active_model_heartbeat_v1(
+                &mut active_heartbeat_v1,
+                &state,
+                selected_model_v1,
+            )?;
+
+            active_heartbeat_v1.runtime_acceleration =
+                runtime_acceleration.clone();
+        }
+
+        active_heartbeat_v1.concurrency_limit =
+            operational_limit_v1;
+
+        send_heartbeat(
+            &http,
+            &auth_client,
+            &mut auth,
+            &active_heartbeat_v1,
+        )?;
+
+        println!(
+            "CONCURRENT_TASK_BATCH_SIZE={}",
+            executable_tasks_v1.len()
         );
 
-        match send_heartbeat(&http, &auth_client, &mut auth, &clear) {
-            Ok(status) => {
-                println!("CLEAR_HEARTBEAT_HTTP_STATUS={status}");
+        println!(
+            "CURRENT_TASK_IDS={}",
+            active_ids_v1.join(",")
+        );
+
+        // TASK_WORKER_CONCURRENCY_V1
+        // Workers report completion to the single dispatcher. A finished
+        // slot can be refilled immediately while sibling workers continue.
+        let (
+            completion_tx_v1,
+            completion_rx_v1
+        ) = mpsc::channel::<(
+            String,
+            Result<TaskWorkerOutcomeV1, String>
+        )>();
+
+        let mut active_worker_ids_v1 =
+            Vec::<String>::new();
+
+        for task_v1 in executable_tasks_v1 {
+            let task_id_v1 =
+                task_v1.task_id_text();
+
+            if active_worker_ids_v1
+                .iter()
+                .any(|active_id_v1| {
+                    active_id_v1 == &task_id_v1
+                })
+            {
+                println!(
+                    "DUPLICATE_ACTIVE_TASK_SUPPRESSED={}",
+                    task_id_v1
+                );
+                continue;
+            }
+
+            println!("TASK_CLAIMED=true");
+            println!("TASK_ID={task_id_v1}");
+
+            let tx_v1 =
+                completion_tx_v1.clone();
+
+            let llama_v1 =
+                llama.clone();
+
+            let auth_v1 =
+                read_auth()?;
+
+            let wallet_v1 =
+                public_wallet.wallet_address.clone();
+
+            let hardware_v1 =
+                hardware.clone();
+
+            let private_key_v1 =
+                Zeroizing::new(
+                    private_key.as_str().to_string()
+                );
+
+            let selected_model_v1 =
+                active_selected_model.clone();
+
+            let capability_v1 =
+                active_capability.clone();
+
+            let runtime_v1 =
+                active_runtime.clone();
+
+            let acceleration_v1 =
+                runtime_acceleration.clone();
+
+            let capabilities_v1 =
+                poll_capabilities.clone();
+
+            let stop_v1 =
+                stop.clone();
+
+            let task_id_for_thread_v1 =
+                task_id_v1.clone();
+
+            thread::spawn(move || {
+                let result_v1 =
+                    std::panic::catch_unwind(
+                        std::panic::AssertUnwindSafe(|| {
+                            run_claimed_task_worker_v1(
+                                task_v1,
+                                llama_v1,
+                                auth_v1,
+                                wallet_v1,
+                                hardware_v1,
+                                private_key_v1,
+                                selected_model_v1,
+                                capability_v1,
+                                runtime_v1,
+                                acceleration_v1,
+                                capabilities_v1,
+                                stop_v1,
+                            )
+                        })
+                    );
+
+                let outcome_v1 =
+                    match result_v1 {
+                        Ok(result_v1) =>
+                            result_v1,
+
+                        Err(_) =>
+                            Err(format!(
+                                "task_worker_panicked:{}",
+                                task_id_for_thread_v1
+                            ))
+                    };
+
+                let _ =
+                    tx_v1.send((
+                        task_id_for_thread_v1,
+                        outcome_v1
+                    ));
+            });
+
+            active_worker_ids_v1
+                .push(task_id_v1);
+        }
+
+        while !active_worker_ids_v1.is_empty() {
+            let (
+                completed_task_id_v1,
+                completed_outcome_v1
+            ) = completion_rx_v1
+                .recv()
+                .map_err(|_| {
+                    "task_worker_completion_channel_closed"
+                        .to_string()
+                })?;
+
+            active_worker_ids_v1.retain(
+                |task_id_v1|
+                    task_id_v1 !=
+                    &completed_task_id_v1
+            );
+
+            let completed_outcome_v1 =
+                match completed_outcome_v1 {
+                    Ok(outcome_v1) =>
+                        Some(outcome_v1),
+
+                    Err(error_v1) => {
+                        println!(
+                            "TASK_WORKER_FAILED_NON_FATAL={} ERROR={}",
+                            completed_task_id_v1,
+                            error_v1
+                        );
+                        None
+                    }
+                };
+
+            auth = read_auth()?;
+
+            println!(
+                "TASK_WORKER_COMPLETED={}",
+                completed_task_id_v1
+            );
+
+            let correction_requested_v1 =
+                completed_outcome_v1
+                    .as_ref()
+                    .map(|outcome_v1| {
+                        outcome_v1.correction_requested
+                    })
+                    .unwrap_or(false);
+
+            // Correction redelivery remains exclusively dispatcher-owned.
+            if correction_requested_v1 {
+                let mut correction_v1 = None;
+
+                for attempt_v1 in 1..=3u8 {
+                    if stop.load(Ordering::Acquire) {
+                        println!(
+                            "CORRECTION_WAIT_STOP_REQUESTED=true"
+                        );
+                        break;
+                    }
+
+                    println!(
+                        "CORRECTION_REDELIVERY_ATTEMPT={attempt_v1}"
+                    );
+
+                    match poll_once(
+                        &http,
+                        &auth_client,
+                        &mut auth,
+                        &hardware,
+                        &poll_capabilities,
+                    ) {
+                        Ok(poll_v1) => {
+                            for candidate_v1 in
+                                tasks_from_poll_v1(poll_v1)
+                            {
+                                if candidate_v1.task_id_text()
+                                    == completed_task_id_v1
+                                {
+                                    correction_v1 =
+                                        Some(candidate_v1);
+                                } else {
+                                    let candidate_id_v1 =
+                                        candidate_v1.task_id_text();
+
+                                    let duplicate_v1 =
+                                        active_worker_ids_v1
+                                            .iter()
+                                            .any(|active_id_v1| {
+                                                active_id_v1 ==
+                                                    &candidate_id_v1
+                                            }) ||
+                                        queued_claimed_tasks_v1
+                                            .iter()
+                                            .any(|queued_v1| {
+                                                queued_v1
+                                                    .task_id_text() ==
+                                                    candidate_id_v1
+                                            });
+
+                                    if duplicate_v1 {
+                                        println!(
+                                            "DUPLICATE_ACTIVE_OR_QUEUED_TASK_SUPPRESSED={}",
+                                            candidate_id_v1
+                                        );
+                                    } else {
+                                        println!(
+                                            "CORRECTION_UNRELATED_TASK_QUEUED={}",
+                                            candidate_id_v1
+                                        );
+
+                                        queued_claimed_tasks_v1
+                                            .push(candidate_v1);
+                                    }
+                                }
+                            }
+                        }
+
+                        Err(error_v1) => {
+                            println!(
+                                "CORRECTION_REDELIVERY_POLL_ERROR={error_v1}"
+                            );
+                        }
+                    }
+
+                    if correction_v1.is_some() {
+                        break;
+                    }
+
+                    if attempt_v1 < 3 {
+                        thread::sleep(
+                            Duration::from_millis(500)
+                        );
+                    }
+                }
+
+                if let Some(correction_task_v1) =
+                    correction_v1
+                {
+                    let correction_id_v1 =
+                        correction_task_v1.task_id_text();
+
+                    let tx_v1 =
+                        completion_tx_v1.clone();
+
+                    let llama_v1 =
+                        llama.clone();
+
+                    let auth_v1 =
+                        read_auth()?;
+
+                    let wallet_v1 =
+                        public_wallet.wallet_address.clone();
+
+                    let hardware_v1 =
+                        hardware.clone();
+
+                    let private_key_v1 =
+                        Zeroizing::new(
+                            private_key.as_str().to_string()
+                        );
+
+                    let selected_model_v1 =
+                        active_selected_model.clone();
+
+                    let capability_v1 =
+                        active_capability.clone();
+
+                    let runtime_v1 =
+                        active_runtime.clone();
+
+                    let acceleration_v1 =
+                        runtime_acceleration.clone();
+
+                    let capabilities_v1 =
+                        poll_capabilities.clone();
+
+                    let stop_v1 =
+                        stop.clone();
+
+                    let correction_id_for_thread_v1 =
+                        correction_id_v1.clone();
+
+                    thread::spawn(move || {
+                        let result_v1 =
+                            std::panic::catch_unwind(
+                                std::panic::AssertUnwindSafe(|| {
+                                    run_claimed_task_worker_v1(
+                                        correction_task_v1,
+                                        llama_v1,
+                                        auth_v1,
+                                        wallet_v1,
+                                        hardware_v1,
+                                        private_key_v1,
+                                        selected_model_v1,
+                                        capability_v1,
+                                        runtime_v1,
+                                        acceleration_v1,
+                                        capabilities_v1,
+                                        stop_v1,
+                                    )
+                                })
+                            );
+
+                        let outcome_v1 =
+                            match result_v1 {
+                                Ok(result_v1) =>
+                                    result_v1,
+
+                                Err(_) =>
+                                    Err(format!(
+                                        "task_worker_panicked:{}",
+                                        correction_id_for_thread_v1
+                                    ))
+                            };
+
+                        let _ =
+                            tx_v1.send((
+                                correction_id_for_thread_v1,
+                                outcome_v1
+                            ));
+                    });
+
+                    active_worker_ids_v1
+                        .push(correction_id_v1);
+
+                    println!(
+                        "CORRECTION_REDELIVERY_SUCCESS=true"
+                    );
+                } else {
+                    println!(
+                        "CORRECTION_REDELIVERY_TIMEOUT=true"
+                    );
+                    println!(
+                        "CORRECTION_REDELIVERY_NON_FATAL=true"
+                    );
+                }
+            }
+
+            // Heartbeat immediately reflects the slot that just finished.
+            let mut active_snapshot_v1 =
+                ProductionHeartbeatV1::from_node_state(
+                    &state,
+                    env!("CARGO_PKG_VERSION"),
+                    "laptop",
+                    &active_worker_ids_v1,
+                );
+
+            if let Some(selected_model_v1) =
+                active_selected_model.as_deref()
+            {
+                apply_active_model_heartbeat_v1(
+                    &mut active_snapshot_v1,
+                    &state,
+                    selected_model_v1,
+                )?;
+
+                active_snapshot_v1
+                    .runtime_acceleration =
+                    runtime_acceleration.clone();
+            }
+
+            active_snapshot_v1.concurrency_limit =
+                operational_limit_v1;
+
+            send_heartbeat(
+                &http,
+                &auth_client,
+                &mut auth,
+                &active_snapshot_v1,
+            )?;
+
+            if stop.load(Ordering::Acquire)
+                || single_task_mode_v1
+                || !queued_claimed_tasks_v1.is_empty()
+                || active_worker_ids_v1.is_empty()
+            {
+                continue;
+            }
+
+            let free_slots_v1 =
+                usize::from(operational_limit_v1)
+                    .saturating_sub(
+                        active_worker_ids_v1.len()
+                    );
+
+            if free_slots_v1 == 0 {
+                continue;
+            }
+
+            let refill_poll_v1 =
+                match poll_once_with_limit(
+                    &http,
+                    &auth_client,
+                    &mut auth,
+                    &hardware,
+                    &poll_capabilities,
+                    free_slots_v1 as u16,
+                ) {
+                    Ok(poll_v1) =>
+                        poll_v1,
+
+                    Err(error_v1)
+                        if transient_node_transport_error_v1(
+                            &error_v1
+                        ) =>
+                    {
+                        println!(
+                            "REFILL_POLL_TRANSIENT_ERROR={error_v1}"
+                        );
+                        continue;
+                    }
+
+                    Err(error_v1) =>
+                        return Err(error_v1),
+                };
+
+            if refill_poll_v1.blocked {
+                println!(
+                    "REFILL_POLL_BLOCKED=true"
+                );
+                continue;
+            }
+
+            for refill_task_v1 in
+                tasks_from_poll_v1(refill_poll_v1)
+            {
+                let refill_id_v1 =
+                    refill_task_v1.task_id_text();
+
+                let duplicate_v1 =
+                    active_worker_ids_v1
+                        .iter()
+                        .any(|active_id_v1| {
+                            active_id_v1 ==
+                                &refill_id_v1
+                        }) ||
+                    queued_claimed_tasks_v1
+                        .iter()
+                        .any(|queued_v1| {
+                            queued_v1.task_id_text() ==
+                                refill_id_v1
+                        });
+
+                if duplicate_v1 {
+                    println!(
+                        "DUPLICATE_ACTIVE_OR_QUEUED_TASK_SUPPRESSED={}",
+                        refill_id_v1
+                    );
+                    continue;
+                }
+
+                if active_worker_ids_v1.len()
+                    >= usize::from(
+                        operational_limit_v1
+                    )
+                {
+                    queued_claimed_tasks_v1
+                        .push(refill_task_v1);
+                    continue;
+                }
+
+                let current_model_v1 =
+                    active_selected_model
+                        .as_deref()
+                        .and_then(|selected_v1| {
+                            state.models
+                                .iter()
+                                .find(|model_v1| {
+                                    model_v1.selected_model
+                                        == selected_v1
+                                })
+                                .map(|model_v1| {
+                                    crate::core::execution_model::ActiveModelV1 {
+                                        selected_model:
+                                            model_v1.selected_model.clone(),
+                                        capability:
+                                            model_v1.capability.clone(),
+                                        runtime:
+                                            model_v1.runtime.clone(),
+                                        tier:
+                                            model_v1.tier,
+                                    }
+                                })
+                        });
+
+                let refill_target_v1 =
+                    crate::core::execution_model::certified_model_for_task(
+                        &state,
+                        &refill_task_v1,
+                        current_model_v1.as_ref(),
+                    )?;
+
+                if let Some(target_v1) =
+                    refill_target_v1.as_ref()
+                {
+                    if active_selected_model
+                        .as_deref()
+                        != Some(
+                            target_v1
+                                .selected_model
+                                .as_str()
+                        )
+                    {
+                        println!(
+                            "REFILL_DEFERRED_FOR_MODEL_AFFINITY={}",
+                            refill_task_v1.task_id_text()
+                        );
+
+                        queued_claimed_tasks_v1
+                            .push(refill_task_v1);
+
+                        continue;
+                    }
+                }
+
+                let tx_v1 =
+                    completion_tx_v1.clone();
+
+                let llama_v1 =
+                    llama.clone();
+
+                let auth_v1 =
+                    read_auth()?;
+
+                let wallet_v1 =
+                    public_wallet.wallet_address.clone();
+
+                let hardware_v1 =
+                    hardware.clone();
+
+                let private_key_v1 =
+                    Zeroizing::new(
+                        private_key.as_str().to_string()
+                    );
+
+                let selected_model_v1 =
+                    active_selected_model.clone();
+
+                let capability_v1 =
+                    active_capability.clone();
+
+                let runtime_v1 =
+                    active_runtime.clone();
+
+                let acceleration_v1 =
+                    runtime_acceleration.clone();
+
+                let capabilities_v1 =
+                    poll_capabilities.clone();
+
+                let stop_v1 =
+                    stop.clone();
+
+                let refill_id_for_thread_v1 =
+                    refill_id_v1.clone();
+
+                thread::spawn(move || {
+                    let result_v1 =
+                        std::panic::catch_unwind(
+                            std::panic::AssertUnwindSafe(|| {
+                                run_claimed_task_worker_v1(
+                                    refill_task_v1,
+                                    llama_v1,
+                                    auth_v1,
+                                    wallet_v1,
+                                    hardware_v1,
+                                    private_key_v1,
+                                    selected_model_v1,
+                                    capability_v1,
+                                    runtime_v1,
+                                    acceleration_v1,
+                                    capabilities_v1,
+                                    stop_v1,
+                                )
+                            })
+                        );
+
+                    let outcome_v1 =
+                        match result_v1 {
+                            Ok(result_v1) =>
+                                result_v1,
+
+                            Err(_) =>
+                                Err(format!(
+                                    "task_worker_panicked:{}",
+                                    refill_id_for_thread_v1
+                                ))
+                        };
+
+                    let _ =
+                        tx_v1.send((
+                            refill_id_for_thread_v1,
+                            outcome_v1
+                        ));
+                });
+
+                active_worker_ids_v1
+                    .push(refill_id_v1);
+
+                println!(
+                    "TASK_SLOT_REFILLED_IMMEDIATELY=true"
+                );
+            }
+
+            let mut refill_snapshot_v1 =
+                ProductionHeartbeatV1::from_node_state(
+                    &state,
+                    env!("CARGO_PKG_VERSION"),
+                    "laptop",
+                    &active_worker_ids_v1,
+                );
+
+            if let Some(selected_model_v1) =
+                active_selected_model.as_deref()
+            {
+                apply_active_model_heartbeat_v1(
+                    &mut refill_snapshot_v1,
+                    &state,
+                    selected_model_v1,
+                )?;
+
+                refill_snapshot_v1
+                    .runtime_acceleration =
+                    runtime_acceleration.clone();
+            }
+
+            refill_snapshot_v1.concurrency_limit =
+                operational_limit_v1;
+
+            send_heartbeat(
+                &http,
+                &auth_client,
+                &mut auth,
+                &refill_snapshot_v1,
+            )?;
+        }
+
+        auth = read_auth()?;
+
+        let mut clear_v1 =
+            ProductionHeartbeatV1::from_node_state(
+                &state,
+                env!("CARGO_PKG_VERSION"),
+                "laptop",
+                &[],
+            );
+
+        if let Some(selected_model_v1) =
+            active_selected_model.as_deref()
+        {
+            apply_active_model_heartbeat_v1(
+                &mut clear_v1,
+                &state,
+                selected_model_v1,
+            )?;
+
+            clear_v1.runtime_acceleration =
+                runtime_acceleration.clone();
+        }
+
+        clear_v1.concurrency_limit =
+            operational_limit_v1;
+
+        match send_heartbeat(
+            &http,
+            &auth_client,
+            &mut auth,
+            &clear_v1,
+        ) {
+            Ok(status_v1) => {
+                println!(
+                    "CLEAR_HEARTBEAT_HTTP_STATUS={status_v1}"
+                );
                 println!("CURRENT_TASK_CLEARED=true");
             }
-            Err(_) => println!("CURRENT_TASK_CLEARED=false"),
+
+            Err(_) => {
+                println!("CURRENT_TASK_CLEARED=false");
+            }
         }
 
         println!("TASK_LIFECYCLE_COMPLETE=true");
         println!("PRIVATE_KEY_PRINTED=false");
         println!("PRIVATE_KEY_PERSISTED=false");
 
-        if env::var("EDGESWARM_SINGLE_TASK")
-            .map(|value| value.trim() == "1")
-            .unwrap_or(false)
-        {
+        if single_task_mode_v1 {
             println!("SINGLE_TASK_MODE=true");
             println!("SINGLE_TASK_COMPLETE=true");
             println!("GET_JOBS_AFTER_COMPLETION=false");
             return Ok(());
         }
 
-        // A STOP requested while a task was running takes effect
-        // only after result submission and the clear heartbeat.
-        if stop.load(Ordering::Acquire) {
-            println!("NODE_SERVICE_STOP_REQUESTED=true");
-            println!("NODE_SERVICE_STOPPED_AFTER_TASK=true");
-            return Ok(());
-        }
-
         last_idle_heartbeat = Instant::now();
-        thread::sleep(Duration::from_millis(250));
+        thread::sleep(Duration::from_millis(100));
     }
 }

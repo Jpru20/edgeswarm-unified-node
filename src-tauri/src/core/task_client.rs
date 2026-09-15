@@ -137,6 +137,24 @@ pub fn build_poll_url(
     version: &str,
     platform: &str,
 ) -> Result<Url, String> {
+    build_poll_url_with_limit(
+        hardware_id,
+        provider_email,
+        capabilities,
+        version,
+        platform,
+        1,
+    )
+}
+
+pub fn build_poll_url_with_limit(
+    hardware_id: &str,
+    provider_email: &str,
+    capabilities: &[String],
+    version: &str,
+    platform: &str,
+    limit: u16,
+) -> Result<Url, String> {
     let base = env::var("GCP_BASE_URL")
         .unwrap_or_else(|_| "https://api.edgeswarm.io".into())
         .trim_end_matches('/')
@@ -145,11 +163,13 @@ pub fn build_poll_url(
     let mut url = Url::parse(&format!("{base}/swarm/get-jobs"))
         .map_err(|_| "get_jobs_url_invalid".to_string())?;
 
+    let limit = limit.clamp(1, 10).to_string();
+
     url.query_pairs_mut()
         .append_pair("hardwareId", hardware_id)
         .append_pair("providerEmail", provider_email)
         .append_pair("capabilities", &capabilities.join(","))
-        .append_pair("limit", "1")
+        .append_pair("limit", &limit)
         .append_pair("version", version)
         .append_pair("appType", "cross-platform-node")
         .append_pair("platform", platform);

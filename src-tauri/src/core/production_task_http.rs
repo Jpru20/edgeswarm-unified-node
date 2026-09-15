@@ -2,14 +2,21 @@ use crate::adapters;
 use crate::core::{
     auth_client::SupabaseAuthClient,
     production_heartbeat::ProductionHeartbeatV1,
-    task_client::{build_poll_url, GetJobsResponse},
+    task_client::{build_poll_url_with_limit, GetJobsResponse},
 };
 use reqwest::{
     blocking::Client,
     header::{HeaderValue, AUTHORIZATION},
 };
 use serde_json::Value;
-use std::{env, fs, path::PathBuf, thread, time::Duration};
+use std::{
+    env,
+    fs,
+    path::PathBuf,
+    sync::{Mutex, OnceLock},
+    thread,
+    time::Duration,
+};
 
 #[derive(Clone)]
 pub struct LocalAuth {
@@ -20,6 +27,12 @@ pub struct LocalAuth {
 pub struct SubmitOutcome {
     pub status: u16,
     pub body: Value,
+}
+
+static AUTH_REFRESH_LOCK_V1: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn auth_refresh_lock_v1() -> &'static Mutex<()> {
+    AUTH_REFRESH_LOCK_V1.get_or_init(|| Mutex::new(()))
 }
 
 fn auth_path() -> Result<PathBuf, String> {
@@ -82,7 +95,23 @@ fn api_base() -> String {
         .to_string()
 }
 
-pub fn refresh_auth(client: &SupabaseAuthClient) -> Result<LocalAuth, String> {
+pub fn refresh_auth(
+    client: &SupabaseAuthClient,
+    stale_access_token: &str,
+) -> Result<LocalAuth, String> {
+    let _guard = auth_refresh_lock_v1()
+        .lock()
+        .map_err(|_| "auth_refresh_lock_poisoned".to_string())?;
+
+    // Another worker may already have refreshed while this caller
+    // waited for the lock. Reuse the rotated session instead of
+    // rotating the refresh token a second time.
+    let current = read_auth()?;
+
+    if current.access_token != stale_access_token {
+        return Ok(current);
+    }
+
     client.force_refresh_session()?;
     read_auth()
 }
@@ -94,17 +123,31 @@ pub fn send_heartbeat(
     heartbeat: &ProductionHeartbeatV1,
 ) -> Result<u16, String> {
     for auth_try in 0..2 {
+        // LIVE_UPDATE_LIFECYCLE_SEND_REFRESH_V1
+        //
+        // Always serialize a fresh lifecycle snapshot. The caller may
+        // reuse its heartbeat object for many minutes.
+        let mut live_heartbeat =
+            heartbeat.clone();
+
+        live_heartbeat
+            .refresh_update_lifecycle_v1();
+
         let response = http
             .post(format!("{}/admin/node-heartbeat", api_base()))
             .header(AUTHORIZATION, bearer(&auth.access_token)?)
-            .json(heartbeat)
+            .json(&live_heartbeat)
             .send()
             .map_err(|_| "heartbeat_network_failed".to_string())?;
 
         let status = response.status().as_u16();
 
         if status == 401 && auth_try == 0 {
-            *auth = refresh_auth(auth_client)?;
+            let stale_access_token = auth.access_token.clone();
+            *auth = refresh_auth(
+                auth_client,
+                &stale_access_token,
+            )?;
             continue;
         }
 
@@ -129,12 +172,31 @@ pub fn poll_once(
     hardware_id: &str,
     capabilities: &[String],
 ) -> Result<GetJobsResponse, String> {
-    let url = build_poll_url(
+    poll_once_with_limit(
+        http,
+        auth_client,
+        auth,
+        hardware_id,
+        capabilities,
+        1,
+    )
+}
+
+pub fn poll_once_with_limit(
+    http: &Client,
+    auth_client: &SupabaseAuthClient,
+    auth: &mut LocalAuth,
+    hardware_id: &str,
+    capabilities: &[String],
+    limit: u16,
+) -> Result<GetJobsResponse, String> {
+    let url = build_poll_url_with_limit(
         hardware_id,
         &auth.provider_email,
         capabilities,
         env!("CARGO_PKG_VERSION"),
         adapters::platform_name(),
+        limit,
     )?;
 
     for auth_try in 0..2 {
@@ -147,7 +209,11 @@ pub fn poll_once(
         let status = response.status().as_u16();
 
         if status == 401 && auth_try == 0 {
-            *auth = refresh_auth(auth_client)?;
+            let stale_access_token = auth.access_token.clone();
+            *auth = refresh_auth(
+                auth_client,
+                &stale_access_token,
+            )?;
             continue;
         }
 
@@ -229,7 +295,11 @@ pub fn send_stream_frame_with_retry(
         let status = response.status().as_u16();
 
         if (status == 401 && !auth_refreshed) {
-            *auth = refresh_auth(auth_client)?;
+            let stale_access_token = auth.access_token.clone();
+            *auth = refresh_auth(
+                auth_client,
+                &stale_access_token,
+            )?;
 
             auth_refreshed = true;
             continue;
@@ -292,7 +362,11 @@ pub fn submit_with_retry(
         let status = response.status().as_u16();
 
         if status == 401 && !auth_refreshed {
-            *auth = refresh_auth(auth_client)?;
+            let stale_access_token = auth.access_token.clone();
+            *auth = refresh_auth(
+                auth_client,
+                &stale_access_token,
+            )?;
             auth_refreshed = true;
             continue;
         }

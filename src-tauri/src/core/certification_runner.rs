@@ -1,5 +1,10 @@
 use crate::core::{
     capacity::{CapacityBenchmarkSample, CapacityTaskResult},
+    certification_progress::{
+        certification_level_passed_v1,
+        certification_level_rejected_v1,
+        certification_level_started_v1,
+    },
     capacity_policy::CapacityPolicy,
     certification_workload::{CertificationPack, CertificationWorkload},
 };
@@ -52,7 +57,39 @@ impl CertificationRunner {
         let mut rejected = None;
 
         for concurrency in 1..=self.policy.maximum_concurrency {
-            let batch = executor.execute(&pack.workloads, concurrency)?;
+            certification_level_started_v1(
+                concurrency,
+                pack.workloads.len(),
+            );
+
+            let batch =
+                match executor.execute(
+                    &pack.workloads,
+                    concurrency,
+                ) {
+                    Ok(batch) => batch,
+
+                    Err(error)
+                        if concurrency > 1 =>
+                    {
+                        println!(
+                            "CERTIFICATION_CONCURRENCY_REJECTED={concurrency}|REASON={error}"
+                        );
+
+                        rejected =
+                            Some(concurrency);
+
+                        certification_level_rejected_v1(
+                            concurrency,
+                            Some(error.clone()),
+                        );
+
+                        break;
+                    }
+
+                    Err(error) =>
+                        return Err(error),
+                };
 
             if batch.task_results.len() != pack.workloads.len() {
                 return Err(format!(
@@ -76,9 +113,22 @@ impl CertificationRunner {
 
                 if recommended < concurrency {
                     rejected = Some(concurrency);
+
+                    certification_level_rejected_v1(
+                        concurrency,
+                        Some(
+                            "performance_gate_rejected"
+                                .into()
+                        ),
+                    );
+
                     break;
                 }
             }
+
+            certification_level_passed_v1(
+                concurrency
+            );
         }
 
         let certified = self.policy.recommend(&samples);
@@ -239,6 +289,67 @@ mod tests {
                 task_results,
             })
         }
+    }
+
+    struct ThirdSlotExecutionFailure;
+
+    impl CertificationExecutor
+        for ThirdSlotExecutionFailure
+    {
+        fn execute(
+            &mut self,
+            workloads: &[CertificationWorkload],
+            concurrency: u16,
+        ) -> Result<ExecutionBatchResult, String> {
+            if concurrency == 3 {
+                return Err(
+                    "simulated_third_slot_failure".into()
+                );
+            }
+
+            let mut reference =
+                ReferenceThreeBExecutor;
+
+            reference.execute(
+                workloads,
+                concurrency,
+            )
+        }
+    }
+
+    #[test]
+    fn higher_execution_failure_preserves_lower_certificate() {
+        let pack =
+            built_in_3b_realworld_v1()
+                .unwrap();
+
+        let mut executor =
+            ThirdSlotExecutionFailure;
+
+        let report =
+            CertificationRunner::new(
+                CapacityPolicy::default()
+            )
+            .run(
+                &pack,
+                &mut executor
+            )
+            .unwrap();
+
+        assert_eq!(
+            report.tested_concurrency_levels,
+            vec![1, 2]
+        );
+
+        assert_eq!(
+            report.certified_concurrency,
+            2
+        );
+
+        assert_eq!(
+            report.rejected_concurrency,
+            Some(3)
+        );
     }
 
     #[test]

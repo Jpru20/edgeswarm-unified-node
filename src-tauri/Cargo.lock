@@ -1059,7 +1059,7 @@ dependencies = [
 
 [[package]]
 name = "edgeswarm-unified-node"
-version = "1.5.18"
+version = "1.6.0"
 dependencies = [
  "base64 0.22.1",
  "ctrlc",
@@ -1080,6 +1080,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-updater",
  "uuid",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

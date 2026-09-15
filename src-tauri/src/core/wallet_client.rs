@@ -22,6 +22,7 @@ impl WorkerWalletClient {
             supabase_url,
             anon_key,
             http: Client::builder()
+                .connect_timeout(Duration::from_secs(5))
                 .timeout(Duration::from_secs(20))
                 .build()
                 .map_err(|_| "wallet_http_client_failed".to_string())?,

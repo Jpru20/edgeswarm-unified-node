@@ -3,6 +3,10 @@ use edgeswarm_unified_node_lib::{
         capacity::CapacityCertificateV1,
         capacity_policy::CapacityPolicy,
         capacity_store::{load_certificate, save_certificate},
+        real_capacity_certification::{
+            certification_max_concurrency_v1,
+            reported_runtime_slot_count_v1,
+        },
         certificate_match::sha256_file,
         certification_runner::CertificationRunner,
         certification_workload::{bind_neural_realworld_pack_v1, built_in_neural_realworld_v1},
@@ -85,11 +89,6 @@ fn run() -> Result<(), String> {
     let mut pack = built_in_neural_realworld_v1()?;
     bind_neural_realworld_pack_v1(&mut pack, model_capability)?;
 
-    let mut policy = CapacityPolicy::default();
-    policy.maximum_concurrency = 2;
-
-    let runner = CertificationRunner::new(policy);
-
     let mut runtime_config = LlamaProcessConfig::for_model(model_path_string)?;
     runtime_config.executable = runtime_path.to_path_buf();
 
@@ -100,6 +99,39 @@ fn run() -> Result<(), String> {
     let managed_runtime = ManagedLlamaProcess::start(&runtime_config)?;
     let runtime_base_url = managed_runtime.base_url().to_string();
 
+    let reported_slots =
+        reported_runtime_slot_count_v1(
+            &runtime_base_url
+        )
+        .unwrap_or_else(|error| {
+            println!(
+                "LLAMA_SLOT_DISCOVERY_FAILED={error}"
+            );
+            1
+        });
+
+    let maximum_concurrency =
+        certification_max_concurrency_v1(
+            reported_slots
+        );
+
+    let mut policy =
+        CapacityPolicy::default();
+
+    policy.maximum_concurrency =
+        maximum_concurrency;
+
+    let runner =
+        CertificationRunner::new(policy);
+
+    println!(
+        "LLAMA_REPORTED_SLOT_COUNT={reported_slots}"
+    );
+
+    println!(
+        "CERTIFICATION_DYNAMIC_MAX_CONCURRENCY={maximum_concurrency}"
+    );
+
     println!("LLAMA_RUNTIME_OWNERSHIP=managed");
     println!("LLAMA_BASE_URL={runtime_base_url}");
 
@@ -108,12 +140,26 @@ fn run() -> Result<(), String> {
     println!("REAL_CERTIFICATION_STARTED=true");
     println!("PACK_ID={}", pack.pack_id);
     println!("WORKLOAD_COUNT={}", pack.workloads.len());
-    println!("MAXIMUM_CONCURRENCY_TESTED=2");
+    println!("MAXIMUM_CONCURRENCY_TESTED={maximum_concurrency}");
     println!("MODEL_SHA256={model_sha}");
     println!("RUNTIME_VERSION={runtime_version}");
     println!("ACCELERATION={}", state.acceleration.backend);
 
-    let report = runner.run(&pack, &mut executor)?;
+    edgeswarm_unified_node_lib::core::certification_progress::certification_begin_v1(
+        maximum_concurrency,
+        pack.workloads.len(),
+    );
+
+    let report =
+        match runner.run(&pack, &mut executor) {
+            Ok(report) => report,
+            Err(error) => {
+                edgeswarm_unified_node_lib::core::certification_progress::certification_error_v1(
+                    error.clone()
+                );
+                return Err(error);
+            }
+        };
 
     let baseline = report
         .samples
@@ -190,6 +236,12 @@ fn run() -> Result<(), String> {
 
     let path = save_certificate(&certificate)?;
     let loaded = load_certificate(&path)?;
+
+    edgeswarm_unified_node_lib::core::certification_progress::certification_complete_v1(
+        loaded.certified_concurrency,
+        loaded.rejected_concurrency,
+        loaded.tested_concurrency_levels.clone(),
+    );
 
     println!(
         "TESTED_CONCURRENCY_LEVELS={:?}",

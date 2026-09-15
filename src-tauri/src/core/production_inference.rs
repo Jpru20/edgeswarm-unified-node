@@ -16,6 +16,7 @@ pub struct ProductionInferenceResult {
     pub max_tokens: u32,
 }
 
+#[derive(Clone)]
 pub struct ProductionLlamaClient {
     http: Client,
     base_url: String,

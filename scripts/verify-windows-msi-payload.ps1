@@ -36,3 +36,36 @@ if ($Llama.FullName -notmatch "runtime\\current\\llama-server\.exe$") {
 Write-Host "MSI_LLAMA_RUNTIME_PATH=$($Llama.FullName)"
 Write-Host "MSI_LLAMA_RUNTIME_SHA256=$LlamaHash"
 Write-Host "MSI_BUNDLED_LLAMA_RUNTIME=PASS"
+
+
+# WINDOWS_BACKGROUND_HELPER_PAYLOAD_V1
+$Headless = Get-ChildItem $Audit -Recurse `
+    -Filter 'edgeswarm-node-headless.exe' |
+    Select-Object -First 1
+
+$Supervisor = Get-ChildItem $Audit -Recurse `
+    -Filter 'edgeswarm-node-supervisor.exe' |
+    Select-Object -First 1
+
+$TaskScript = Get-ChildItem $Audit -Recurse `
+    -Filter 'supervisor-task.ps1' |
+    Select-Object -First 1
+
+if (!$Headless) {
+    throw 'msi_payload_headless_missing'
+}
+
+if (!$Supervisor) {
+    throw 'msi_payload_supervisor_missing'
+}
+
+if (!$TaskScript) {
+    throw 'msi_payload_supervisor_task_script_missing'
+}
+
+Write-Host "MSI_HEADLESS_PATH=$($Headless.FullName)"
+Write-Host "MSI_SUPERVISOR_PATH=$($Supervisor.FullName)"
+Write-Host "MSI_SUPERVISOR_TASK_PATH=$($TaskScript.FullName)"
+Write-Host 'MSI_HEADLESS_PAYLOAD=PASS'
+Write-Host 'MSI_SUPERVISOR_PAYLOAD=PASS'
+Write-Host 'MSI_SUPERVISOR_TASK_PAYLOAD=PASS'

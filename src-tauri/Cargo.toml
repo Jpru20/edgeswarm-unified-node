@@ -1,7 +1,7 @@
 [package]
 default-run = "edgeswarm-unified-node"
 name = "edgeswarm-unified-node"
-version = "1.5.18"
+version = "1.6.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -43,9 +43,22 @@ zeroize = "1"
 ctrlc = "3"
 fs2 = "0.4"
 
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
 [[bin]]
 name = "edgeswarm-node-headless"
 path = "src/bin/edgeswarm_node_headless.rs"
+
+[[bin]]
+name = "edgeswarm-node-supervisor"
+path = "src/bin/edgeswarm_node_supervisor.rs"
 
 [[bin]]
 name = "edgeswarm-node-setup"

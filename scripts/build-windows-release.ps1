@@ -40,16 +40,86 @@ if ($ActualRuntimeSha -ne $ExpectedRuntimeSha.ToLower()) {
     throw "windows_llama_runtime_sha_mismatch"
 }
 
-$RuntimeConfig = Join-Path $TargetDir "tauri.runtime.config.json"
-$SourceJson = ($RuntimeSource -replace '\\','/') + '/*'
+# WINDOWS_BACKGROUND_HELPERS_V1
+$TargetTriple = (& rustc --print host-tuple).Trim()
+
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($TargetTriple)) {
+    throw "windows_target_triple_detection_failed"
+}
+
+if ($TargetTriple -ne "x86_64-pc-windows-msvc") {
+    throw "windows_release_target_unsupported_$TargetTriple"
+}
+
+& cargo build `
+    --manifest-path (Join-Path $Repo "src-tauri\Cargo.toml") `
+    --release `
+    --no-default-features `
+    --bin edgeswarm-node-headless `
+    --bin edgeswarm-node-supervisor
+
+if ($LASTEXITCODE -ne 0) {
+    throw "windows_helper_build_failed_$LASTEXITCODE"
+}
+
+$ReleaseDir = Join-Path $TargetDir "release"
+$SidecarDir = Join-Path $TargetDir "windows-sidecars"
+New-Item -ItemType Directory -Force -Path $SidecarDir | Out-Null
+
+$ExternalBin = @()
+
+foreach ($Name in @(
+    "edgeswarm-node-headless",
+    "edgeswarm-node-supervisor"
+)) {
+    $Source = Join-Path $ReleaseDir "$Name.exe"
+
+    if (!(Test-Path $Source)) {
+        throw "windows_helper_missing_$Name"
+    }
+
+    $Base = Join-Path $SidecarDir $Name
+    $Staged = "$Base-$TargetTriple.exe"
+
+    Copy-Item $Source $Staged -Force
+
+    $ExternalBin += ($Base -replace '\\','/')
+
+    Write-Host "WINDOWS_HELPER_STAGED=$Name"
+}
+
+$TaskScriptSource =
+    Join-Path $Repo "src-tauri\windows\supervisor-task.ps1"
+
+if (!(Test-Path $TaskScriptSource)) {
+    throw "windows_supervisor_task_script_missing"
+}
+
+$RuntimeConfig =
+    Join-Path $TargetDir "tauri.runtime.config.json"
+
+$SourceJson =
+    ($RuntimeSource -replace '\\','/') + '/*'
+
+$TaskScriptJson =
+    ($TaskScriptSource -replace '\\','/')
+
+$Resources = @{}
+$Resources[$SourceJson] = "runtime/current/"
+$Resources[$TaskScriptJson] =
+    "resources/windows/supervisor-task.ps1"
 
 @{
     bundle = @{
-        resources = @{
-            $SourceJson = "runtime/current/"
-        }
+        externalBin = $ExternalBin
+        resources = $Resources
     }
-} | ConvertTo-Json -Depth 8 | Set-Content $RuntimeConfig
+} |
+    ConvertTo-Json -Depth 8 |
+    Set-Content $RuntimeConfig
+
+Write-Host "WINDOWS_EXTERNAL_BIN_COUNT=$($ExternalBin.Count)"
+Write-Host "WINDOWS_SUPERVISOR_TASK_STAGED=PASS"
 
 Write-Host "WINDOWS_LLAMA_RUNTIME_SHA256=$ActualRuntimeSha"
 Write-Host "WINDOWS_LLAMA_RUNTIME_STAGED=PASS"
@@ -60,6 +130,30 @@ $Exe = Join-Path $TargetDir 'release\edgeswarm-unified-node.exe'
 $Msi = Get-ChildItem (Join-Path $TargetDir 'release\bundle\msi') -Filter '*.msi' | Select-Object -First 1
 $Nsis = Get-ChildItem (Join-Path $TargetDir 'release\bundle\nsis') -Filter '*.exe' | Select-Object -First 1
 if (!(Test-Path $Exe) -or !$Msi -or !$Nsis) { throw 'release_artifact_missing' }
+
+# WINDOWS_PUBLIC_INSTALLER_POLICY_V16
+#
+# v1.6 publishes NSIS only. MSI remains an internal validation
+# artifact until MSI uninstall cleanup for the supervisor task
+# has been independently certified.
+$PublicReleaseManifest =
+    Join-Path $TargetDir "windows-public-release.json"
+
+@{
+    platform = "windows-x64"
+    publicInstallerKind = "nsis"
+    publicInstallerPath = $Nsis.FullName
+    msiPublicRelease = $false
+    msiValidationPath = $Msi.FullName
+    policy = "v1.6_nsis_public_msi_internal"
+} |
+    ConvertTo-Json -Depth 6 |
+    Set-Content $PublicReleaseManifest
+
+Write-Host "PUBLIC_WINDOWS_INSTALLER_KIND=NSIS"
+Write-Host "PUBLIC_WINDOWS_INSTALLER=$($Nsis.FullName)"
+Write-Host "MSI_PUBLIC_RELEASE=false"
+Write-Host "WINDOWS_RELEASE_POLICY_MANIFEST=$PublicReleaseManifest"
 $BinaryText = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($Exe))
 if (!$BinaryText.Contains($Url)) { throw 'compiled_supabase_url_not_found' }
 if (!$BinaryText.Contains($Key)) { throw 'compiled_supabase_anon_key_not_found' }

@@ -39,6 +39,7 @@ impl SupabaseLoginClient {
         }
 
         let http = Client::builder()
+            .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(20))
             .build()
             .map_err(|_| "supabase_login_http_client_failed".to_string())?;

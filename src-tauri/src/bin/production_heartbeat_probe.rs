@@ -1,4 +1,5 @@
-use edgeswarm_unified_node_lib::core::{
+﻿use edgeswarm_unified_node_lib::core::{
+    capacity::CapacityStatus,
     production_heartbeat::ProductionHeartbeatV1,
     NodeState,
 };
@@ -9,7 +10,7 @@ fn main() {
     let heartbeat =
         ProductionHeartbeatV1::from_node_state(
             &state,
-            "0.1.0",
+            env!("CARGO_PKG_VERSION"),
             "laptop",
             &[],
         );
@@ -42,17 +43,122 @@ fn main() {
     );
 
     println!(
-        "PRIMARY_CAPABILITY={}",
+        "PRODUCTION_CONCURRENCY_LIMIT={}",
+        heartbeat.concurrency_limit
+    );
+
+    println!(
+        "DISK_FREE_GB={}",
+        heartbeat.disk_free_gb
+    );
+
+    println!(
+        "UPTIME_SEC={}",
+        heartbeat.uptime_sec
+    );
+
+    println!(
+        "GPU_VENDOR={}",
         heartbeat
-            .model_capability
+            .gpu_vendor
             .as_deref()
             .unwrap_or("none")
     );
 
     println!(
-        "PRODUCTION_CONCURRENCY_LIMIT={}",
-        heartbeat.concurrency_limit
+        "GPU_MEMORY_MB={}",
+        heartbeat
+            .gpu_memory_mb
+            .unwrap_or(0)
     );
+
+    println!(
+        "CUDA_AVAILABLE={}",
+        heartbeat.cuda_available
+    );
+
+    println!(
+        "VULKAN_AVAILABLE={}",
+        heartbeat.vulkan_available
+    );
+
+    println!(
+        "METAL_AVAILABLE={}",
+        heartbeat.metal_available
+    );
+
+    println!(
+        "MODEL_SIZE_GB={}",
+        heartbeat
+            .model_size_gb
+            .unwrap_or(0.0)
+    );
+
+    assert!(
+        !heartbeat.hardware_id.trim().is_empty()
+    );
+
+    assert!(
+        !heartbeat.cpu_name.trim().is_empty()
+    );
+
+    assert!(
+        heartbeat.ram_gb > 0.0
+    );
+
+    assert!(
+        heartbeat.disk_free_gb > 0
+    );
+
+    assert!(
+        heartbeat.concurrency_limit >= 1
+            && heartbeat.concurrency_limit <= 5
+    );
+
+    if let Some(primary) =
+        heartbeat.model_id.as_deref()
+    {
+        let capacity = heartbeat
+            .metadata
+            .model_capacity_v1
+            .iter()
+            .find(|model| {
+                model.selected_model == primary
+            })
+            .expect(
+                "primary model missing from capacity metadata"
+            );
+
+        assert_eq!(
+            capacity.capacity_status,
+            CapacityStatus::Certified
+        );
+
+        let certified =
+            capacity.certified_concurrency
+                .expect(
+                    "primary certified concurrency missing"
+                )
+                .max(1)
+                .min(5);
+
+        assert_eq!(
+            heartbeat.concurrency_limit,
+            certified
+        );
+
+        assert!(
+            heartbeat
+                .model_size_gb
+                .unwrap_or(0.0) > 0.0
+        );
+
+        assert!(
+            heartbeat.models_available
+                .iter()
+                .any(|model| model == primary)
+        );
+    }
 
     println!(
         "MODEL_CAPACITY_ENTRY_COUNT={}",
@@ -62,49 +168,7 @@ fn main() {
             .len()
     );
 
-    assert_eq!(
-        heartbeat.models_available.len(),
-        8
+    println!(
+        "PRODUCTION_HEARTBEAT_PAYLOAD_VALID=true"
     );
-
-    assert_eq!(
-        heartbeat.eligible_model_capabilities,
-        vec!["Neural-Inference-3B"]
-    );
-
-    assert_eq!(
-        heartbeat.model_id.as_deref(),
-        Some("qwen2.5:3b")
-    );
-
-    assert_eq!(
-        heartbeat.model_capability.as_deref(),
-        Some("Neural-Inference-3B")
-    );
-
-    assert_eq!(
-        heartbeat.concurrency_limit,
-        1
-    );
-
-    assert_eq!(
-        heartbeat.metadata.model_capacity_v1.len(),
-        8
-    );
-
-    let certified = heartbeat
-        .metadata
-        .model_capacity_v1
-        .iter()
-        .filter(|model| {
-            model.capacity_status
-                == edgeswarm_unified_node_lib::core::
-                    capacity::CapacityStatus::Certified
-        })
-        .count();
-
-    assert_eq!(certified, 1);
-
-    println!("CERTIFIED_MODEL_COUNT={certified}");
-    println!("PRODUCTION_HEARTBEAT_PAYLOAD_VALID=true");
 }
