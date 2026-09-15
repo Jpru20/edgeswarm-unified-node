@@ -1026,6 +1026,15 @@ mod desktop {
 
                 #[cfg(not(target_os = "windows"))]
                 {
+                    if let Some(window) =
+                        app.get_webview_window("main")
+                    {
+                        window.show()?;
+
+                        #[cfg(target_os = "macos")]
+                        window.set_focus()?;
+                    }
+
                     let handle =
                         app.handle().clone();
 
