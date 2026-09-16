@@ -32,11 +32,11 @@ trap cleanup EXIT
 mkdir -p "$(dirname "$DMG")"
 rm -f "$DMG"
 
-ditto "$APP" "$STAGE/EdgeSwarm Node.app"
+ditto "$APP" "$STAGE/Swarm.app"
 ln -s /Applications "$STAGE/Applications"
 
 hdiutil create \
-  -volname "EdgeSwarm Node" \
+  -volname "Swarm" \
   -srcfolder "$STAGE" \
   -ov \
   -format UDZO \
@@ -50,7 +50,7 @@ stat -f 'DMG_BYTES=%z' "$DMG"
 hdiutil attach -readonly -nobrowse -mountpoint "$MOUNT" "$DMG" >/dev/null
 MOUNTED=1
 
-PAYLOAD="$MOUNT/EdgeSwarm Node.app/Contents/MacOS/edgeswarm-unified-node"
+PAYLOAD="$MOUNT/Swarm.app/Contents/MacOS/edgeswarm-unified-node"
 ACTUAL="$(shasum -a 256 "$PAYLOAD" | awk '{print $1}')"
 
 echo "DMG_PAYLOAD_SHA256=$ACTUAL"

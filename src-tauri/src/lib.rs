@@ -1236,6 +1236,30 @@ mod desktop {
             .plugin(tauri_plugin_opener::init())
             .plugin(tauri_plugin_updater::Builder::new().build())
             .setup(|app| {
+            #[cfg(target_os = "macos")]
+            {
+                let background_update_mode =
+                    std::env::args()
+                        .any(|argument| {
+                            argument
+                                == "--background-update-check"
+                        });
+
+                if background_update_mode {
+                    app.handle()
+                        .set_activation_policy(
+                            tauri::ActivationPolicy::Prohibited
+                        )?;
+
+                    app.handle()
+                        .set_dock_visibility(false)?;
+
+                    println!(
+                        "MACOS_BACKGROUND_UPDATE_DOCK_HIDDEN=true"
+                    );
+                }
+            }
+
                 #[cfg(target_os = "windows")]
                 {
                     let args =

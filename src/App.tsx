@@ -391,7 +391,7 @@ function App() {
     return (
       <main className="app auth-screen">
         <section className="auth-card">
-          <h1>EdgeSwarm Authentication</h1>
+          <h1>Swarm Authentication</h1>
 
           <form onSubmit={handleLogin}>
             <input

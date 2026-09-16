@@ -72,7 +72,7 @@ echo "MACOS_BACKGROUND_HELPERS_BUILT=PASS"
 
 npm run tauri build -- --bundles app
 
-APP="$TARGET/release/bundle/macos/EdgeSwarm Node.app"
+APP="$TARGET/release/bundle/macos/Swarm.app"
 APP_EXE="$APP/Contents/MacOS/edgeswarm-unified-node"
 RAW_EXE="$TARGET/release/edgeswarm-unified-node"
 
@@ -207,7 +207,7 @@ if [ -f "$RAW_EXE" ]; then
 fi
 
 VERSION="$(awk -F'"' '/^version = "/ {print $2; exit}' src-tauri/Cargo.toml)"
-DMG="$TARGET/release/bundle/dmg/EdgeSwarm-Node_${VERSION}_arm64.dmg"
+DMG="$TARGET/release/bundle/dmg/Swarm_${VERSION}_arm64.dmg"
 "$ROOT/scripts/package-macos-dmg.sh" "$APP" "$DMG"
 
 echo "MACOS_RELEASE_BUILD_COMPLETE=PASS"
