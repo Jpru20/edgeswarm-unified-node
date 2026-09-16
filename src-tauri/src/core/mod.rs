@@ -1,4 +1,3 @@
-pub mod capacity_test_control;
 pub mod auth_client;
 pub mod auth_login_client;
 pub mod auth_login_contract;
@@ -7,10 +6,12 @@ pub mod backend_client;
 pub mod capacity;
 pub mod capacity_policy;
 pub mod capacity_store;
+pub mod capacity_test_control;
 pub mod certificate_match;
 pub mod certification_progress;
 pub mod certification_runner;
 pub mod certification_workload;
+pub mod desired_state;
 pub mod generation_policy;
 pub mod hardware;
 pub mod hardware_identity;
@@ -20,29 +21,34 @@ pub mod model;
 pub mod model_discovery;
 pub mod model_fingerprint;
 pub mod model_provisioning;
-pub mod real_capacity_certification;
 pub mod model_registry;
 pub mod node_service;
 pub mod node_status_bridge;
 pub mod per_model_state;
 pub mod platform;
+pub mod production_config;
 pub mod production_heartbeat;
 pub mod production_heartbeat_client;
 pub mod production_inference;
-pub mod production_config;
 pub mod production_prompt;
 pub mod production_task_http;
+pub mod real_capacity_certification;
 pub mod result_signing;
 pub mod task_client;
 pub mod task_state;
 pub mod wallet_account;
+pub mod wallet_bootstrap;
 pub mod wallet_client;
 pub mod wallet_identity;
 pub mod wallet_public_identity;
 pub mod wallet_vault;
-pub mod wallet_bootstrap;
 pub mod workload_validator;
-pub mod desired_state;
+
+#[cfg(target_os = "macos")]
+pub mod macos_restart_credential;
+
+#[cfg(target_os = "macos")]
+pub mod macos_supervisor_agent;
 pub mod windows_restart_credential;
 pub mod windows_supervisor_task;
 

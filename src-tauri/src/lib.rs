@@ -448,7 +448,10 @@ mod desktop {
         })
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "macos"
+    )))]
     fn current_node_service_status(
         runtime: &NodeRuntimeState,
     ) -> Result<NodeServiceStatus, String> {
@@ -478,7 +481,10 @@ mod desktop {
     }
 
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(
+        target_os = "windows",
+        target_os = "macos"
+    ))]
     fn current_node_service_status(
         _runtime: &NodeRuntimeState,
     ) -> Result<NodeServiceStatus, String> {
@@ -616,7 +622,64 @@ mod desktop {
         current_node_service_status(&runtime)
     }
 
-    #[cfg(not(target_os = "windows"))]
+
+    #[cfg(target_os = "macos")]
+    #[tauri::command]
+    fn start_node(
+        auth_state: tauri::State<'_, Mutex<AppAuthState>>,
+        runtime: tauri::State<'_, NodeRuntimeState>,
+    ) -> Result<NodeServiceStatus, String> {
+        let wallet_password = {
+            let state = auth_state
+                .lock()
+                .map_err(|_| {
+                    "auth_state_lock_failed".to_string()
+                })?;
+
+            if state.authenticated_email.is_none() {
+                return Err(
+                    "node_start_requires_authenticated_session"
+                        .into()
+                );
+            }
+
+            let password =
+                state.wallet_password
+                    .as_ref()
+                    .ok_or_else(|| {
+                        "node_start_wallet_password_missing"
+                            .to_string()
+                    })?;
+
+            Zeroizing::new(
+                password.as_str().to_owned()
+            )
+        };
+
+        crate::core::macos_supervisor_agent::
+            persist_restart_credential_v1(
+                wallet_password.as_str()
+            )?;
+
+        crate::core::macos_supervisor_agent::
+            ensure_launch_agent_v1()?;
+
+        crate::core::macos_supervisor_agent::
+            ensure_update_agent_v1()?;
+
+        persist_desired_node_state_v1(
+            DesiredNodeStateV1::Running,
+            "user_start",
+        )?;
+
+        current_node_service_status(&runtime)
+    }
+
+
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "macos"
+    )))]
     #[tauri::command]
     fn start_node(
         auth_state: tauri::State<'_, Mutex<AppAuthState>>,
@@ -740,7 +803,25 @@ mod desktop {
         current_node_service_status(&runtime)
     }
 
-    #[cfg(not(target_os = "windows"))]
+
+    #[cfg(target_os = "macos")]
+    #[tauri::command]
+    fn stop_node(
+        runtime: tauri::State<'_, NodeRuntimeState>,
+    ) -> Result<NodeServiceStatus, String> {
+        persist_desired_node_state_v1(
+            DesiredNodeStateV1::UserStopped,
+            "user_stop",
+        )?;
+
+        current_node_service_status(&runtime)
+    }
+
+
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "macos"
+    )))]
     #[tauri::command]
     fn stop_node(runtime: tauri::State<'_, NodeRuntimeState>) -> Result<NodeServiceStatus, String> {
         persist_desired_node_state_v1(
@@ -918,6 +999,205 @@ mod desktop {
         }
     }
 
+
+    #[cfg(target_os = "macos")]
+    async fn macos_background_update_check_v1(
+        app: tauri::AppHandle,
+        endpoint_override: Option<String>,
+    ) -> Result<(), String> {
+        use tauri_plugin_updater::UpdaterExt;
+
+        println!(
+            "MACOS_BACKGROUND_UPDATE_CHECK=true"
+        );
+
+        let mut updater_builder =
+            app.updater_builder()
+                .restart_after_install(false);
+
+        if let Some(endpoint_text) =
+            endpoint_override
+        {
+            let endpoint =
+                endpoint_text
+                    .parse()
+                    .map_err(|e| {
+                        format!(
+                            "macos_background_update_endpoint_invalid:{e}"
+                        )
+                    })?;
+
+            updater_builder =
+                updater_builder
+                    .endpoints(vec![endpoint])
+                    .map_err(|e| {
+                        format!(
+                            "macos_background_update_endpoint_failed:{e}"
+                        )
+                    })?;
+
+            println!(
+                "MACOS_BACKGROUND_UPDATE_ENDPOINT_OVERRIDE=true"
+            );
+        }
+
+        let updater =
+            updater_builder
+                .build()
+                .map_err(|e| {
+                    format!(
+                        "macos_background_updater_build_failed:{e}"
+                    )
+                })?;
+
+        let Some(update) =
+            updater
+                .check()
+                .await
+                .map_err(|e| {
+                    format!(
+                        "macos_background_update_check_failed:{e}"
+                    )
+                })?
+        else {
+            println!(
+                "MACOS_BACKGROUND_UPDATE_AVAILABLE=false"
+            );
+
+            return Ok(());
+        };
+
+        println!(
+            "MACOS_BACKGROUND_UPDATE_AVAILABLE=true"
+        );
+
+        println!(
+            "MACOS_BACKGROUND_UPDATE_VERSION={}",
+            update.version
+        );
+
+        // Download and signature-verify the entire updater package
+        // BEFORE interrupting the provider.
+        let bytes =
+            update
+                .download(
+                    |chunk, total| {
+                        println!(
+                            "MACOS_BACKGROUND_UPDATE_DOWNLOAD={chunk}|TOTAL={total:?}"
+                        );
+                    },
+                    || {
+                        println!(
+                            "MACOS_BACKGROUND_UPDATE_DOWNLOAD_COMPLETE=true"
+                        );
+                    },
+                )
+                .await
+                .map_err(|e| {
+                    format!(
+                        "macos_background_update_download_failed:{e}"
+                    )
+                })?;
+
+        println!(
+            "MACOS_BACKGROUND_UPDATE_SIGNATURE_VERIFIED=true"
+        );
+
+        // Ensure the persistent supervisor exists before placing
+        // the provider into update pause.
+        crate::core::macos_supervisor_agent::
+            ensure_launch_agent_v1()?;
+
+        crate::core::macos_supervisor_agent::
+            begin_update_pause_v1()?;
+
+        // Restarting the supervisor immediately makes it observe
+        // the pause. The old headless process also has a parent
+        // guard and exits if its old supervisor disappears.
+        let prepare_result =
+            (|| -> Result<(), String> {
+                crate::core::macos_supervisor_agent::
+                    kickstart_supervisor_v1()?;
+
+                crate::core::macos_supervisor_agent::
+                    wait_for_provider_paused_v1(
+                        std::time::Duration::from_secs(20)
+                    )?;
+
+                Ok(())
+            })();
+
+        if let Err(error) =
+            prepare_result
+        {
+            let _ =
+                crate::core::macos_supervisor_agent::
+                    clear_update_pause_v1();
+
+            let _ =
+                crate::core::macos_supervisor_agent::
+                    kickstart_supervisor_v1();
+
+            return Err(error);
+        }
+
+        println!(
+            "MACOS_BACKGROUND_UPDATE_PROVIDER_PAUSED=true"
+        );
+
+        let update =
+            update.restart_after_install(false);
+
+        let install_result =
+            update
+                .install(bytes)
+                .map_err(|e| {
+                    format!(
+                        "macos_background_update_install_failed:{e}"
+                    )
+                });
+
+        match install_result {
+            Ok(()) => {
+                crate::core::macos_supervisor_agent::
+                    clear_update_pause_v1()?;
+
+                crate::core::macos_supervisor_agent::
+                    kickstart_supervisor_v1()?;
+
+                println!(
+                    "MACOS_BACKGROUND_UPDATE_INSTALL_COMPLETE=true"
+                );
+
+                println!(
+                    "MACOS_BACKGROUND_UPDATE_PROVIDER_RECOVERED=true"
+                );
+
+                Ok(())
+            }
+
+            Err(error) => {
+                // Fail open for provider availability after a failed
+                // update attempt while preserving desired_state.json.
+                let _ =
+                    crate::core::macos_supervisor_agent::
+                        clear_update_pause_v1();
+
+                let _ =
+                    crate::core::macos_supervisor_agent::
+                        kickstart_supervisor_v1();
+
+                println!(
+                    "MACOS_BACKGROUND_UPDATE_PROVIDER_RECOVERY_ATTEMPTED=true"
+                );
+
+                Err(error)
+            }
+        }
+    }
+
+
+    #[cfg(target_os = "linux")]
     async fn desktop_update_check_v1(
         app: tauri::AppHandle,
     ) -> tauri_plugin_updater::Result<()> {
@@ -1024,6 +1304,88 @@ mod desktop {
                     }
                 }
 
+                #[cfg(target_os = "macos")]
+                {
+                    let args =
+                        std::env::args()
+                            .collect::<Vec<_>>();
+
+                    let background_update =
+                        args.iter()
+                            .any(|arg| {
+                                arg ==
+                                    "--background-update-check"
+                            });
+
+                    let background_update_endpoint =
+                        args.windows(2)
+                            .find_map(|pair| {
+                                if pair[0] ==
+                                    "--background-update-endpoint"
+                                {
+                                    Some(pair[1].clone())
+                                } else {
+                                    None
+                                }
+                            });
+
+                    if background_update {
+                        let handle =
+                            app.handle().clone();
+
+                        tauri::async_runtime::spawn(
+                            async move {
+                                let exit_code =
+                                    match
+                                        macos_background_update_check_v1(
+                                            handle.clone(),
+                                            background_update_endpoint,
+                                        ).await
+                                    {
+                                        Ok(()) => {
+                                            println!(
+                                                "MACOS_BACKGROUND_UPDATE_RESULT=success"
+                                            );
+
+                                            0
+                                        }
+
+                                        Err(error) => {
+                                            eprintln!(
+                                                "MACOS_BACKGROUND_UPDATE_ERROR={error}"
+                                            );
+
+                                            1
+                                        }
+                                    };
+
+                                handle.exit(
+                                    exit_code
+                                );
+                            }
+                        );
+
+                        return Ok(());
+                    }
+
+                    match
+                        crate::core::macos_supervisor_agent::
+                            ensure_update_agent_v1()
+                    {
+                        Ok(()) => {
+                            println!(
+                                "MACOS_UPDATE_AGENT_READY=true"
+                            );
+                        }
+
+                        Err(error) => {
+                            println!(
+                                "MACOS_UPDATE_AGENT_ERROR={error}"
+                            );
+                        }
+                    }
+                }
+
                 #[cfg(not(target_os = "windows"))]
                 {
                     if let Some(window) =
@@ -1035,33 +1397,36 @@ mod desktop {
                         window.set_focus()?;
                     }
 
-                    let handle =
-                        app.handle().clone();
+                    #[cfg(target_os = "linux")]
+                    {
+                        let handle =
+                            app.handle().clone();
 
-                    std::thread::spawn(move || loop {
-                        let check_handle =
-                            handle.clone();
+                        std::thread::spawn(move || loop {
+                            let check_handle =
+                                handle.clone();
 
-                        tauri::async_runtime::block_on(
-                            async move {
-                                if let Err(error) =
-                                    desktop_update_check_v1(
-                                        check_handle
-                                    ).await
-                                {
-                                    println!(
-                                        "DESKTOP_UPDATE_ERROR={error}"
-                                    );
+                            tauri::async_runtime::block_on(
+                                async move {
+                                    if let Err(error) =
+                                        desktop_update_check_v1(
+                                            check_handle
+                                        ).await
+                                    {
+                                        println!(
+                                            "DESKTOP_UPDATE_ERROR={error}"
+                                        );
+                                    }
                                 }
-                            }
-                        );
+                            );
 
-                        std::thread::sleep(
-                            std::time::Duration::from_secs(
-                                60 * 60
-                            )
-                        );
-                    });
+                            std::thread::sleep(
+                                std::time::Duration::from_secs(
+                                    60 * 60
+                                )
+                            );
+                        });
+                    }
                 }
 
                 Ok(())

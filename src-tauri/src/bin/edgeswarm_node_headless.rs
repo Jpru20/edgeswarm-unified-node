@@ -1,15 +1,9 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
-use edgeswarm_unified_node_lib::core::{
-    node_service::run_node_service,
-    power_guard::PowerGuard,
-};
+use edgeswarm_unified_node_lib::core::{node_service::run_node_service, power_guard::PowerGuard};
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 use edgeswarm_unified_node_lib::core::{
-    desired_state::{
-        effective_desired_node_state_v1,
-        DesiredNodeStateV1,
-    },
+    desired_state::{effective_desired_node_state_v1, DesiredNodeStateV1},
     node_status_bridge::publish_node_status_v1,
 };
 
@@ -23,32 +17,21 @@ use std::{
     time::Duration,
 };
 
-#[cfg(not(target_os = "windows"))]
-use std::{
-    fs,
-    path::PathBuf,
-};
+#[cfg(target_os = "linux")]
+use std::{fs, path::PathBuf};
 use zeroize::Zeroizing;
 
-#[cfg(not(target_os = "windows"))]
-const SYSTEMD_WALLET_CREDENTIAL: &str =
-    "edgeswarm-wallet-password";
+#[cfg(target_os = "linux")]
+const SYSTEMD_WALLET_CREDENTIAL: &str = "edgeswarm-wallet-password";
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 fn wallet_password_path() -> Result<PathBuf, String> {
-    if let Some(path) =
-        env::var_os("EDGESWARM_WALLET_PASSWORD_FILE")
-    {
+    if let Some(path) = env::var_os("EDGESWARM_WALLET_PASSWORD_FILE") {
         return Ok(PathBuf::from(path));
     }
 
-    if let Some(directory) =
-        env::var_os("CREDENTIALS_DIRECTORY")
-    {
-        return Ok(
-            PathBuf::from(directory)
-                .join(SYSTEMD_WALLET_CREDENTIAL),
-        );
+    if let Some(directory) = env::var_os("CREDENTIALS_DIRECTORY") {
+        return Ok(PathBuf::from(directory).join(SYSTEMD_WALLET_CREDENTIAL));
     }
 
     Err("wallet_password_credential_missing".into())
@@ -56,101 +39,130 @@ fn wallet_password_path() -> Result<PathBuf, String> {
 
 #[cfg(target_os = "windows")]
 fn read_wallet_password() -> Result<Zeroizing<String>, String> {
-    edgeswarm_unified_node_lib::core::
-        windows_restart_credential::
-        read_windows_restart_credential_v1()
+    edgeswarm_unified_node_lib::core::windows_restart_credential::read_windows_restart_credential_v1(
+    )
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+fn read_wallet_password() -> Result<Zeroizing<String>, String> {
+    edgeswarm_unified_node_lib::core::macos_restart_credential::read_macos_restart_credential_v1()
+}
+
+#[cfg(target_os = "linux")]
 fn read_wallet_password() -> Result<Zeroizing<String>, String> {
     let path = wallet_password_path()?;
 
     let raw = fs::read_to_string(&path)
-        .map_err(|_| {
-            "wallet_password_credential_read_failed".to_string()
-        })?;
+        .map_err(|_| "wallet_password_credential_read_failed".to_string())?;
 
-    let password = raw
-        .trim_end_matches(|c| c == '\r' || c == '\n')
-        .to_string();
+    let password = raw.trim_end_matches(|c| c == '\r' || c == '\n').to_string();
 
     if password.is_empty() {
-        return Err(
-            "wallet_password_credential_empty".into()
-        );
+        return Err("wallet_password_credential_empty".into());
     }
 
     Ok(Zeroizing::new(password))
 }
 
-#[cfg(target_os = "windows")]
-fn windows_desired_state_allows_start_v1() -> bool {
-    let state =
-        effective_desired_node_state_v1();
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn desired_state_allows_start_v1() -> bool {
+    let state = effective_desired_node_state_v1();
 
-    let running =
-        state.desired_state ==
-        DesiredNodeStateV1::Running;
+    let running = state.desired_state == DesiredNodeStateV1::Running;
 
     println!(
         "HEADLESS_DESIRED_STATE={}",
         match state.desired_state {
-            DesiredNodeStateV1::Running =>
-                "running",
-            DesiredNodeStateV1::UserStopped =>
-                "user_stopped",
+            DesiredNodeStateV1::Running => "running",
+            DesiredNodeStateV1::UserStopped => "user_stopped",
         }
     );
 
-    println!(
-        "HEADLESS_NODE_START_ALLOWED={running}"
-    );
+    println!("HEADLESS_NODE_START_ALLOWED={running}");
 
     running
 }
 
-#[cfg(target_os = "windows")]
-fn start_status_publisher_v1(
-    done: Arc<AtomicBool>,
-) -> thread::JoinHandle<()> {
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn start_status_publisher_v1(done: Arc<AtomicBool>) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         while !done.load(Ordering::Acquire) {
-            let desired =
-                effective_desired_node_state_v1();
+            let desired = effective_desired_node_state_v1();
 
-            let stopping =
-                desired.desired_state
-                    == DesiredNodeStateV1::UserStopped;
+            let stopping = desired.desired_state == DesiredNodeStateV1::UserStopped;
 
-            let _ =
-                publish_node_status_v1(
-                    true,
-                    stopping,
-                    None,
-                );
+            let _ = publish_node_status_v1(true, stopping, None);
 
-            thread::sleep(
-                Duration::from_millis(500)
-            );
+            thread::sleep(Duration::from_millis(500));
         }
     })
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn start_desired_state_monitor_v1(
     stop: Arc<AtomicBool>,
     monitor_done: Arc<AtomicBool>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         while !monitor_done.load(Ordering::Acquire) {
-            let state =
-                effective_desired_node_state_v1();
+            let state = effective_desired_node_state_v1();
 
-            if state.desired_state ==
-                DesiredNodeStateV1::UserStopped
-            {
+            if state.desired_state == DesiredNodeStateV1::UserStopped {
+                println!("HEADLESS_USER_STOP_OBSERVED=true");
+
+                stop.store(true, Ordering::Release);
+
+                break;
+            }
+
+            thread::sleep(Duration::from_millis(500));
+        }
+
+        println!("HEADLESS_DESIRED_STATE_MONITOR_STOPPED=true");
+    })
+}
+
+
+#[cfg(target_os = "macos")]
+fn macos_supervised_v1() -> bool {
+    env::var("EDGESWARM_SUPERVISED")
+        .map(|value| value.trim() == "1")
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn start_macos_supervisor_parent_monitor_v1(
+    stop: Arc<AtomicBool>,
+    done: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    let supervisor_pid =
+        unsafe { libc::getppid() };
+
+    thread::spawn(move || {
+        if supervisor_pid <= 1 {
+            println!(
+                "HEADLESS_SUPERVISOR_PARENT_INVALID=true"
+            );
+
+            stop.store(
+                true,
+                Ordering::Release,
+            );
+
+            return;
+        }
+
+        println!(
+            "HEADLESS_SUPERVISOR_PARENT_PID={supervisor_pid}"
+        );
+
+        while !done.load(Ordering::Acquire) {
+            let parent =
+                unsafe { libc::getppid() };
+
+            if parent != supervisor_pid {
                 println!(
-                    "HEADLESS_USER_STOP_OBSERVED=true"
+                    "HEADLESS_SUPERVISOR_LOST=true"
                 );
 
                 stop.store(
@@ -165,10 +177,6 @@ fn start_desired_state_monitor_v1(
                 Duration::from_millis(500)
             );
         }
-
-        println!(
-            "HEADLESS_DESIRED_STATE_MONITOR_STOPPED=true"
-        );
     })
 }
 
@@ -178,141 +186,118 @@ fn run() -> Result<(), String> {
     // Fail closed before reading wallet material or starting any
     // runtime. A supervisor may launch this process, but only a
     // persisted user intent of `running` is allowed to start work.
-    #[cfg(target_os = "windows")]
-    if !windows_desired_state_allows_start_v1() {
-        let _ =
-            publish_node_status_v1(
-                false,
-                false,
-                None,
-            );
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    if !desired_state_allows_start_v1() {
+        let _ = publish_node_status_v1(false, false, None);
 
-        println!(
-            "HEADLESS_NODE_SUPERVISOR_RESTART_ALLOWED=false"
-        );
+        println!("HEADLESS_NODE_SUPERVISOR_RESTART_ALLOWED=false");
 
         return Ok(());
     }
 
-    let wallet_password =
-        read_wallet_password()?;
+    let wallet_password = read_wallet_password()?;
 
     #[cfg(target_os = "windows")]
-    println!(
-        "HEADLESS_WINDOWS_DPAPI_CREDENTIAL_LOADED=true"
-    );
+    println!("HEADLESS_WINDOWS_DPAPI_CREDENTIAL_LOADED=true");
 
-    let stop =
-        Arc::new(AtomicBool::new(false));
+    #[cfg(target_os = "macos")]
+    println!("HEADLESS_MACOS_KEYCHAIN_CREDENTIAL_LOADED=true");
 
-    let signal_stop =
-        Arc::clone(&stop);
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let signal_stop = Arc::clone(&stop);
 
     ctrlc::set_handler(move || {
-        signal_stop.store(
-            true,
-            Ordering::Release,
-        );
+        signal_stop.store(true, Ordering::Release);
     })
-    .map_err(|_| {
-        "shutdown_signal_handler_failed".to_string()
-    })?;
+    .map_err(|_| "shutdown_signal_handler_failed".to_string())?;
 
-    #[cfg(target_os = "windows")]
-    let monitor_done =
-        Arc::new(AtomicBool::new(false));
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    let monitor_done = Arc::new(AtomicBool::new(false));
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     let desired_state_monitor =
-        start_desired_state_monitor_v1(
-            Arc::clone(&stop),
-            Arc::clone(&monitor_done),
-        );
+        start_desired_state_monitor_v1(Arc::clone(&stop), Arc::clone(&monitor_done));
 
-    #[cfg(target_os = "windows")]
-    let status_done =
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    let status_done = Arc::new(AtomicBool::new(false));
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    let status_publisher = start_status_publisher_v1(Arc::clone(&status_done));
+
+    #[cfg(target_os = "macos")]
+    let supervisor_parent_monitor_done =
         Arc::new(AtomicBool::new(false));
 
-    #[cfg(target_os = "windows")]
-    let status_publisher =
-        start_status_publisher_v1(
-            Arc::clone(&status_done),
-        );
+    #[cfg(target_os = "macos")]
+    let supervisor_parent_monitor =
+        if macos_supervised_v1() {
+            Some(
+                start_macos_supervisor_parent_monitor_v1(
+                    Arc::clone(&stop),
+                    Arc::clone(
+                        &supervisor_parent_monitor_done
+                    ),
+                )
+            )
+        } else {
+            None
+        };
 
-    let _power_guard =
-        PowerGuard::acquire()?;
+
+    let _power_guard = PowerGuard::acquire()?;
 
     println!("HEADLESS_NODE_MODE=true");
-    println!(
-        "HEADLESS_NODE_SIGNAL_HANDLER_READY=true"
-    );
-    println!(
-        "HEADLESS_NODE_POWER_GUARD_READY=true"
-    );
+    println!("HEADLESS_NODE_SIGNAL_HANDLER_READY=true");
+    println!("HEADLESS_NODE_POWER_GUARD_READY=true");
 
-    let result =
-        run_node_service(
-            Arc::clone(&stop),
-            wallet_password,
-        );
+    let result = run_node_service(Arc::clone(&stop), wallet_password);
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
-        monitor_done.store(
-            true,
-            Ordering::Release,
-        );
+        monitor_done.store(true, Ordering::Release);
 
-        let _ =
-            desired_state_monitor.join();
+        let _ = desired_state_monitor.join();
 
-        status_done.store(
-            true,
-            Ordering::Release,
-        );
+        status_done.store(true, Ordering::Release);
 
-        let _ =
-            status_publisher.join();
+        let _ = status_publisher.join();
 
-        let final_state =
-            effective_desired_node_state_v1();
 
-        if final_state.desired_state ==
-            DesiredNodeStateV1::UserStopped
+        #[cfg(target_os = "macos")]
         {
-            let _ =
-                publish_node_status_v1(
-                    false,
-                    false,
-                    None,
-                );
-
-            println!(
-                "HEADLESS_NODE_EXIT_REASON=user_stopped"
+            supervisor_parent_monitor_done.store(
+                true,
+                Ordering::Release,
             );
 
-            println!(
-                "HEADLESS_NODE_SUPERVISOR_RESTART_ALLOWED=false"
-            );
+            if let Some(handle) =
+                supervisor_parent_monitor
+            {
+                let _ = handle.join();
+            }
+        }
+
+let final_state = effective_desired_node_state_v1();
+
+        if final_state.desired_state == DesiredNodeStateV1::UserStopped {
+            let _ = publish_node_status_v1(false, false, None);
+
+            println!("HEADLESS_NODE_EXIT_REASON=user_stopped");
+
+            println!("HEADLESS_NODE_SUPERVISOR_RESTART_ALLOWED=false");
 
             // Intentional STOP is a normal clean exit even if the
             // task lifecycle itself observed a shutdown condition.
             return Ok(());
         }
 
-        let _ =
-            publish_node_status_v1(
-                false,
-                false,
-                result.as_ref()
-                    .err()
-                    .cloned(),
-            );
+        let _ = publish_node_status_v1(false, false, result.as_ref().err().cloned());
     }
 
     result?;
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
         // Under supervision, a clean worker exit while the persisted
         // intent remains `running` is abnormal and should be restarted.
@@ -320,49 +305,84 @@ fn run() -> Result<(), String> {
             .map(|value| value.trim() == "1")
             .unwrap_or(false)
         {
-            println!(
-                "HEADLESS_NODE_EXIT_REASON=unexpected_clean_exit"
-            );
+            println!("HEADLESS_NODE_EXIT_REASON=unexpected_clean_exit");
 
-            println!(
-                "HEADLESS_NODE_SUPERVISOR_RESTART_ALLOWED=true"
-            );
+            println!("HEADLESS_NODE_SUPERVISOR_RESTART_ALLOWED=true");
 
-            return Err(
-                "headless_unexpected_clean_exit_while_running"
-                    .into()
-            );
+            return Err("headless_unexpected_clean_exit_while_running".into());
         }
     }
 
     Ok(())
 }
 
+
+#[cfg(target_os = "macos")]
+fn persist_macos_restart_credential_from_stdin_v1(
+) -> Result<(), String> {
+    use std::io::Read;
+
+    let mut password =
+        String::new();
+
+    std::io::stdin()
+        .read_to_string(&mut password)
+        .map_err(|_| {
+            "macos_restart_credential_stdin_read_failed"
+                .to_string()
+        })?;
+
+    if password.is_empty() {
+        return Err(
+            "macos_restart_credential_empty".into()
+        );
+    }
+
+    edgeswarm_unified_node_lib::core::
+        macos_restart_credential::
+        persist_macos_restart_credential_v1(
+            &password
+        )?;
+
+    println!(
+        "MACOS_RESTART_CREDENTIAL_STORED=true"
+    );
+
+    Ok(())
+}
+
 fn main() {
-    if let Err(error) = run() {
-        #[cfg(target_os = "windows")]
+    #[cfg(target_os = "macos")]
+    if std::env::args().any(|arg| {
+        arg == "--persist-restart-credential"
+    }) {
+        if let Err(error) =
+            persist_macos_restart_credential_from_stdin_v1()
         {
-            let _ =
-                publish_node_status_v1(
-                    false,
-                    false,
-                    Some(error.clone()),
-                );
+            eprintln!(
+                "HEADLESS_NODE_ERROR={}",
+                error.replace('\n', " ")
+            );
+
+            std::process::exit(1);
         }
 
-        eprintln!(
-            "HEADLESS_NODE_ERROR={}",
-            error.replace('\n', " ")
-        );
+        return;
+    }
 
-        let exit_code =
-            if error ==
-                "node_service_already_running"
-            {
-                73
-            } else {
-                1
-            };
+    if let Err(error) = run() {
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        {
+            let _ = publish_node_status_v1(false, false, Some(error.clone()));
+        }
+
+        eprintln!("HEADLESS_NODE_ERROR={}", error.replace('\n', " "));
+
+        let exit_code = if error == "node_service_already_running" {
+            73
+        } else {
+            1
+        };
 
         std::process::exit(exit_code);
     }

@@ -59,11 +59,45 @@ echo "RELEASE_CONFIG_VALID=PASS"
 echo "SOURCE_COMMIT=$HEAD"
 echo "TARGET_DIR=$TARGET"
 
+# MACOS_BACKGROUND_HELPERS_V1
+cargo build \
+  --manifest-path "$ROOT/src-tauri/Cargo.toml" \
+  --release \
+  --no-default-features \
+  --bin edgeswarm-node-headless \
+  --bin edgeswarm-node-supervisor-macos
+
+echo "MACOS_BACKGROUND_HELPERS_BUILT=PASS"
+
 npm run tauri build -- --bundles app
 
 APP="$TARGET/release/bundle/macos/EdgeSwarm Node.app"
 APP_EXE="$APP/Contents/MacOS/edgeswarm-unified-node"
 RAW_EXE="$TARGET/release/edgeswarm-unified-node"
+
+RAW_HEADLESS="$TARGET/release/edgeswarm-node-headless"
+RAW_SUPERVISOR="$TARGET/release/edgeswarm-node-supervisor-macos"
+
+APP_HEADLESS="$APP/Contents/MacOS/edgeswarm-node-headless"
+APP_SUPERVISOR="$APP/Contents/MacOS/edgeswarm-node-supervisor-macos"
+
+test -x "$RAW_HEADLESS" || {
+  echo "ERROR=macos_headless_helper_missing" >&2
+  exit 1
+}
+
+test -x "$RAW_SUPERVISOR" || {
+  echo "ERROR=macos_supervisor_helper_missing" >&2
+  exit 1
+}
+
+cp "$RAW_HEADLESS" "$APP_HEADLESS"
+cp "$RAW_SUPERVISOR" "$APP_SUPERVISOR"
+
+chmod +x "$APP_HEADLESS" "$APP_SUPERVISOR"
+
+echo "MACOS_HEADLESS_HELPER_PACKAGED=PASS"
+echo "MACOS_SUPERVISOR_HELPER_PACKAGED=PASS"
 
 if [ ! -f "$APP_EXE" ]; then
   echo "ERROR=macos_app_payload_missing" >&2
@@ -116,10 +150,26 @@ echo "MACOS_BUNDLED_LLAMA_RUNTIME=PASS"
 # Seal the completed beta app bundle before hashing/packaging.
 # This is ad-hoc signing only; Developer ID/notarization remains future work.
 APP_HELPER="$APP/Contents/MacOS/edgeswarm-node-headless"
+APP_SUPERVISOR="$APP/Contents/MacOS/edgeswarm-node-supervisor-macos"
 
-if [ -x "$APP_HELPER" ]; then
-    codesign --force --sign - --timestamp=none "$APP_HELPER"
-fi
+test -x "$APP_HELPER" || {
+    echo "ERROR=macos_headless_payload_missing" >&2
+    exit 1
+}
+
+test -x "$APP_SUPERVISOR" || {
+    echo "ERROR=macos_supervisor_payload_missing" >&2
+    exit 1
+}
+
+codesign --force --sign - --timestamp=none "$APP_HELPER"
+codesign --force --sign - --timestamp=none "$APP_SUPERVISOR"
+
+codesign --verify --strict --verbose=2 "$APP_HELPER"
+codesign --verify --strict --verbose=2 "$APP_SUPERVISOR"
+
+echo "MACOS_HEADLESS_HELPER_SIGNATURE=PASS"
+echo "MACOS_SUPERVISOR_HELPER_SIGNATURE=PASS"
 
 codesign --force --sign - --timestamp=none "$APP"
 
