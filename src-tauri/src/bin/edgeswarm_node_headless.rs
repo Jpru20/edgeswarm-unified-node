@@ -45,7 +45,28 @@ fn read_wallet_password() -> Result<Zeroizing<String>, String> {
 
 #[cfg(target_os = "macos")]
 fn read_wallet_password() -> Result<Zeroizing<String>, String> {
-    edgeswarm_unified_node_lib::core::macos_restart_credential::read_macos_restart_credential_v1()
+    use std::io::Read;
+
+    let mut password =
+        String::new();
+
+    std::io::stdin()
+        .read_to_string(&mut password)
+        .map_err(|_| {
+            "macos_wallet_credential_pipe_read_failed"
+                .to_string()
+        })?;
+
+    if password.is_empty() {
+        return Err(
+            "macos_wallet_credential_pipe_empty"
+                .into()
+        );
+    }
+
+    Ok(
+        Zeroizing::new(password)
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -236,7 +257,7 @@ fn run() -> Result<(), String> {
     println!("HEADLESS_WINDOWS_DPAPI_CREDENTIAL_LOADED=true");
 
     #[cfg(target_os = "macos")]
-    println!("HEADLESS_MACOS_KEYCHAIN_CREDENTIAL_LOADED=true");
+    println!("HEADLESS_MACOS_PIPE_CREDENTIAL_LOADED=true");
 
     let stop = Arc::new(AtomicBool::new(false));
 
@@ -375,59 +396,7 @@ let final_state = effective_desired_node_state_v1();
 }
 
 
-#[cfg(target_os = "macos")]
-fn persist_macos_restart_credential_from_stdin_v1(
-) -> Result<(), String> {
-    use std::io::Read;
-
-    let mut password =
-        String::new();
-
-    std::io::stdin()
-        .read_to_string(&mut password)
-        .map_err(|_| {
-            "macos_restart_credential_stdin_read_failed"
-                .to_string()
-        })?;
-
-    if password.is_empty() {
-        return Err(
-            "macos_restart_credential_empty".into()
-        );
-    }
-
-    edgeswarm_unified_node_lib::core::
-        macos_restart_credential::
-        persist_macos_restart_credential_v1(
-            &password
-        )?;
-
-    println!(
-        "MACOS_RESTART_CREDENTIAL_STORED=true"
-    );
-
-    Ok(())
-}
-
 fn main() {
-    #[cfg(target_os = "macos")]
-    if std::env::args().any(|arg| {
-        arg == "--persist-restart-credential"
-    }) {
-        if let Err(error) =
-            persist_macos_restart_credential_from_stdin_v1()
-        {
-            eprintln!(
-                "HEADLESS_NODE_ERROR={}",
-                error.replace('\n', " ")
-            );
-
-            std::process::exit(1);
-        }
-
-        return;
-    }
-
     if let Err(error) = run() {
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         {

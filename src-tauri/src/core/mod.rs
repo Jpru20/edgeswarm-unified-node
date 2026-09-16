@@ -45,9 +45,6 @@ pub mod wallet_vault;
 pub mod workload_validator;
 
 #[cfg(target_os = "macos")]
-pub mod macos_restart_credential;
-
-#[cfg(target_os = "macos")]
 pub mod macos_supervisor_agent;
 pub mod windows_restart_credential;
 pub mod windows_supervisor_task;

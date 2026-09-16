@@ -65,7 +65,8 @@ cargo build \
   --release \
   --no-default-features \
   --bin edgeswarm-node-headless \
-  --bin edgeswarm-node-supervisor-macos
+  --bin edgeswarm-node-supervisor-macos \
+  --bin edgeswarm-credential-broker-macos
 
 echo "MACOS_BACKGROUND_HELPERS_BUILT=PASS"
 
@@ -77,9 +78,11 @@ RAW_EXE="$TARGET/release/edgeswarm-unified-node"
 
 RAW_HEADLESS="$TARGET/release/edgeswarm-node-headless"
 RAW_SUPERVISOR="$TARGET/release/edgeswarm-node-supervisor-macos"
+RAW_BROKER="$TARGET/release/edgeswarm-credential-broker-macos"
 
 APP_HEADLESS="$APP/Contents/MacOS/edgeswarm-node-headless"
 APP_SUPERVISOR="$APP/Contents/MacOS/edgeswarm-node-supervisor-macos"
+APP_BROKER="$APP/Contents/MacOS/edgeswarm-credential-broker-macos"
 
 test -x "$RAW_HEADLESS" || {
   echo "ERROR=macos_headless_helper_missing" >&2
@@ -91,13 +94,20 @@ test -x "$RAW_SUPERVISOR" || {
   exit 1
 }
 
+test -x "$RAW_BROKER" || {
+  echo "ERROR=macos_credential_broker_missing" >&2
+  exit 1
+}
+
 cp "$RAW_HEADLESS" "$APP_HEADLESS"
 cp "$RAW_SUPERVISOR" "$APP_SUPERVISOR"
+cp "$RAW_BROKER" "$APP_BROKER"
 
-chmod +x "$APP_HEADLESS" "$APP_SUPERVISOR"
+chmod +x   "$APP_HEADLESS"   "$APP_SUPERVISOR"   "$APP_BROKER"
 
 echo "MACOS_HEADLESS_HELPER_PACKAGED=PASS"
 echo "MACOS_SUPERVISOR_HELPER_PACKAGED=PASS"
+echo "MACOS_CREDENTIAL_BROKER_PACKAGED=PASS"
 
 if [ ! -f "$APP_EXE" ]; then
   echo "ERROR=macos_app_payload_missing" >&2
@@ -151,6 +161,7 @@ echo "MACOS_BUNDLED_LLAMA_RUNTIME=PASS"
 # This is ad-hoc signing only; Developer ID/notarization remains future work.
 APP_HELPER="$APP/Contents/MacOS/edgeswarm-node-headless"
 APP_SUPERVISOR="$APP/Contents/MacOS/edgeswarm-node-supervisor-macos"
+APP_BROKER="$APP/Contents/MacOS/edgeswarm-credential-broker-macos"
 
 test -x "$APP_HELPER" || {
     echo "ERROR=macos_headless_payload_missing" >&2
@@ -162,14 +173,22 @@ test -x "$APP_SUPERVISOR" || {
     exit 1
 }
 
+test -x "$APP_BROKER" || {
+    echo "ERROR=macos_credential_broker_payload_missing" >&2
+    exit 1
+}
+
 codesign --force --sign - --timestamp=none "$APP_HELPER"
 codesign --force --sign - --timestamp=none "$APP_SUPERVISOR"
+codesign --force --sign - --timestamp=none "$APP_BROKER"
 
 codesign --verify --strict --verbose=2 "$APP_HELPER"
 codesign --verify --strict --verbose=2 "$APP_SUPERVISOR"
+codesign --verify --strict --verbose=2 "$APP_BROKER"
 
 echo "MACOS_HEADLESS_HELPER_SIGNATURE=PASS"
 echo "MACOS_SUPERVISOR_HELPER_SIGNATURE=PASS"
+echo "MACOS_CREDENTIAL_BROKER_SIGNATURE=PASS"
 
 codesign --force --sign - --timestamp=none "$APP"
 

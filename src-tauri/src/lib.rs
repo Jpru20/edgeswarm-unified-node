@@ -657,7 +657,7 @@ mod desktop {
         };
 
         crate::core::macos_supervisor_agent::
-            persist_restart_credential_v1(
+            persist_restart_credential_v2(
                 wallet_password.as_str()
             )?;
 

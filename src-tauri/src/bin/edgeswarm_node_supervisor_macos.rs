@@ -6,8 +6,10 @@ mod macos {
             effective_desired_node_state_v1,
             DesiredNodeStateV1,
         },
-        macos_supervisor_agent::
+        macos_supervisor_agent::{
+            credential_broker_path_v2,
             update_pause_active_v1,
+        },
     };
     use fs2::FileExt;
     use std::{
@@ -158,6 +160,34 @@ mod macos {
         let (stdout, stderr) =
             worker_logs()?;
 
+        let broker =
+            credential_broker_path_v2()?;
+
+        println!(
+            "SUPERVISOR_CREDENTIAL_BROKER_REQUESTED=true"
+        );
+
+        let mut broker_child =
+            Command::new(broker)
+                .arg(
+                    "--emit-restart-credential"
+                )
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .map_err(|_| {
+                    "supervisor_credential_broker_launch_failed"
+                        .to_string()
+                })?;
+
+        let credential_pipe =
+            broker_child.stdout.take()
+                .ok_or_else(|| {
+                    "supervisor_credential_broker_pipe_missing"
+                        .to_string()
+                })?;
+
         println!(
             "SUPERVISOR_HEADLESS_SPAWN_REQUESTED=true"
         );
@@ -172,21 +202,58 @@ mod macos {
                 "EDGESWARM_SUPERVISED",
                 "1",
             )
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr));
+            .stdin(
+                Stdio::from(
+                    credential_pipe
+                )
+            )
+            .stdout(
+                Stdio::from(stdout)
+            )
+            .stderr(
+                Stdio::from(stderr)
+            );
 
-        // Headless is the process-group leader. llama-server
-        // inherits this group, giving the supervisor authority
-        // over the complete worker generation.
+        // Each worker generation owns one process group.
         command.process_group(0);
 
-        command
-            .spawn()
-            .map_err(|_| {
-                "supervisor_headless_spawn_failed"
-                    .to_string()
-            })
+        let mut child =
+            command
+                .spawn()
+                .map_err(|_| {
+                    "supervisor_headless_spawn_failed"
+                        .to_string()
+                })?;
+
+        let broker_status =
+            broker_child.wait()
+                .map_err(|_| {
+                    "supervisor_credential_broker_wait_failed"
+                        .to_string()
+                })?;
+
+        if !broker_status.success() {
+            let group_id =
+                child.id();
+
+            cleanup_process_group(
+                group_id
+            );
+
+            let _ =
+                child.wait();
+
+            return Err(
+                "supervisor_credential_broker_read_failed"
+                    .into()
+            );
+        }
+
+        println!(
+            "SUPERVISOR_CREDENTIAL_PIPE_HANDOFF=PASS"
+        );
+
+        Ok(child)
     }
 
 

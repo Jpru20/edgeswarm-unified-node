@@ -11,6 +11,187 @@ use std::{
 const LABEL: &str =
     "com.edgeswarm.node.supervisor";
 
+
+const CREDENTIAL_BROKER_FILENAME: &str =
+    "edgeswarm-credential-broker-macos";
+
+const CREDENTIAL_BROKER_DIRECTORY: &str =
+    "credential-broker-v2";
+
+fn packaged_credential_broker_path_v2(
+) -> Result<PathBuf, String> {
+    let path =
+        executable_dir()?
+            .join(
+                CREDENTIAL_BROKER_FILENAME
+            );
+
+    if !path.is_file() {
+        return Err(
+            "macos_packaged_credential_broker_missing"
+                .into()
+        );
+    }
+
+    Ok(path)
+}
+
+fn stable_credential_broker_path_v2(
+) -> PathBuf {
+    crate::adapters::app_data_dir()
+        .join(
+            CREDENTIAL_BROKER_DIRECTORY
+        )
+        .join(
+            CREDENTIAL_BROKER_FILENAME
+        )
+}
+
+fn verify_credential_broker_signature_v2(
+    path: &std::path::Path,
+) -> Result<(), String> {
+    let status =
+        Command::new("/usr/bin/codesign")
+            .arg("--verify")
+            .arg("--strict")
+            .arg(path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|_| {
+                "macos_credential_broker_codesign_check_failed"
+                    .to_string()
+            })?;
+
+    if !status.success() {
+        return Err(
+            "macos_credential_broker_signature_invalid"
+                .into()
+        );
+    }
+
+    Ok(())
+}
+
+pub fn credential_broker_path_v2(
+) -> Result<PathBuf, String> {
+    let path =
+        stable_credential_broker_path_v2();
+
+    if !path.is_file() {
+        return Err(
+            "macos_stable_credential_broker_missing"
+                .into()
+        );
+    }
+
+    verify_credential_broker_signature_v2(
+        &path
+    )?;
+
+    Ok(path)
+}
+
+pub fn ensure_credential_broker_v2(
+) -> Result<PathBuf, String> {
+    let stable =
+        stable_credential_broker_path_v2();
+
+    // Normal app updates NEVER replace this binary.
+    if stable.is_file() {
+        verify_credential_broker_signature_v2(
+            &stable
+        )?;
+
+        println!(
+            "MACOS_CREDENTIAL_BROKER_ALREADY_INSTALLED=true"
+        );
+
+        return Ok(stable);
+    }
+
+    let packaged =
+        packaged_credential_broker_path_v2()?;
+
+    verify_credential_broker_signature_v2(
+        &packaged
+    )?;
+
+    let parent =
+        stable.parent()
+            .ok_or_else(|| {
+                "macos_credential_broker_parent_missing"
+                    .to_string()
+            })?;
+
+    fs::create_dir_all(parent)
+        .map_err(|_| {
+            "macos_credential_broker_directory_failed"
+                .to_string()
+        })?;
+
+    fs::set_permissions(
+        parent,
+        fs::Permissions::from_mode(
+            0o700
+        ),
+    )
+    .map_err(|_| {
+        "macos_credential_broker_directory_permissions_failed"
+            .to_string()
+    })?;
+
+    let temporary =
+        parent.join(format!(
+            ".{}-tmp-{}",
+            CREDENTIAL_BROKER_FILENAME,
+            std::process::id()
+        ));
+
+    fs::copy(
+        &packaged,
+        &temporary,
+    )
+    .map_err(|_| {
+        "macos_credential_broker_copy_failed"
+            .to_string()
+    })?;
+
+    fs::set_permissions(
+        &temporary,
+        fs::Permissions::from_mode(
+            0o700
+        ),
+    )
+    .map_err(|_| {
+        "macos_credential_broker_permissions_failed"
+            .to_string()
+    })?;
+
+    verify_credential_broker_signature_v2(
+        &temporary
+    )?;
+
+    fs::rename(
+        &temporary,
+        &stable,
+    )
+    .map_err(|_| {
+        "macos_credential_broker_commit_failed"
+            .to_string()
+    })?;
+
+    verify_credential_broker_signature_v2(
+        &stable
+    )?;
+
+    println!(
+        "MACOS_CREDENTIAL_BROKER_INSTALLED=true"
+    );
+
+    Ok(stable)
+}
+
 fn executable_dir() -> Result<PathBuf, String> {
     let exe =
         std::env::current_exe()
@@ -24,20 +205,6 @@ fn executable_dir() -> Result<PathBuf, String> {
             "macos_executable_directory_missing"
                 .to_string()
         })
-}
-
-fn headless_path() -> Result<PathBuf, String> {
-    let path =
-        executable_dir()?
-            .join("edgeswarm-node-headless");
-
-    if !path.is_file() {
-        return Err(
-            "macos_headless_helper_missing".into()
-        );
-    }
-
-    Ok(path)
 }
 
 fn supervisor_path() -> Result<PathBuf, String> {
@@ -80,26 +247,30 @@ fn xml_escape(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-pub fn persist_restart_credential_v1(
+pub fn persist_restart_credential_v2(
     password: &str,
 ) -> Result<(), String> {
     if password.is_empty() {
         return Err(
-            "macos_restart_credential_empty".into()
+            "macos_broker_restart_credential_empty"
+                .into()
         );
     }
 
+    let broker =
+        ensure_credential_broker_v2()?;
+
     let mut child =
-        Command::new(headless_path()?)
+        Command::new(broker)
             .arg(
-                "--persist-restart-credential"
+                "--store-restart-credential"
             )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|_| {
-                "macos_credential_helper_launch_failed"
+                "macos_credential_broker_store_launch_failed"
                     .to_string()
             })?;
 
@@ -107,14 +278,16 @@ pub fn persist_restart_credential_v1(
         let mut stdin =
             child.stdin.take()
                 .ok_or_else(|| {
-                    "macos_credential_helper_stdin_missing"
+                    "macos_credential_broker_store_stdin_missing"
                         .to_string()
                 })?;
 
         stdin
-            .write_all(password.as_bytes())
+            .write_all(
+                password.as_bytes()
+            )
             .map_err(|_| {
-                "macos_credential_helper_write_failed"
+                "macos_credential_broker_store_write_failed"
                     .to_string()
             })?;
     }
@@ -122,7 +295,7 @@ pub fn persist_restart_credential_v1(
     let output =
         child.wait_with_output()
             .map_err(|_| {
-                "macos_credential_helper_wait_failed"
+                "macos_credential_broker_store_wait_failed"
                     .to_string()
             })?;
 
@@ -135,15 +308,22 @@ pub fn persist_restart_credential_v1(
             .replace('\n', " ");
 
         return Err(format!(
-            "macos_credential_helper_failed:{error}"
+            "macos_credential_broker_store_failed:{error}"
         ));
     }
+
+    println!(
+        "MACOS_RESTART_CREDENTIAL_STORED_VIA_BROKER=true"
+    );
 
     Ok(())
 }
 
 pub fn ensure_launch_agent_v1(
 ) -> Result<(), String> {
+    let _ =
+        ensure_credential_broker_v2()?;
+
     let supervisor =
         supervisor_path()?;
 

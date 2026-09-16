@@ -69,6 +69,11 @@ name = "edgeswarm-node-supervisor-macos"
 path = "src/bin/edgeswarm_node_supervisor_macos.rs"
 
 [[bin]]
+name = "edgeswarm-credential-broker-macos"
+path = "src/bin/edgeswarm_credential_broker_macos.rs"
+
+
+[[bin]]
 name = "edgeswarm-node-setup"
 path = "src/bin/edgeswarm_node_setup.rs"
 
