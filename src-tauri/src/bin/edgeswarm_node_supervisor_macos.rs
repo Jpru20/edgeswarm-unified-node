@@ -12,6 +12,7 @@ mod macos {
     use fs2::FileExt;
     use std::{
         fs::{self, File, OpenOptions},
+        os::unix::process::CommandExt,
         process::{Child, Command, Stdio},
         thread,
         time::{Duration, Instant},
@@ -161,19 +162,75 @@ mod macos {
             "SUPERVISOR_HEADLESS_SPAWN_REQUESTED=true"
         );
 
-        Command::new(headless_path()?)
+        let mut command =
+            Command::new(
+                headless_path()?
+            );
+
+        command
             .env(
                 "EDGESWARM_SUPERVISED",
                 "1",
             )
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr))
+            .stderr(Stdio::from(stderr));
+
+        // Headless is the process-group leader. llama-server
+        // inherits this group, giving the supervisor authority
+        // over the complete worker generation.
+        command.process_group(0);
+
+        command
             .spawn()
             .map_err(|_| {
                 "supervisor_headless_spawn_failed"
                     .to_string()
             })
+    }
+
+
+    fn signal_process_group(
+        group_id: u32,
+        signal: i32,
+    ) {
+        if group_id == 0 {
+            return;
+        }
+
+        let _ =
+            unsafe {
+                libc::kill(
+                    -(group_id as i32),
+                    signal,
+                )
+            };
+    }
+
+    fn cleanup_process_group(
+        group_id: u32,
+    ) {
+        if group_id == 0 {
+            return;
+        }
+
+        println!(
+            "SUPERVISOR_PROCESS_GROUP_CLEANUP_PGID={group_id}"
+        );
+
+        signal_process_group(
+            group_id,
+            libc::SIGTERM,
+        );
+
+        thread::sleep(
+            Duration::from_millis(750)
+        );
+
+        signal_process_group(
+            group_id,
+            libc::SIGKILL,
+        );
     }
 
     fn restart_delay(
@@ -254,17 +311,8 @@ mod macos {
                         stop_seen =
                             Some(Instant::now());
 
-                        let signal_result =
-                            unsafe {
-                                libc::kill(
-                                    worker.id() as i32,
-                                    libc::SIGTERM,
-                                )
-                            };
-
                         println!(
-                            "SUPERVISOR_STOP_SIGNAL_SENT={}",
-                            signal_result == 0
+                            "SUPERVISOR_GRACEFUL_STOP_WAIT=true"
                         );
 
                         println!(
@@ -276,6 +324,13 @@ mod macos {
                         Ok(Some(status)) => {
                             println!(
                                 "SUPERVISOR_HEADLESS_EXITED_STATUS={status}"
+                            );
+
+                            let old_group_id =
+                                worker.id();
+
+                            cleanup_process_group(
+                                old_group_id
                             );
 
                             child = None;
@@ -291,14 +346,18 @@ mod macos {
                                 })
                                 .unwrap_or(false)
                             {
-                                let _ =
-                                    worker.kill();
+                                let group_id =
+                                    worker.id();
+
+                                cleanup_process_group(
+                                    group_id
+                                );
 
                                 let _ =
                                     worker.wait();
 
                                 println!(
-                                    "SUPERVISOR_HEADLESS_FORCED_STOP=true"
+                                    "SUPERVISOR_PROCESS_GROUP_FORCED_STOP=true"
                                 );
 
                                 child = None;
@@ -346,6 +405,13 @@ mod macos {
 
                         println!(
                             "SUPERVISOR_HEADLESS_EXITED_STATUS={status}"
+                        );
+
+                        let old_group_id =
+                            worker.id();
+
+                        cleanup_process_group(
+                            old_group_id
                         );
 
                         child = None;

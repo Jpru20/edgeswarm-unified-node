@@ -180,6 +180,41 @@ fn start_macos_supervisor_parent_monitor_v1(
     })
 }
 
+
+#[cfg(target_os = "macos")]
+fn start_macos_update_pause_monitor_v1(
+    stop: Arc<AtomicBool>,
+    done: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        while !done.load(Ordering::Acquire) {
+            if edgeswarm_unified_node_lib::core::
+                macos_supervisor_agent::
+                update_pause_active_v1()
+            {
+                println!(
+                    "HEADLESS_MACOS_UPDATE_PAUSE_OBSERVED=true"
+                );
+
+                stop.store(
+                    true,
+                    Ordering::Release,
+                );
+
+                break;
+            }
+
+            thread::sleep(
+                Duration::from_millis(500)
+            );
+        }
+
+        println!(
+            "HEADLESS_MACOS_UPDATE_PAUSE_MONITOR_STOPPED=true"
+        );
+    })
+}
+
 fn run() -> Result<(), String> {
     // WINDOWS_HEADLESS_DESIRED_STATE_V1
     //
@@ -229,6 +264,20 @@ fn run() -> Result<(), String> {
     let supervisor_parent_monitor_done =
         Arc::new(AtomicBool::new(false));
 
+
+    #[cfg(target_os = "macos")]
+    let update_pause_monitor_done =
+        Arc::new(AtomicBool::new(false));
+
+    #[cfg(target_os = "macos")]
+    let update_pause_monitor =
+        start_macos_update_pause_monitor_v1(
+            Arc::clone(&stop),
+            Arc::clone(
+                &update_pause_monitor_done
+            ),
+        );
+
     #[cfg(target_os = "macos")]
     let supervisor_parent_monitor =
         if macos_supervised_v1() {
@@ -266,6 +315,15 @@ fn run() -> Result<(), String> {
 
         #[cfg(target_os = "macos")]
         {
+
+            update_pause_monitor_done.store(
+                true,
+                Ordering::Release,
+            );
+
+            let _ =
+                update_pause_monitor.join();
+
             supervisor_parent_monitor_done.store(
                 true,
                 Ordering::Release,
