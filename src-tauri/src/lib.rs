@@ -87,6 +87,14 @@ mod desktop {
         email: String,
     }
 
+    #[derive(Debug, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct AuthRestoreResult {
+        restored: bool,
+        email: Option<String>,
+        refreshed: bool,
+    }
+
     // PROVIDER_LEDGER_SYNC_COMMAND_V1
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -184,6 +192,134 @@ mod desktop {
     #[tauri::command]
     fn get_node_state() -> NodeState {
         NodeState::detect()
+    }
+
+    #[tauri::command]
+    fn auth_restore(
+        auth_state: tauri::State<'_, Mutex<AppAuthState>>,
+    ) -> Result<AuthRestoreResult, String> {
+        let client =
+            match SupabaseAuthClient::from_env() {
+                Ok(value) => value,
+                Err(error) => {
+                    println!(
+                        "AUTH_RESTORE_CONFIG_ERROR={error}"
+                    );
+
+                    return Ok(AuthRestoreResult {
+                        restored: false,
+                        email: None,
+                        refreshed: false,
+                    });
+                }
+            };
+
+        let ensured =
+            match client.ensure_valid_session(true) {
+                Ok(value) => value,
+                Err(error) => {
+                    println!(
+                        "AUTH_RESTORE_SESSION_ERROR={error}"
+                    );
+
+                    return Ok(AuthRestoreResult {
+                        restored: false,
+                        email: None,
+                        refreshed: false,
+                    });
+                }
+            };
+
+        let session = ensured.session;
+
+        if !session.mfa_verified() {
+            println!(
+                "AUTH_RESTORE_REJECTED=mfa_not_verified"
+            );
+
+            return Ok(AuthRestoreResult {
+                restored: false,
+                email: None,
+                refreshed: ensured.refreshed,
+            });
+        }
+
+        let access_token =
+            match session.access_token() {
+                Some(value) => value,
+                None => {
+                    println!(
+                        "AUTH_RESTORE_REJECTED=access_token_missing"
+                    );
+
+                    return Ok(AuthRestoreResult {
+                        restored: false,
+                        email: None,
+                        refreshed: ensured.refreshed,
+                    });
+                }
+            };
+
+        if jwt_aal(access_token).as_deref()
+            != Some("aal2")
+        {
+            println!(
+                "AUTH_RESTORE_REJECTED=session_not_aal2"
+            );
+
+            return Ok(AuthRestoreResult {
+                restored: false,
+                email: None,
+                refreshed: ensured.refreshed,
+            });
+        }
+
+        let email =
+            match session.provider_email() {
+                Some(value) => value.to_string(),
+                None => {
+                    println!(
+                        "AUTH_RESTORE_REJECTED=email_missing"
+                    );
+
+                    return Ok(AuthRestoreResult {
+                        restored: false,
+                        email: None,
+                        refreshed: ensured.refreshed,
+                    });
+                }
+            };
+
+        {
+            let mut state = auth_state
+                .lock()
+                .map_err(|_| {
+                    "auth_state_lock_failed".to_string()
+                })?;
+
+            state.pending_email = None;
+            state.pending_access_token = None;
+            state.pending_factor_id = None;
+            state.pending_challenge_id = None;
+
+            state.authenticated_email =
+                Some(email.clone());
+        }
+
+        println!(
+            "AUTH_RESTORE_SUCCESS=true"
+        );
+
+        println!(
+            "AUTH_RESTORE_REFRESHED={}",
+            ensured.refreshed
+        );
+
+        Ok(AuthRestoreResult {
+            restored: true,
+            email: Some(email),
+            refreshed: ensured.refreshed,
+        })
     }
 
     #[tauri::command]
@@ -394,6 +530,36 @@ mod desktop {
                     );
 
                     session.save_secure()?;
+
+                    #[cfg(target_os = "macos")]
+                    {
+                        println!(
+                            "AUTH_VERIFY_STAGE=macos_restart_credential"
+                        );
+
+                        crate::core::macos_supervisor_agent::
+                            persist_restart_credential_v2(
+                                wallet_password.as_str()
+                            )?;
+
+                        let desired =
+                            crate::core::desired_state::
+                                effective_desired_node_state_v1();
+
+                        if desired.desired_state
+                            == DesiredNodeStateV1::Running
+                        {
+                            crate::core::macos_supervisor_agent::
+                                ensure_launch_agent_v1()?;
+
+                            crate::core::macos_supervisor_agent::
+                                ensure_update_agent_v1()?;
+
+                            println!(
+                                "AUTH_VERIFY_MACOS_RUNNING_STATE_RESTORED=true"
+                            );
+                        }
+                    }
 
                     println!(
                         "AUTH_VERIFY_STAGE=complete"
@@ -1458,6 +1624,7 @@ mod desktop {
             .invoke_handler(tauri::generate_handler![
                 get_node_state,
                 set_window_layout,
+                auth_restore,
                 auth_begin,
                 auth_verify,
                 provider_ledger_sync,

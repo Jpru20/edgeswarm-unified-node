@@ -15,6 +15,12 @@ type AuthVerifyResult = {
   email: string;
 };
 
+type AuthRestoreResult = {
+  restored: boolean;
+  email?: string | null;
+  refreshed: boolean;
+};
+
 type ProviderLedgerSummary = {
   totalEarnedUsd: number;
   syncedAt?: string | null;
@@ -99,6 +105,8 @@ function App() {
   }, []);
 
   const [screen, setScreen] = useState<Screen>("login");
+  const [authRestoreComplete, setAuthRestoreComplete] =
+    useState(false);
   const [email, setEmail] = useState("");
   const [providerEmail, setProviderEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -136,6 +144,66 @@ function App() {
     const state = await invoke<NodeState>("get_node_state");
     setNodeState(state);
   }
+
+  useEffect(() => {
+    let disposed = false;
+
+    const restoreSession = async () => {
+      try {
+        const restored =
+          await invoke<AuthRestoreResult>(
+            "auth_restore",
+          );
+
+        if (
+          disposed ||
+          !restored.restored ||
+          !restored.email
+        ) {
+          return;
+        }
+
+        setProviderEmail(restored.email);
+
+        try {
+          await loadNodeState();
+        } catch {
+          // Dashboard can still recover if hardware refresh
+          // is temporarily unavailable.
+        }
+
+        try {
+          const current =
+            await invoke<NodeServiceStatus>(
+              "node_service_status",
+            );
+
+          if (!disposed) {
+            setServiceStatus(current);
+          }
+        } catch {
+          // Normal dashboard polling will retry.
+        }
+
+        if (!disposed) {
+          setStatus("");
+          setScreen("dashboard");
+        }
+      } catch {
+        // Missing/invalid saved auth falls back to login.
+      } finally {
+        if (!disposed) {
+          setAuthRestoreComplete(true);
+        }
+      }
+    };
+
+    void restoreSession();
+
+    return () => {
+      disposed = true;
+    };
+  }, []);
 
   const syncLedger = useCallback(async () => {
     if (ledgerSyncInFlightRef.current) {
@@ -186,8 +254,12 @@ function App() {
   }
 
   useEffect(() => {
+    if (!authRestoreComplete) {
+      return;
+    }
+
     void invoke("set_window_layout", { screen });
-  }, [screen]);
+  }, [screen, authRestoreComplete]);
 
   useEffect(() => {
     if (screen !== "dashboard") {
@@ -385,6 +457,19 @@ function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  if (!authRestoreComplete) {
+    return (
+      <main className="app auth-screen">
+        <section className="auth-card">
+          <h1>Swarm</h1>
+          <p className="muted">
+            Restoring your Swarm session...
+          </p>
+        </section>
+      </main>
+    );
   }
 
   if (screen === "login") {
