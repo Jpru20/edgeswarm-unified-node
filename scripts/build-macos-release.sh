@@ -206,6 +206,79 @@ if [ -f "$RAW_EXE" ]; then
   shasum -a 256 "$RAW_EXE" | awk '{print $1}'
 fi
 
+# FINAL_MACOS_UPDATER_REPACK_V1
+# Tauri creates the updater archive during the initial app build.
+# Swarm injects and signs the managed llama runtime afterward, so the
+# updater must be rebuilt from the final sealed app before publication.
+
+UPDATER_ARCHIVE="$TARGET/release/bundle/macos/Swarm.app.tar.gz"
+UPDATER_SIGNATURE="${UPDATER_ARCHIVE}.sig"
+
+rm -f \
+  "$UPDATER_ARCHIVE" \
+  "$UPDATER_SIGNATURE"
+
+COPYFILE_DISABLE=1 \
+tar -czf "$UPDATER_ARCHIVE" \
+  -C "$(dirname "$APP")" \
+  "$(basename "$APP")"
+
+npm run tauri signer sign -- \
+  "$UPDATER_ARCHIVE"
+
+test -s "$UPDATER_ARCHIVE"
+test -s "$UPDATER_SIGNATURE"
+
+UPDATER_VERIFY_DIR="$(mktemp -d)"
+
+cleanup_updater_verify_v1() {
+  rm -rf "$UPDATER_VERIFY_DIR"
+}
+
+trap cleanup_updater_verify_v1 EXIT
+
+tar -xzf \
+  "$UPDATER_ARCHIVE" \
+  -C "$UPDATER_VERIFY_DIR"
+
+UPDATER_APP="$UPDATER_VERIFY_DIR/Swarm.app"
+UPDATER_LLAMA="$UPDATER_APP/Contents/MacOS/runtime/current/llama-server"
+
+test -d "$UPDATER_APP"
+test -x "$UPDATER_LLAMA"
+
+UPDATER_LLAMA_SHA="$(
+  shasum -a 256 "$UPDATER_LLAMA" |
+  awk '{print $1}'
+)"
+
+if [[ "$UPDATER_LLAMA_SHA" != "$EXPECTED_LLAMA_SHA256" ]]; then
+  echo "ERROR=MACOS_UPDATER_LLAMA_SHA_MISMATCH"
+  exit 1
+fi
+
+for helper in \
+  edgeswarm-unified-node \
+  edgeswarm-node-headless \
+  edgeswarm-node-supervisor-macos \
+  edgeswarm-credential-broker-macos
+do
+  test -x \
+    "$UPDATER_APP/Contents/MacOS/$helper"
+done
+
+codesign \
+  --verify \
+  --deep \
+  --strict \
+  "$UPDATER_APP"
+
+echo "MACOS_FINAL_UPDATER_ARCHIVE=PASS"
+echo "MACOS_FINAL_UPDATER_LLAMA_SHA256=$UPDATER_LLAMA_SHA"
+
+cleanup_updater_verify_v1
+trap - EXIT
+
 VERSION="$(awk -F'"' '/^version = "/ {print $2; exit}' src-tauri/Cargo.toml)"
 DMG="$TARGET/release/bundle/dmg/Swarm_${VERSION}_arm64.dmg"
 "$ROOT/scripts/package-macos-dmg.sh" "$APP" "$DMG"
