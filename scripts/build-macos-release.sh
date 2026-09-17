@@ -252,7 +252,15 @@ UPDATER_LLAMA_SHA="$(
   awk '{print $1}'
 )"
 
-if [[ "$UPDATER_LLAMA_SHA" != "$EXPECTED_LLAMA_SHA256" ]]; then
+FINAL_APP_LLAMA_SHA="$(
+  shasum -a 256 \
+    "$APP/Contents/MacOS/runtime/current/llama-server" |
+  awk '{print $1}'
+)"
+
+echo "MACOS_FINAL_APP_LLAMA_SHA256=$FINAL_APP_LLAMA_SHA"
+
+if [[ "$UPDATER_LLAMA_SHA" != "$FINAL_APP_LLAMA_SHA" ]]; then
   echo "ERROR=MACOS_UPDATER_LLAMA_SHA_MISMATCH"
   exit 1
 fi
