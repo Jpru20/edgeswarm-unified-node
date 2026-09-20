@@ -1,5 +1,5 @@
-#![cfg(target_os = "macos")]
-
+#[cfg(target_os = "macos")]
+mod macos {
 use std::io::{Read, Write};
 use zeroize::Zeroizing;
 
@@ -115,7 +115,7 @@ fn run() -> Result<(), String> {
     }
 }
 
-fn main() {
+pub fn entrypoint() {
     if let Err(error) = run() {
         eprintln!(
             "MACOS_CREDENTIAL_BROKER_ERROR={}",
@@ -124,4 +124,19 @@ fn main() {
 
         std::process::exit(1);
     }
+}
+}
+
+#[cfg(target_os = "macos")]
+fn main() {
+    macos::entrypoint();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    eprintln!(
+        "MACOS_CREDENTIAL_BROKER_ERROR=macos_only"
+    );
+
+    std::process::exit(1);
 }
