@@ -69,3 +69,15 @@ Write-Host "MSI_SUPERVISOR_TASK_PATH=$($TaskScript.FullName)"
 Write-Host 'MSI_HEADLESS_PAYLOAD=PASS'
 Write-Host 'MSI_SUPERVISOR_PAYLOAD=PASS'
 Write-Host 'MSI_SUPERVISOR_TASK_PAYLOAD=PASS'
+
+# WINDOWS_UPDATER_RUNNER_PAYLOAD_V1
+$UpdaterRunner = Get-ChildItem $Audit -Recurse `
+    -Filter 'edgeswarm-updater-runner.exe' |
+    Select-Object -First 1
+
+if (!$UpdaterRunner) {
+    throw 'msi_payload_updater_runner_missing'
+}
+
+Write-Host "MSI_UPDATER_RUNNER_PATH=$($UpdaterRunner.FullName)"
+Write-Host 'MSI_UPDATER_RUNNER_PAYLOAD=PASS'

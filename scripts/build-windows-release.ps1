@@ -56,7 +56,8 @@ if ($TargetTriple -ne "x86_64-pc-windows-msvc") {
     --release `
     --no-default-features `
     --bin edgeswarm-node-headless `
-    --bin edgeswarm-node-supervisor
+    --bin edgeswarm-node-supervisor `
+    --bin edgeswarm-updater-runner
 
 if ($LASTEXITCODE -ne 0) {
     throw "windows_helper_build_failed_$LASTEXITCODE"
@@ -70,7 +71,8 @@ $ExternalBin = @()
 
 foreach ($Name in @(
     "edgeswarm-node-headless",
-    "edgeswarm-node-supervisor"
+    "edgeswarm-node-supervisor",
+    "edgeswarm-updater-runner"
 )) {
     $Source = Join-Path $ReleaseDir "$Name.exe"
 

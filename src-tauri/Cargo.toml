@@ -1,7 +1,7 @@
 [package]
 default-run = "edgeswarm-unified-node"
 name = "edgeswarm-unified-node"
-version = "1.6.0"
+version = "1.6.1"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -76,6 +76,10 @@ path = "src/bin/edgeswarm_credential_broker_macos.rs"
 [[bin]]
 name = "edgeswarm-node-setup"
 path = "src/bin/edgeswarm_node_setup.rs"
+
+[[bin]]
+name = "edgeswarm-updater-runner"
+path = "src/bin/edgeswarm_updater_runner.rs"
 
 # EDGESWARM_DEV_BIN_GATING_V1
 [features]

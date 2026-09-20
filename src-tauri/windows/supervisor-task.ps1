@@ -113,10 +113,55 @@ if ($Mode -eq "RunUpdater") {
 
     Write-UpdaterLog "CHECK version=$BeforeVersion url=$ManifestUrl"
 
-    try {
-        $Response = Invoke-WebRequest -UseBasicParsing -Uri $ManifestUrl -Method Get -TimeoutSec 30
-    } catch {
-        Write-UpdaterLog "ERROR=manifest_request_failed message=$($_.Exception.Message)"
+    # UPDATER_MANIFEST_RETRY_V1
+    #
+    # DNS/network availability can briefly disappear during wake,
+    # roaming, or interface transitions. Retry transient request
+    # failures before failing the scheduled updater task.
+    $ManifestAttempts = 3
+    $ManifestRequestSucceeded = $false
+    $LastManifestError = ""
+    $Response = $null
+
+    for (
+        $Attempt = 1;
+        $Attempt -le $ManifestAttempts;
+        $Attempt++
+    ) {
+        try {
+            $Response =
+                Invoke-WebRequest `
+                    -UseBasicParsing `
+                    -Uri $ManifestUrl `
+                    -Method Get `
+                    -TimeoutSec 20
+
+            $ManifestRequestSucceeded = $true
+
+            if ($Attempt -gt 1) {
+                Write-UpdaterLog `
+                    "MANIFEST_REQUEST_RECOVERED attempt=$Attempt"
+            }
+
+            break
+        } catch {
+            $LastManifestError =
+                $_.Exception.Message
+
+            Write-UpdaterLog `
+                "MANIFEST_REQUEST_ATTEMPT_FAILED attempt=$Attempt max=$ManifestAttempts message=$LastManifestError"
+
+            if ($Attempt -lt $ManifestAttempts) {
+                Start-Sleep `
+                    -Seconds (2 * $Attempt)
+            }
+        }
+    }
+
+    if (-not $ManifestRequestSucceeded) {
+        Write-UpdaterLog `
+            "ERROR=manifest_request_failed attempts=$ManifestAttempts message=$LastManifestError"
+
         exit 22
     }
 
@@ -489,6 +534,18 @@ if ($Mode -in @("Remove", "PauseForUpdate")) {
                 -Confirm:$false
         }
 
+        $UpdaterHostRoot =
+            Join-Path `
+                $env:LOCALAPPDATA `
+                "Swarm Updater Host"
+
+        Remove-Item `
+            -LiteralPath $UpdaterHostRoot `
+            -Recurse `
+            -Force `
+            -ErrorAction SilentlyContinue
+
+        Write-Host "UPDATER_HOST_REMOVED=true"
         Write-Host "UPDATER_TASK_REMOVED=true"
     } else {
         # The updater task is the process currently performing
@@ -691,12 +748,101 @@ if ($existingSupervisorTask) {
 if (-not (Get-Process "edgeswarm-node-supervisor" -ErrorAction SilentlyContinue)) {
     Start-ScheduledTask -TaskName $TaskName
 }
-$updaterPowerShell = "$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
-$updaterWorkingDirectory = Split-Path -Parent $AppPath
-$updaterArguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Mode RunUpdater -AppPath `"$AppPath`""
+# WINDOWS_NATIVE_HIDDEN_UPDATER_RUNNER_V2
+#
+# Task Scheduler executes a GUI-subsystem native runner rather than
+# powershell.exe directly, preventing any visible console creation.
+#
+# The scheduled copy lives outside the application install directory
+# so that the running updater host cannot block NSIS from replacing
+# Swarm application files during an update.
+$updaterWorkingDirectory =
+    Split-Path -Parent $AppPath
 
-$updaterAction = New-ScheduledTaskAction -Execute $updaterPowerShell -Argument $updaterArguments -WorkingDirectory $updaterWorkingDirectory
+$packagedUpdaterRunner =
+    Join-Path `
+        $updaterWorkingDirectory `
+        "edgeswarm-updater-runner.exe"
 
+if (-not (
+    Test-Path `
+        -LiteralPath $packagedUpdaterRunner `
+        -PathType Leaf
+)) {
+    throw "windows_packaged_updater_runner_missing"
+}
+
+$updaterHostRoot =
+    Join-Path `
+        $env:LOCALAPPDATA `
+        "Swarm Updater Host"
+
+New-Item `
+    -ItemType Directory `
+    -Force `
+    -Path $updaterHostRoot |
+    Out-Null
+
+$updaterRunnerHash =
+    (
+        Get-FileHash `
+            -LiteralPath $packagedUpdaterRunner `
+            -Algorithm SHA256
+    ).Hash.ToLower()
+
+$updaterRunner =
+    Join-Path `
+        $updaterHostRoot `
+        "edgeswarm-updater-runner-$updaterRunnerHash.exe"
+
+if (-not (
+    Test-Path `
+        -LiteralPath $updaterRunner `
+        -PathType Leaf
+)) {
+    Copy-Item `
+        -LiteralPath $packagedUpdaterRunner `
+        -Destination $updaterRunner `
+        -Force
+}
+
+$installedRunnerHash =
+    (
+        Get-FileHash `
+            -LiteralPath $updaterRunner `
+            -Algorithm SHA256
+    ).Hash.ToLower()
+
+if (
+    $installedRunnerHash -ne
+    $updaterRunnerHash
+) {
+    throw "windows_updater_host_hash_mismatch"
+}
+
+# Remove obsolete external runner copies when possible.
+# A runner still executing an update may remain locked and is
+# intentionally left for a future cleanup pass.
+Get-ChildItem `
+    -LiteralPath $updaterHostRoot `
+    -Filter "edgeswarm-updater-runner-*.exe" `
+    -File `
+    -ErrorAction SilentlyContinue |
+    Where-Object {
+        $_.FullName -ne $updaterRunner
+    } |
+    Remove-Item `
+        -Force `
+        -ErrorAction SilentlyContinue
+
+$updaterArguments =
+    "--install-dir `"$updaterWorkingDirectory`""
+
+$updaterAction =
+    New-ScheduledTaskAction `
+        -Execute $updaterRunner `
+        -Argument $updaterArguments `
+        -WorkingDirectory $updaterHostRoot
 $updaterLogonTrigger =
     New-ScheduledTaskTrigger `
         -AtLogOn `
@@ -723,7 +869,11 @@ $existingUpdaterTask =
         -ErrorAction SilentlyContinue
 
 if ($existingUpdaterTask) {
-    Write-Host "UPDATER_TASK_PRESERVED_EXISTING=true"
+    Set-ScheduledTask `
+        -TaskName $UpdaterTaskName `
+        -Action $updaterAction | Out-Null
+
+    Write-Host "UPDATER_TASK_ACTION_REFRESHED=true"
 } else {
     Register-ScheduledTask `
         -TaskName $UpdaterTaskName `
