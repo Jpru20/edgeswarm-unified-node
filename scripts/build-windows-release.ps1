@@ -55,6 +55,7 @@ if ($TargetTriple -ne "x86_64-pc-windows-msvc") {
     --manifest-path (Join-Path $Repo "src-tauri\Cargo.toml") `
     --release `
     --no-default-features `
+    --features "release-helper-common,release-helper-windows" `
     --bin edgeswarm-node-headless `
     --bin edgeswarm-node-supervisor `
     --bin edgeswarm-updater-runner

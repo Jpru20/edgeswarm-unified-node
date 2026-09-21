@@ -64,6 +64,7 @@ cargo build \
   --manifest-path "$ROOT/src-tauri/Cargo.toml" \
   --release \
   --no-default-features \
+  --features release-helper-common,release-helper-macos \
   --bin edgeswarm-node-headless \
   --bin edgeswarm-node-supervisor-macos \
   --bin edgeswarm-credential-broker-macos

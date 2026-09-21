@@ -59,18 +59,22 @@ windows-sys = { version = "0.61.2", features = [
 [[bin]]
 name = "edgeswarm-node-headless"
 path = "src/bin/edgeswarm_node_headless.rs"
+required-features = ["release-helper-common"]
 
 [[bin]]
 name = "edgeswarm-node-supervisor"
 path = "src/bin/edgeswarm_node_supervisor.rs"
+required-features = ["release-helper-windows"]
 
 [[bin]]
 name = "edgeswarm-node-supervisor-macos"
 path = "src/bin/edgeswarm_node_supervisor_macos.rs"
+required-features = ["release-helper-macos"]
 
 [[bin]]
 name = "edgeswarm-credential-broker-macos"
 path = "src/bin/edgeswarm_credential_broker_macos.rs"
+required-features = ["release-helper-macos"]
 
 
 [[bin]]
@@ -80,11 +84,20 @@ path = "src/bin/edgeswarm_node_setup.rs"
 [[bin]]
 name = "edgeswarm-updater-runner"
 path = "src/bin/edgeswarm_updater_runner.rs"
+required-features = ["release-helper-windows"]
 
 # EDGESWARM_DEV_BIN_GATING_V1
 [features]
 default = ["desktop"]
 desktop = ["dep:tauri", "dep:tauri-plugin-opener", "dep:tauri-plugin-updater"]
+
+# RELEASE_HELPER_FEATURE_GATING_V1
+# Helpers are built explicitly by the platform release scripts.
+# They must not be treated as ordinary Tauri app binaries.
+release-helper-common = []
+release-helper-windows = []
+release-helper-macos = []
+
 dev-tools = []
 
 [[bin]]
