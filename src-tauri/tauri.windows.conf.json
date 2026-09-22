@@ -1,4 +1,5 @@
 {
+    "productName": "EdgeSwarm Node",
     "bundle":  {
                    "windows":  {
                                    "nsis":  {
