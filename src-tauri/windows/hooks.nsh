@@ -45,6 +45,78 @@
 
   Sleep 1000
 
+  ; WINDOWS_MAIN_BINARY_RELEASE_GATE_V1
+  ;
+  ; Tauri launches NSIS and then exits the old application.
+  ; Before copying the new main executable, wait until Windows
+  ; has actually released the old image mapping. This closes
+  ; the launch/exit race without relying on a blind long sleep.
+  Push $R8
+  Push $R9
+
+  ${IfNot} ${FileExists} "$INSTDIR\edgeswarm-unified-node.exe"
+    Goto edgeswarm_main_binary_released_v1
+  ${EndIf}
+
+  StrCpy $R8 0
+
+edgeswarm_wait_main_binary_v1:
+  ClearErrors
+  FileOpen $R9 "$INSTDIR\edgeswarm-unified-node.exe" a
+
+  ${IfNot} ${Errors}
+    FileClose $R9
+    Goto edgeswarm_main_binary_released_v1
+  ${EndIf}
+
+  IntOp $R8 $R8 + 1
+
+  ${If} $R8 < 20
+    Sleep 250
+    Goto edgeswarm_wait_main_binary_v1
+  ${EndIf}
+
+  ; After a five-second graceful-release window, any remaining
+  ; process with this exact image name is stale for installation.
+  ; Do not use /T here: the installer itself must never be killed
+  ; as a descendant of the old application process.
+  DetailPrint "EdgeSwarm application binary still busy; closing stale application process..."
+
+  ExecWait \
+    '"$SYSDIR\taskkill.exe" /F /IM edgeswarm-unified-node.exe' \
+    $4
+
+  StrCpy $R8 0
+
+edgeswarm_wait_main_binary_after_kill_v1:
+  ClearErrors
+  FileOpen $R9 "$INSTDIR\edgeswarm-unified-node.exe" a
+
+  ${IfNot} ${Errors}
+    FileClose $R9
+    Goto edgeswarm_main_binary_released_v1
+  ${EndIf}
+
+  IntOp $R8 $R8 + 1
+
+  ${If} $R8 < 20
+    Sleep 250
+    Goto edgeswarm_wait_main_binary_after_kill_v1
+  ${EndIf}
+
+  Pop $R9
+  Pop $R8
+
+  MessageBox MB_ICONSTOP \
+    "EdgeSwarm could not release the existing application binary for update."
+
+  Abort
+
+edgeswarm_main_binary_released_v1:
+  Pop $R9
+  Pop $R8
+
+  DetailPrint "EdgeSwarm application binary released for replacement."
   DetailPrint "Existing EdgeSwarm provider stopped."
 !macroend
 
