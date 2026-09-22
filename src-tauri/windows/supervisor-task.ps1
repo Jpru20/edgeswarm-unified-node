@@ -264,6 +264,17 @@ if ($Mode -eq "RunUpdater") {
             }
         )
 
+    # UPDATER_GUI_RELAUNCH_STATE_V1
+    #
+    # Preserve whether the interactive GUI was open before the updater
+    # intentionally closes it. The dedicated background updater process
+    # is launched only after this state has been captured.
+    $GuiWasRunning =
+        $ExistingApps.Count -gt 0
+
+    Write-UpdaterLog `
+        "GUI_WAS_RUNNING_BEFORE_UPDATE=$GuiWasRunning"
+
     foreach ($ExistingApp in $ExistingApps) {
         Stop-Process `
             -Id $ExistingApp.ProcessId `
@@ -467,6 +478,29 @@ if ($Mode -eq "RunUpdater") {
                 -LiteralPath $LifecyclePath `
                 -Force `
                 -ErrorAction SilentlyContinue
+
+            # UPDATER_GUI_RELAUNCH_AFTER_SUCCESS_V1
+            #
+            # Keep unattended updates unattended. Relaunch the installed
+            # GUI only when it was open before this update began.
+            if ($GuiWasRunning) {
+                try {
+                    Start-Process `
+                        -FilePath $AppPath `
+                        -WorkingDirectory $InstallDir `
+                        -ErrorAction Stop |
+                    Out-Null
+
+                    Write-UpdaterLog `
+                        "GUI_RELAUNCH_AFTER_UPDATE=true version=$CurrentVersion"
+                } catch {
+                    Write-UpdaterLog `
+                        "ERROR=gui_relaunch_after_update_failed message=$($_.Exception.Message)"
+                }
+            } else {
+                Write-UpdaterLog `
+                    "GUI_RELAUNCH_AFTER_UPDATE=false reason=not_running_before_update"
+            }
 
             exit 0
         }
