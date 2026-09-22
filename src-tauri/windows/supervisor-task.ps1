@@ -948,5 +948,132 @@ if (-not (
     Write-Host "SUPERVISOR_TASK_STARTED_AFTER_INSTALL=true"
 }
 
+# WINDOWS_V160_TO_V161_GUI_RELAUNCH_BRIDGE_V1
+#
+# v1.6.0 owns the external updater process during a 1.6.0 -> 1.6.1
+# transition. It already records GUI_PROCESS_STOPPED_PID when it closes
+# an interactive GUI. During NSIS post-install, the newly installed
+# v1.6.1 supervisor setup reads that active lifecycle and log entry.
+#
+# This bridge applies ONLY to the active 1.6.0 -> 1.6.1 migration.
+# Fresh installs and unattended updates where no GUI was open remain
+# headless.
+$RelaunchInstallDir =
+    Split-Path -Parent $AppPath
+
+$RelaunchLifecyclePath =
+    Join-Path `
+        $RelaunchInstallDir `
+        "update-lifecycle.json"
+
+$RelaunchUpdaterLogPath =
+    Join-Path `
+        $RelaunchInstallDir `
+        "updater-task.log"
+
+if (
+    (Test-Path -LiteralPath $RelaunchLifecyclePath) -and
+    (Test-Path -LiteralPath $RelaunchUpdaterLogPath)
+) {
+    try {
+        $RelaunchLifecycle =
+            Get-Content `
+                -LiteralPath $RelaunchLifecyclePath `
+                -Raw |
+            ConvertFrom-Json
+
+        $RelaunchStartedAtMs =
+            [int64]$RelaunchLifecycle.startedAtUnixMs
+
+        $RelaunchNowMs =
+            [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+
+        $RelaunchAgeMs =
+            $RelaunchNowMs - $RelaunchStartedAtMs
+
+        $IsActiveV160ToV161 =
+            ([string]$RelaunchLifecycle.fromVersion -eq "1.6.0") -and
+            ([string]$RelaunchLifecycle.toVersion -eq "1.6.1") -and
+            ($RelaunchStartedAtMs -gt 0) -and
+            ($RelaunchAgeMs -ge 0) -and
+            ($RelaunchAgeMs -le (30 * 60 * 1000))
+
+        if ($IsActiveV160ToV161) {
+            $RelaunchLogText =
+                [IO.File]::ReadAllText(
+                    $RelaunchUpdaterLogPath
+                )
+
+            $UpdateAvailableMarker =
+                "UPDATE_AVAILABLE from=1.6.0 to=1.6.1"
+
+            $GuiStoppedMarker =
+                "GUI_PROCESS_STOPPED_PID="
+
+            $UpdateAvailableIndex =
+                $RelaunchLogText.LastIndexOf(
+                    $UpdateAvailableMarker,
+                    [StringComparison]::Ordinal
+                )
+
+            $GuiStoppedIndex =
+                $RelaunchLogText.LastIndexOf(
+                    $GuiStoppedMarker,
+                    [StringComparison]::Ordinal
+                )
+
+            $RelaunchTimestamp =
+                [DateTimeOffset]::UtcNow.ToString("o")
+
+            if (
+                $UpdateAvailableIndex -ge 0 -and
+                $GuiStoppedIndex -gt $UpdateAvailableIndex
+            ) {
+                $RelaunchExpectedApp =
+                    [IO.Path]::GetFullPath($AppPath)
+
+                $RelaunchAlreadyRunning =
+                    @(
+                        Get-CimInstance Win32_Process `
+                            -Filter "Name='edgeswarm-unified-node.exe'" `
+                            -ErrorAction SilentlyContinue |
+                        Where-Object {
+                            $_.ExecutablePath -and
+                            ([string]$_.ExecutablePath).Equals(
+                                $RelaunchExpectedApp,
+                                [StringComparison]::OrdinalIgnoreCase
+                            )
+                        }
+                    ).Count -gt 0
+
+                if (-not $RelaunchAlreadyRunning) {
+                    Start-Process `
+                        -FilePath $AppPath `
+                        -WorkingDirectory $RelaunchInstallDir `
+                        -ErrorAction Stop |
+                    Out-Null
+
+                    Add-Content `
+                        -LiteralPath $RelaunchUpdaterLogPath `
+                        -Value "$RelaunchTimestamp GUI_RELAUNCH_AFTER_UPDATE=true bridge=v160_to_v161" `
+                        -Encoding UTF8
+                }
+            } else {
+                Add-Content `
+                    -LiteralPath $RelaunchUpdaterLogPath `
+                    -Value "$RelaunchTimestamp GUI_RELAUNCH_AFTER_UPDATE=false reason=not_running_before_update bridge=v160_to_v161" `
+                    -Encoding UTF8
+            }
+        }
+    } catch {
+        $RelaunchTimestamp =
+            [DateTimeOffset]::UtcNow.ToString("o")
+
+        Add-Content `
+            -LiteralPath $RelaunchUpdaterLogPath `
+            -Value "$RelaunchTimestamp ERROR=gui_relaunch_bridge_failed message=$($_.Exception.Message)" `
+            -Encoding UTF8
+    }
+}
 Write-Host "SUPERVISOR_TASK_RESTART_ON_FAILURE=true"
 Write-Host "SUPERVISOR_TASK_PASSWORD_STORED=false"
