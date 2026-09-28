@@ -1,4 +1,7 @@
-use crate::core::generation_policy::production_generation_settings_v1;
+use crate::core::generation_policy::{
+    production_generation_settings_adaptive_v1,
+    production_generation_settings_v1,
+};
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader};
@@ -22,10 +25,34 @@ pub struct ProductionLlamaClient {
     base_url: String,
 }
 
+// ADAPTIVE_INFERENCE_TIMEOUT_V1
+const LEGACY_INFERENCE_TIMEOUT_MS_V1: u64 = 105_000;
+
+const ADAPTIVE_DEFAULT_ABSOLUTE_CEILING_MS_V1: u64 =
+    900_000;
+
+fn inference_request_timeout_v1(
+    adaptive_execution: bool,
+    absolute_ceiling_ms: Option<u64>,
+) -> Duration {
+    let timeout_ms =
+        if adaptive_execution {
+            absolute_ceiling_ms
+                .unwrap_or(
+                    ADAPTIVE_DEFAULT_ABSOLUTE_CEILING_MS_V1
+                )
+                .max(1)
+        } else {
+            LEGACY_INFERENCE_TIMEOUT_MS_V1
+        };
+
+    Duration::from_millis(timeout_ms)
+}
+
 impl ProductionLlamaClient {
     pub fn new(base_url: impl Into<String>) -> Result<Self, String> {
         let http = Client::builder()
-            .timeout(Duration::from_secs(105))
+            .connect_timeout(Duration::from_secs(20))
             .no_proxy()
             .build()
             .map_err(|_| "production_llama_client_build_failed".to_string())?;
@@ -40,6 +67,7 @@ impl ProductionLlamaClient {
         let response = self
             .http
             .get(format!("{}/health", self.base_url))
+            .timeout(Duration::from_secs(20))
             .send()
             .map_err(|_| "production_llama_health_request_failed".to_string())?;
 
@@ -60,6 +88,45 @@ impl ProductionLlamaClient {
         &self,
         prompt: &str,
         max_output_tokens: Option<u64>,
+        on_chunk: F,
+    ) -> Result<ProductionInferenceResult, String>
+    where
+        F: FnMut(&str),
+    {
+        self.execute_streaming_with_policy(
+            prompt,
+            max_output_tokens,
+            false,
+            None,
+            on_chunk,
+        )
+    }
+
+    pub fn execute_streaming_adaptive<F>(
+        &self,
+        prompt: &str,
+        max_output_tokens: Option<u64>,
+        absolute_ceiling_ms: Option<u64>,
+        on_chunk: F,
+    ) -> Result<ProductionInferenceResult, String>
+    where
+        F: FnMut(&str),
+    {
+        self.execute_streaming_with_policy(
+            prompt,
+            max_output_tokens,
+            true,
+            absolute_ceiling_ms,
+            on_chunk,
+        )
+    }
+
+    fn execute_streaming_with_policy<F>(
+        &self,
+        prompt: &str,
+        max_output_tokens: Option<u64>,
+        adaptive_execution: bool,
+        absolute_ceiling_ms: Option<u64>,
         mut on_chunk: F,
     ) -> Result<ProductionInferenceResult, String>
     where
@@ -70,14 +137,49 @@ impl ProductionLlamaClient {
         if prompt.is_empty() {
             return Err("production_task_prompt_empty".into());
         }
+        // ADAPTIVE_GENERATION_BUDGET_V1
+        const ADAPTIVE_DEFAULT_OUTPUT_TOKENS_V1: u64 = 4096;
 
-        let requested = max_output_tokens.unwrap_or(512).max(1).min(4096) as u32;
+        let requested_u64 =
+            max_output_tokens
+                .unwrap_or(
+                    if adaptive_execution {
+                        ADAPTIVE_DEFAULT_OUTPUT_TOKENS_V1
+                    } else {
+                        512
+                    }
+                )
+                .max(1);
 
-        let generation = production_generation_settings_v1(prompt, None, Some(requested));
+        let requested =
+            u32::try_from(requested_u64)
+                .unwrap_or(u32::MAX);
 
-        let max_tokens = generation.max_tokens.max(1).min(4096);
+        let generation =
+            if adaptive_execution {
+                production_generation_settings_adaptive_v1(
+                    prompt,
+                    None,
+                    Some(requested),
+                )
+            } else {
+                production_generation_settings_v1(
+                    prompt,
+                    None,
+                    Some(requested.min(4096)),
+                )
+            };
 
-        let body = json!({
+        let max_tokens =
+            if adaptive_execution {
+                generation.max_tokens.max(1)
+            } else {
+                generation.max_tokens
+                    .max(1)
+                    .min(4096)
+            };
+
+        let mut body = json!({
             "model": "local-model",
             "messages": [
                 {
@@ -95,15 +197,42 @@ impl ProductionLlamaClient {
             }
         });
 
+        if adaptive_execution && generation.mode == "json" {
+            body["json_schema"] = json!({
+                "type": "object"
+            });
+        }
+
         let started = Instant::now();
+
+        let request_timeout_v1 =
+            inference_request_timeout_v1(
+                adaptive_execution,
+                absolute_ceiling_ms,
+            );
+
+        println!(
+            "INFERENCE_REQUEST_TIMEOUT_MS={}",
+            request_timeout_v1.as_millis()
+        );
 
         let response = self
             .http
-            .post(format!("{}/v1/chat/completions", self.base_url))
+            .post(format!(
+                "{}/v1/chat/completions",
+                self.base_url
+            ))
             .header("Authorization", "Bearer no-key")
             .json(&body)
+            .timeout(request_timeout_v1)
             .send()
-            .map_err(|_| "production_llama_stream_request_failed".to_string())?;
+            .map_err(|error| {
+                if error.is_timeout() {
+                    "production_llama_stream_timeout".to_string()
+                } else {
+                    "production_llama_stream_request_failed".to_string()
+                }
+            })?;
 
         let status = response.status();
 
@@ -248,17 +377,81 @@ impl ProductionLlamaClient {
         prompt: &str,
         max_output_tokens: Option<u64>,
     ) -> Result<ProductionInferenceResult, String> {
+        self.execute_with_policy(
+            prompt,
+            max_output_tokens,
+            false,
+            None,
+        )
+    }
+
+    pub fn execute_adaptive(
+        &self,
+        prompt: &str,
+        max_output_tokens: Option<u64>,
+        absolute_ceiling_ms: Option<u64>,
+    ) -> Result<ProductionInferenceResult, String> {
+        self.execute_with_policy(
+            prompt,
+            max_output_tokens,
+            true,
+            absolute_ceiling_ms,
+        )
+    }
+
+    fn execute_with_policy(
+        &self,
+        prompt: &str,
+        max_output_tokens: Option<u64>,
+        adaptive_execution: bool,
+        absolute_ceiling_ms: Option<u64>,
+    ) -> Result<ProductionInferenceResult, String> {
         let prompt = prompt.trim();
 
         if prompt.is_empty() {
             return Err("production_task_prompt_empty".into());
         }
+        // ADAPTIVE_GENERATION_BUDGET_V1
+        const ADAPTIVE_DEFAULT_OUTPUT_TOKENS_V1: u64 = 4096;
 
-        let requested = max_output_tokens.unwrap_or(512).max(1).min(4096) as u32;
+        let requested_u64 =
+            max_output_tokens
+                .unwrap_or(
+                    if adaptive_execution {
+                        ADAPTIVE_DEFAULT_OUTPUT_TOKENS_V1
+                    } else {
+                        512
+                    }
+                )
+                .max(1);
 
-        let generation = production_generation_settings_v1(prompt, None, Some(requested));
+        let requested =
+            u32::try_from(requested_u64)
+                .unwrap_or(u32::MAX);
 
-        let max_tokens = generation.max_tokens.max(1).min(4096);
+        let generation =
+            if adaptive_execution {
+                production_generation_settings_adaptive_v1(
+                    prompt,
+                    None,
+                    Some(requested),
+                )
+            } else {
+                production_generation_settings_v1(
+                    prompt,
+                    None,
+                    Some(requested.min(4096)),
+                )
+            };
+
+        let max_tokens =
+            if adaptive_execution {
+                generation.max_tokens.max(1)
+            } else {
+                generation.max_tokens
+                    .max(1)
+                    .min(4096)
+            };
 
         let mut body = json!({
             "model": "local-model",
@@ -291,8 +484,20 @@ impl ProductionLlamaClient {
             .post(format!("{}/v1/chat/completions", self.base_url))
             .header("Authorization", "Bearer no-key")
             .json(&body)
+            .timeout(
+                inference_request_timeout_v1(
+                    adaptive_execution,
+                    absolute_ceiling_ms,
+                )
+            )
             .send()
-            .map_err(|_| "production_llama_request_failed".to_string())?;
+            .map_err(|error| {
+                if error.is_timeout() {
+                    "production_llama_timeout".to_string()
+                } else {
+                    "production_llama_request_failed".to_string()
+                }
+            })?;
 
         let status = response.status();
 

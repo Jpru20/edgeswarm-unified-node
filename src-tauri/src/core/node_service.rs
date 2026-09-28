@@ -10,7 +10,8 @@ use crate::core::{
     production_inference::ProductionLlamaClient,
     production_task_http::{
         poll_once, poll_once_with_limit, read_auth, send_heartbeat,
-        send_stream_frame_with_retry, submit_with_retry,
+        send_stream_frame_with_retry, send_task_progress_with_retry,
+        submit_with_retry,
     },
     real_capacity_certification::certify_model_path_v1,
     result_signing,
@@ -313,17 +314,94 @@ fn build_task_submit_payload(
 
     let llama = llama.ok_or_else(|| "neural_runtime_unavailable".to_string())?;
 
-    let inference_result = if stream_neural {
-        if let Some(callback) = on_chunk {
-            llama.execute_streaming(&task.prompt, task.max_output_tokens, |chunk| {
-                callback(chunk)
-            })
+    // ADAPTIVE_EXECUTION_NODE_POLICY_V1
+    let adaptive_execution_v1 =
+        task_adaptive_neural_execution_v1(task);
+
+    let effective_max_output_tokens_v1 =
+        if adaptive_execution_v1 {
+            task.execution_contract
+                .as_ref()
+                .and_then(|contract| {
+                    contract.output_token_budget
+                })
+                .or(task.max_output_tokens)
         } else {
-            llama.execute(&task.prompt, task.max_output_tokens)
-        }
-    } else {
-        llama.execute(&task.prompt, task.max_output_tokens)
-    };
+            task.max_output_tokens
+        };
+
+    let adaptive_absolute_ceiling_ms_v1 =
+        if adaptive_execution_v1 {
+            task.execution_contract
+                .as_ref()
+                .and_then(|contract| {
+                    contract.absolute_ceiling_ms
+                })
+        } else {
+            None
+        };
+
+    if adaptive_execution_v1 {
+        println!("ADAPTIVE_EXECUTION_ACTIVE=true");
+
+        println!(
+            "ADAPTIVE_OUTPUT_TOKEN_BUDGET={}",
+            effective_max_output_tokens_v1
+                .unwrap_or(4096)
+        );
+
+        println!(
+            "ADAPTIVE_ABSOLUTE_CEILING_MS={}",
+            adaptive_absolute_ceiling_ms_v1
+                .unwrap_or(900_000)
+        );
+    }
+
+    let inference_result =
+        if stream_neural {
+            if let Some(callback) = on_chunk {
+                if adaptive_execution_v1 {
+                    llama.execute_streaming_adaptive(
+                        &task.prompt,
+                        effective_max_output_tokens_v1,
+                        adaptive_absolute_ceiling_ms_v1,
+                        |chunk| {
+                            callback(chunk)
+                        },
+                    )
+                } else {
+                    llama.execute_streaming(
+                        &task.prompt,
+                        effective_max_output_tokens_v1,
+                        |chunk| {
+                            callback(chunk)
+                        },
+                    )
+                }
+            } else if adaptive_execution_v1 {
+                llama.execute_adaptive(
+                    &task.prompt,
+                    effective_max_output_tokens_v1,
+                    adaptive_absolute_ceiling_ms_v1,
+                )
+            } else {
+                llama.execute(
+                    &task.prompt,
+                    effective_max_output_tokens_v1,
+                )
+            }
+        } else if adaptive_execution_v1 {
+            llama.execute_adaptive(
+                &task.prompt,
+                effective_max_output_tokens_v1,
+                adaptive_absolute_ceiling_ms_v1,
+            )
+        } else {
+            llama.execute(
+                &task.prompt,
+                effective_max_output_tokens_v1,
+            )
+        };
 
     match inference_result {
         Ok(result) => {
@@ -356,6 +434,49 @@ fn build_task_submit_payload(
             )
         }
     }
+}
+
+// ADAPTIVE_INTERNAL_STREAMING_V1
+fn task_adaptive_neural_execution_v1(
+    task: &TaskEnvelope,
+) -> bool {
+    let neural =
+        task.required_model
+            .as_deref()
+            .map(|value| {
+                value.starts_with(
+                    "Neural-Inference"
+                )
+            })
+            .unwrap_or(false);
+
+    if !neural {
+        return false;
+    }
+
+    task.execution_contract
+        .as_ref()
+        .and_then(|contract| {
+            contract.version.as_deref()
+        })
+        .map(|version| {
+            version.eq_ignore_ascii_case(
+                "adaptive-execution-v1"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn task_adaptive_progress_reporting_v1(
+    task: &TaskEnvelope,
+) -> bool {
+    task_adaptive_neural_execution_v1(task)
+        && task.execution_contract
+            .as_ref()
+            .and_then(|contract| {
+                contract.progress_reporting
+            })
+            .unwrap_or(true)
 }
 
 // REALTIME_NEURAL_STREAM_CONTRACT_V1
@@ -629,9 +750,179 @@ fn run_claimed_task_worker_v1(
 
     let task_id = task.task_id_text();
 
-let provider_email_for_task_v1 = auth.provider_email.clone();
+let provider_email_for_task_v1 =
+    auth.provider_email.clone();
 
-let stream_requested_v1 = task_realtime_neural_streaming_v1(&task);
+let adaptive_internal_streaming_v1 =
+    task_adaptive_neural_execution_v1(
+        &task
+    );
+
+let adaptive_progress_requested_v1 =
+    task_adaptive_progress_reporting_v1(
+        &task
+    );
+
+let execution_started_v1 =
+    Instant::now();
+
+let execution_id_v1 =
+    format!(
+        "{}-{}",
+        task_id,
+        std::time::SystemTime::now()
+            .duration_since(
+                std::time::UNIX_EPOCH
+            )
+            .unwrap_or_default()
+            .as_nanos()
+    );
+
+// ADAPTIVE_EXECUTION_PROGRESS_WORKER_V1
+let mut progress_enabled_v1 = false;
+let mut progress_sequence_v1 = 0_u64;
+let mut progress_output_chars_v1 = 0_u64;
+let mut progress_last_reported_chars_v1 = 0_u64;
+let mut progress_first_chunk_sent_v1 = false;
+
+let mut progress_last_report_v1 =
+    Instant::now();
+
+let mut progress_sender_v1 = None;
+let mut progress_worker_v1 = None;
+
+if adaptive_progress_requested_v1 {
+    let (sender_v1, receiver_v1) =
+        mpsc::channel::<(
+            String,
+            String,
+            u64,
+            u64,
+            u64
+        )>();
+
+    let task_for_progress_v1 =
+        task.task_id.clone();
+
+    let provider_for_progress_v1 =
+        provider_email_for_task_v1.clone();
+
+    let hardware_for_progress_v1 =
+        hardware.clone();
+
+    let mut progress_auth_v1 =
+        auth.clone();
+
+    let progress_http_v1 =
+        Client::builder()
+            .timeout(
+                Duration::from_secs(15)
+            )
+            .build()
+            .map_err(|_| {
+                "progress_http_client_build_failed"
+                    .to_string()
+            })?;
+
+    let worker_v1 =
+        thread::spawn(move || {
+            let progress_auth_client_v1 =
+                match SupabaseAuthClient::from_env() {
+                    Ok(client) => client,
+
+                    Err(error) => {
+                        println!(
+                            "PROGRESS_WORKER_AUTH_FAILED={error}"
+                        );
+
+                        return;
+                    }
+                };
+
+            for (
+                execution_id_for_event_v1,
+                event_v1,
+                sequence_v1,
+                output_chars_v1,
+                elapsed_ms_v1
+            ) in receiver_v1
+            {
+                match send_task_progress_with_retry(
+                    &progress_http_v1,
+                    &progress_auth_client_v1,
+                    &mut progress_auth_v1,
+                    &task_for_progress_v1,
+                    &provider_for_progress_v1,
+                    &hardware_for_progress_v1,
+                    &execution_id_for_event_v1,
+                    &event_v1,
+                    sequence_v1,
+                    output_chars_v1,
+                    elapsed_ms_v1,
+                ) {
+                    Ok(status) => {
+                        println!(
+                            "TASK_PROGRESS_HTTP_STATUS={} EVENT={} SEQUENCE={}",
+                            status,
+                            event_v1,
+                            sequence_v1
+                        );
+                    }
+
+                    Err(error) => {
+                        println!(
+                            "TASK_PROGRESS_WORKER_FAILED={error}"
+                        );
+
+                        println!(
+                            "PROGRESS_TELEMETRY_NON_FATAL=true"
+                        );
+
+                        break;
+                    }
+                }
+            }
+
+            println!(
+                "TASK_PROGRESS_WORKER_STOPPED=true"
+            );
+        });
+
+    progress_sender_v1 =
+        Some(sender_v1);
+
+    progress_worker_v1 =
+        Some(worker_v1);
+
+    progress_sequence_v1 = 1;
+
+    let queued_v1 =
+        progress_sender_v1
+            .as_ref()
+            .map(|sender| {
+                sender.send((
+                    execution_id_v1.clone(),
+                    "generation.started".into(),
+                    1,
+                    0,
+                    0,
+                ))
+                .is_ok()
+            })
+            .unwrap_or(false);
+
+    progress_enabled_v1 =
+        queued_v1;
+
+    println!(
+        "ADAPTIVE_PROGRESS_START_QUEUED={queued_v1}"
+    );
+}
+
+let stream_requested_v1 =
+    task_realtime_neural_streaming_v1(
+        &task
+    );
 
 let mut stream_enabled_v1 = false;
 let mut stream_sequence_v1 = 0_u64;
@@ -741,14 +1032,80 @@ if stream_requested_v1 {
     }
 }
 
-let use_streaming_execution_v1 = stream_enabled_v1;
+let use_streaming_execution_v1 =
+    stream_enabled_v1 ||
+    adaptive_internal_streaming_v1;
 
-let mut stream_callback_v1 = |delta: &str| {
-    if !stream_enabled_v1 {
-        return;
-    }
+println!(
+    "INTERNAL_STREAMING_EXECUTION={}",
+    use_streaming_execution_v1
+);
 
-    stream_buffer_v1.push_str(delta);
+let mut stream_callback_v1 =
+    |delta: &str| {
+        // ADAPTIVE_EXECUTION_PROGRESS_CALLBACK_V1
+        if adaptive_internal_streaming_v1 {
+            progress_output_chars_v1 +=
+                delta.chars().count() as u64;
+
+            let should_report_v1 =
+                progress_enabled_v1 &&
+                (
+                    !progress_first_chunk_sent_v1 ||
+                    progress_last_report_v1.elapsed()
+                        >= Duration::from_secs(5)
+                );
+
+            if should_report_v1 {
+                progress_sequence_v1 += 1;
+
+                let elapsed_ms_v1 =
+                    execution_started_v1
+                        .elapsed()
+                        .as_millis()
+                        as u64;
+
+                let queued_v1 =
+                    progress_sender_v1
+                        .as_ref()
+                        .map(|sender| {
+                            sender.send((
+                                execution_id_v1.clone(),
+                                "generation.progress".into(),
+                                progress_sequence_v1,
+                                progress_output_chars_v1,
+                                elapsed_ms_v1,
+                            ))
+                            .is_ok()
+                        })
+                        .unwrap_or(false);
+
+                if queued_v1 {
+                    progress_first_chunk_sent_v1 =
+                        true;
+
+                    progress_last_report_v1 =
+                        Instant::now();
+
+                    progress_last_reported_chars_v1 =
+                        progress_output_chars_v1;
+                } else {
+                    progress_enabled_v1 =
+                        false;
+
+                    println!(
+                        "TASK_PROGRESS_QUEUE_FAILED=true"
+                    );
+                }
+            }
+        }
+
+        // Customer-visible chunks remain realtime-only.
+        if !stream_enabled_v1 {
+            return;
+        }
+
+        stream_buffer_v1.push_str(delta);
 
     let should_flush_v1 = stream_buffer_v1.chars().count() >= 96
         || stream_last_flush_v1.elapsed() >= Duration::from_millis(250)
@@ -808,7 +1165,47 @@ let submit_payload = build_task_submit_payload(
 
 drop(stream_callback_v1);
 
-if (stream_enabled_v1 && !stream_buffer_v1.is_empty()) {
+// ADAPTIVE_EXECUTION_FINAL_PROGRESS_V1
+// ADAPTIVE_CORRECTION_FINAL_PROGRESS_V1
+// A correction is dispatched through this same worker path,
+// so it receives its own executionId and progress sequence.
+if (
+    progress_enabled_v1 &&
+    progress_output_chars_v1 >
+        progress_last_reported_chars_v1
+) {
+    progress_sequence_v1 += 1;
+
+    let elapsed_ms_v1 =
+        execution_started_v1
+            .elapsed()
+            .as_millis()
+            as u64;
+
+    let queued_v1 =
+        progress_sender_v1
+            .as_ref()
+            .map(|sender| {
+                sender.send((
+                    execution_id_v1.clone(),
+                    "generation.progress".into(),
+                    progress_sequence_v1,
+                    progress_output_chars_v1,
+                    elapsed_ms_v1,
+                ))
+                .is_ok()
+            })
+            .unwrap_or(false);
+
+    println!(
+        "ADAPTIVE_FINAL_PROGRESS_QUEUED={queued_v1}"
+    );
+}
+
+if (
+    stream_enabled_v1 &&
+    !stream_buffer_v1.is_empty()
+) {
     let text_v1 = std::mem::take(&mut stream_buffer_v1);
 
     stream_sequence_v1 += 1;
@@ -883,14 +1280,44 @@ if stream_enabled_v1 {
 // arrive after the backend has already emitted verified ready.
 drop(stream_sender_v1);
 
-if let Some(worker_v1) = stream_worker_v1 {
+if let Some(worker_v1) =
+    stream_worker_v1
+{
     if worker_v1.join().is_err() {
-        println!("STREAM_WORKER_JOIN_FAILED=true");
-        println!("STREAMING_NON_FATAL=true");
+        println!(
+            "STREAM_WORKER_JOIN_FAILED=true"
+        );
+
+        println!(
+            "STREAMING_NON_FATAL=true"
+        );
     }
 }
 
-let outcome = submit_with_retry(&http, &auth_client, &mut auth, &submit_payload)?;
+// ADAPTIVE_PROGRESS_WORKER_FINALIZE_V1
+drop(progress_sender_v1);
+
+if let Some(worker_v1) =
+    progress_worker_v1
+{
+    if worker_v1.join().is_err() {
+        println!(
+            "PROGRESS_WORKER_JOIN_FAILED=true"
+        );
+
+        println!(
+            "PROGRESS_TELEMETRY_NON_FATAL=true"
+        );
+    }
+}
+
+let outcome =
+    submit_with_retry(
+        &http,
+        &auth_client,
+        &mut auth,
+        &submit_payload
+    )?;
 
 println!("RESULT_SUBMIT_HTTP_STATUS={}", outcome.status);
 
@@ -2166,6 +2593,11 @@ pub fn run_node_service(
                     }
                 }
 
+                // ADAPTIVE_CORRECTION_PROGRESS_V1
+                // Dispatcher redelivery re-enters
+                // run_claimed_task_worker_v1. This naturally creates
+                // a fresh executionId, generation.started sequence=1,
+                // periodic progress, and final progress.
                 if let Some(correction_task_v1) =
                     correction_v1
                 {

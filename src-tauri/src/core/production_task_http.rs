@@ -332,6 +332,135 @@ pub fn send_stream_frame_with_retry(
     Err("stream_frame_retry_exhausted".into())
 }
 
+
+// ADAPTIVE_EXECUTION_PROGRESS_HTTP_V1
+// Sends execution-liveness telemetry to the backend.
+// Generated response text is not included in this channel.
+pub fn send_task_progress_with_retry(
+    http: &Client,
+    auth_client: &SupabaseAuthClient,
+    auth: &mut LocalAuth,
+    task_id: &Value,
+    provider_email: &str,
+    hardware_id: &str,
+    execution_id: &str,
+    event: &str,
+    sequence: u64,
+    output_chars: u64,
+    elapsed_ms: u64,
+) -> Result<u16, String> {
+    let body = serde_json::json!({
+        "taskId": task_id,
+        "providerEmail": provider_email,
+        "hardwareId": hardware_id,
+        "executionId": execution_id,
+        "event": event,
+        "sequence": sequence,
+        "outputChars": output_chars,
+        "elapsedMs": elapsed_ms
+    });
+
+    let mut auth_refreshed = false;
+
+    for attempt in 1..=2 {
+        let response = match http
+            .post(format!(
+                "{}/enterprise/task-progress",
+                api_base()
+            ))
+            .header(
+                AUTHORIZATION,
+                bearer(&auth.access_token)?
+            )
+            .json(&body)
+            .send()
+        {
+            Ok(response) => response,
+
+            Err(error) if attempt < 2 => {
+                println!(
+                    "TASK_PROGRESS_SEND_RETRY={} ATTEMPT={}",
+                    if error.is_timeout() {
+                        "timeout"
+                    } else {
+                        "network"
+                    },
+                    attempt
+                );
+
+                thread::sleep(
+                    Duration::from_millis(100)
+                );
+
+                continue;
+            }
+
+            Err(error) => {
+                return Err(
+                    if error.is_timeout() {
+                        "task_progress_timeout"
+                    } else {
+                        "task_progress_network_failed"
+                    }
+                    .into()
+                );
+            }
+        };
+
+        let status =
+            response.status().as_u16();
+
+        if status == 401 && !auth_refreshed {
+            let stale_access_token =
+                auth.access_token.clone();
+
+            *auth = refresh_auth(
+                auth_client,
+                &stale_access_token,
+            )?;
+
+            auth_refreshed = true;
+            continue;
+        }
+
+        if status == 426 {
+            return Err(
+                "node_update_required_http_426".into()
+            );
+        }
+
+        if matches!(status, 200 | 201 | 202) {
+            return Ok(status);
+        }
+
+        let retryable =
+            matches!(status, 408 | 425 | 429)
+                || (500..=599).contains(&status);
+
+        if retryable && attempt < 2 {
+            thread::sleep(
+                Duration::from_millis(100)
+            );
+
+            continue;
+        }
+
+        let raw =
+            response.text().unwrap_or_default();
+
+        return Err(format!(
+            "task_progress_http_{}:{}",
+            status,
+            raw.chars()
+                .take(240)
+                .collect::<String>()
+        ));
+    }
+
+    Err(
+        "task_progress_retry_exhausted".into()
+    )
+}
 pub fn submit_with_retry(
     http: &Client,
     auth_client: &SupabaseAuthClient,

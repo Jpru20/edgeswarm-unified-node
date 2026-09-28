@@ -253,6 +253,7 @@ mod tests {
             checkpoint_indices: Vec::new(),
             verification_method: None,
             max_output_tokens: None,
+            execution_contract: None,
             streaming_contract: None,
         }
     }

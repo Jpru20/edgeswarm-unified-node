@@ -603,6 +603,7 @@ mod tests {
             checkpoint_indices: vec![],
             verification_method: None,
             max_output_tokens: None,
+            execution_contract: None,
             streaming_contract: None,
         }
     }

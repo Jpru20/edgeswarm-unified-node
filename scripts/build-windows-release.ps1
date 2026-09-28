@@ -1,4 +1,4 @@
-param([string]$ConfigPath = '',[string]$TargetDir = '')
+﻿param([string]$ConfigPath = '',[string]$TargetDir = '')
 $ErrorActionPreference = 'Stop'
 $Repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $Repo
@@ -29,6 +29,26 @@ Write-Host "SOURCE_COMMIT=$Head"
 Write-Host "TARGET_DIR=$TargetDir"
 $RuntimeSource = Join-Path $env:USERPROFILE "edgeswarm-runtime-build\release\windows-x64\current"
 $RuntimeExe = Join-Path $RuntimeSource "llama-server.exe"
+
+# WINDOWS_ACCELERATED_RUNTIME_PAYLOAD_V2
+$CudaRuntimeSource = Join-Path $env:USERPROFILE "edgeswarm-runtime-build\release\windows-x64\cuda\current"
+$VulkanRuntimeSource = Join-Path $env:USERPROFILE "edgeswarm-runtime-build\release\windows-x64\vulkan\current"
+
+$CudaRuntimeExe = Join-Path $CudaRuntimeSource "llama-server.exe"
+$CudaBackendDll = Join-Path $CudaRuntimeSource "ggml-cuda.dll"
+$VulkanRuntimeExe = Join-Path $VulkanRuntimeSource "llama-server.exe"
+$VulkanBackendDll = Join-Path $VulkanRuntimeSource "ggml-vulkan.dll"
+
+foreach ($Required in @(
+    $CudaRuntimeExe,
+    $CudaBackendDll,
+    $VulkanRuntimeExe,
+    $VulkanBackendDll
+)) {
+    if (!(Test-Path -LiteralPath $Required)) {
+        throw "windows_accelerated_runtime_payload_missing_$Required"
+    }
+}
 $RuntimeManifest = Get-Content (Join-Path $Repo "packaging\runtime\llama-runtime-v1.json") -Raw | ConvertFrom-Json
 $ExpectedRuntimeSha = [string]$RuntimeManifest.targets.'windows-x64'.validatedRuntimeSha256
 
@@ -104,11 +124,23 @@ $RuntimeConfig =
 $SourceJson =
     ($RuntimeSource -replace '\\','/') + '/*'
 
+$CudaSourceJson =
+    ($CudaRuntimeSource -replace '\','/') + '/*'
+
+$VulkanSourceJson =
+    ($VulkanRuntimeSource -replace '\','/') + '/*'
+
 $TaskScriptJson =
     ($TaskScriptSource -replace '\\','/')
 
 $Resources = @{}
 $Resources[$SourceJson] = "runtime/current/"
+
+$Resources[$CudaSourceJson] =
+    "resources/runtime/cuda/current/"
+
+$Resources[$VulkanSourceJson] =
+    "resources/runtime/vulkan/current/"
 $Resources[$TaskScriptJson] =
     "resources/windows/supervisor-task.ps1"
 
@@ -126,6 +158,26 @@ Write-Host "WINDOWS_SUPERVISOR_TASK_STAGED=PASS"
 
 Write-Host "WINDOWS_LLAMA_RUNTIME_SHA256=$ActualRuntimeSha"
 Write-Host "WINDOWS_LLAMA_RUNTIME_STAGED=PASS"
+
+$CudaBytes =
+    (
+        Get-ChildItem $CudaRuntimeSource -File -Recurse |
+        Measure-Object Length -Sum
+    ).Sum
+
+$VulkanBytes =
+    (
+        Get-ChildItem $VulkanRuntimeSource -File -Recurse |
+        Measure-Object Length -Sum
+    ).Sum
+
+Write-Host "WINDOWS_CUDA_RUNTIME_SOURCE=$CudaRuntimeSource"
+Write-Host "WINDOWS_CUDA_RUNTIME_BYTES=$CudaBytes"
+Write-Host "WINDOWS_CUDA_RUNTIME_STAGED=PASS"
+
+Write-Host "WINDOWS_VULKAN_RUNTIME_SOURCE=$VulkanRuntimeSource"
+Write-Host "WINDOWS_VULKAN_RUNTIME_BYTES=$VulkanBytes"
+Write-Host "WINDOWS_VULKAN_RUNTIME_STAGED=PASS"
 
 npm.cmd run tauri build -- --config $RuntimeConfig
 if ($LASTEXITCODE -ne 0) { throw "tauri_build_failed_$LASTEXITCODE" }

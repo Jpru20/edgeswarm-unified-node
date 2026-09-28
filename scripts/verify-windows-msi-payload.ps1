@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$Msi,[Parameter(Mandatory=$true)][string]$TargetDir)
+﻿param([Parameter(Mandatory=$true)][string]$Msi,[Parameter(Mandatory=$true)][string]$TargetDir)
 $ErrorActionPreference = 'Stop'
 if (!(Test-Path -LiteralPath $Msi)) { throw 'msi_artifact_missing' }
 $Audit = Join-Path $TargetDir 'msi-payload-audit'
@@ -36,6 +36,56 @@ if ($Llama.FullName -notmatch "runtime\\current\\llama-server\.exe$") {
 Write-Host "MSI_LLAMA_RUNTIME_PATH=$($Llama.FullName)"
 Write-Host "MSI_LLAMA_RUNTIME_SHA256=$LlamaHash"
 Write-Host "MSI_BUNDLED_LLAMA_RUNTIME=PASS"
+
+# WINDOWS_ACCELERATED_RUNTIME_PAYLOAD_VERIFY_V2
+$CudaServer =
+    Get-ChildItem $Audit -Recurse -Filter "llama-server.exe" -File |
+    Where-Object {
+        $_.FullName -match "resources\\runtime\\cuda\\current\\llama-server\.exe$"
+    } |
+    Select-Object -First 1
+
+$CudaBackend =
+    Get-ChildItem $Audit -Recurse -Filter "ggml-cuda.dll" -File |
+    Select-Object -First 1
+
+$CudaBlas =
+    Get-ChildItem $Audit -Recurse -Filter "cublas64_12.dll" -File |
+    Select-Object -First 1
+
+$CudaBlasLt =
+    Get-ChildItem $Audit -Recurse -Filter "cublasLt64_12.dll" -File |
+    Select-Object -First 1
+
+$CudaRuntime =
+    Get-ChildItem $Audit -Recurse -Filter "cudart64_12.dll" -File |
+    Select-Object -First 1
+
+$VulkanServer =
+    Get-ChildItem $Audit -Recurse -Filter "llama-server.exe" -File |
+    Where-Object {
+        $_.FullName -match "resources\\runtime\\vulkan\\current\\llama-server\.exe$"
+    } |
+    Select-Object -First 1
+
+$VulkanBackend =
+    Get-ChildItem $Audit -Recurse -Filter "ggml-vulkan.dll" -File |
+    Select-Object -First 1
+
+if (!$CudaServer) { throw "msi_payload_cuda_llama_server_missing" }
+if (!$CudaBackend) { throw "msi_payload_ggml_cuda_missing" }
+if (!$CudaBlas) { throw "msi_payload_cublas_missing" }
+if (!$CudaBlasLt) { throw "msi_payload_cublaslt_missing" }
+if (!$CudaRuntime) { throw "msi_payload_cudart_missing" }
+if (!$VulkanServer) { throw "msi_payload_vulkan_llama_server_missing" }
+if (!$VulkanBackend) { throw "msi_payload_ggml_vulkan_missing" }
+
+Write-Host "MSI_CUDA_SERVER_PATH=$($CudaServer.FullName)"
+Write-Host "MSI_CUDA_BACKEND_PATH=$($CudaBackend.FullName)"
+Write-Host "MSI_VULKAN_SERVER_PATH=$($VulkanServer.FullName)"
+Write-Host "MSI_VULKAN_BACKEND_PATH=$($VulkanBackend.FullName)"
+Write-Host "MSI_CUDA_RUNTIME_PAYLOAD=PASS"
+Write-Host "MSI_VULKAN_RUNTIME_PAYLOAD=PASS"
 
 
 # WINDOWS_BACKGROUND_HELPER_PAYLOAD_V1

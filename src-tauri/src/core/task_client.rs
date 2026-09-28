@@ -24,6 +24,31 @@ pub struct StreamingContract {
     pub raw_chunks_persisted: Option<bool>,
 }
 
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdaptiveExecutionContract {
+    #[serde(default)]
+    pub version: Option<String>,
+
+    #[serde(default)]
+    pub output_token_budget: Option<u64>,
+
+    #[serde(default)]
+    pub execution_budget_ms: Option<u64>,
+
+    #[serde(default)]
+    pub inactivity_budget_ms: Option<u64>,
+
+    #[serde(default)]
+    pub absolute_ceiling_ms: Option<u64>,
+
+    #[serde(default)]
+    pub progress_reporting: Option<bool>,
+
+    #[serde(default)]
+    pub structured_failure_telemetry: Option<bool>,
+}
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskEnvelope {
@@ -58,6 +83,10 @@ pub struct TaskEnvelope {
 
     #[serde(default)]
     pub max_output_tokens: Option<u64>,
+    // ADAPTIVE_EXECUTION_CONTRACT_V1
+    #[serde(default)]
+    pub execution_contract: Option<AdaptiveExecutionContract>,
+
 
     #[serde(default)]
     pub streaming_contract: Option<StreamingContract>,
@@ -265,6 +294,7 @@ mod tests {
             checkpoint_indices: vec![],
             verification_method: None,
             max_output_tokens: Some(128),
+            execution_contract: None,
             streaming_contract: None,
         };
 
