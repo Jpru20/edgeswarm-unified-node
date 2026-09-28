@@ -1,4 +1,4 @@
-﻿param([string]$ConfigPath = '',[string]$TargetDir = '')
+param([string]$ConfigPath = '',[string]$TargetDir = '')
 $ErrorActionPreference = 'Stop'
 $Repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $Repo
@@ -125,10 +125,10 @@ $SourceJson =
     ($RuntimeSource -replace '\\','/') + '/*'
 
 $CudaSourceJson =
-    ($CudaRuntimeSource -replace '\','/') + '/*'
+    ($CudaRuntimeSource -replace '\\','/') + '/*'
 
 $VulkanSourceJson =
-    ($VulkanRuntimeSource -replace '\','/') + '/*'
+    ($VulkanRuntimeSource -replace '\\','/') + '/*'
 
 $TaskScriptJson =
     ($TaskScriptSource -replace '\\','/')
