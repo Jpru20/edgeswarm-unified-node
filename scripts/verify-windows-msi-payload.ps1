@@ -1,4 +1,4 @@
-﻿param([Parameter(Mandatory=$true)][string]$Msi,[Parameter(Mandatory=$true)][string]$TargetDir)
+param([Parameter(Mandatory=$true)][string]$Msi,[Parameter(Mandatory=$true)][string]$TargetDir)
 $ErrorActionPreference = 'Stop'
 if (!(Test-Path -LiteralPath $Msi)) { throw 'msi_artifact_missing' }
 $Audit = Join-Path $TargetDir 'msi-payload-audit'
@@ -19,7 +19,11 @@ Write-Host 'MSI_PAYLOAD_CONFIG_VERIFIED=PASS'
 Write-Host "CANONICAL_RUNTIME_PATH=$($Payload.FullName)"
 Write-Host "CANONICAL_RUNTIME_SHA256=$Hash"
 $ExpectedLlama = "973ff5fd98d0ffe335761c304ac9faa365e57877054f764ac0c40a98a70cf717"
-$Llama = Get-ChildItem $Audit -Recurse -Filter "llama-server.exe" -File |
+$Llama =
+    Get-ChildItem $Audit -Recurse -Filter "llama-server.exe" -File |
+    Where-Object {
+        $_.FullName -match "runtime\\current\\llama-server\.exe$"
+    } |
     Select-Object -First 1
 
 if (!$Llama) { throw "msi_payload_llama_server_missing" }
