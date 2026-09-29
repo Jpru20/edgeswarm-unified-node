@@ -933,20 +933,18 @@ if (
     throw "windows_updater_host_hash_mismatch"
 }
 
-# Remove obsolete external runner copies when possible.
-# A runner still executing an update may remain locked and is
-# intentionally left for a future cleanup pass.
-Get-ChildItem `
-    -LiteralPath $updaterHostRoot `
-    -Filter "edgeswarm-updater-runner-*.exe" `
-    -File `
-    -ErrorAction SilentlyContinue |
-    Where-Object {
-        $_.FullName -ne $updaterRunner
-    } |
-    Remove-Item `
-        -Force `
-        -ErrorAction SilentlyContinue
+# WINDOWS_UPDATER_TASK_PRESERVE_ACTION_V3
+#
+# The updater runner is version-agnostic. An existing scheduled
+# updater task therefore does not need its action rewritten during
+# every application upgrade.
+#
+# This is also important for per-user NSIS upgrades: an existing
+# scheduled task may have an ACL that permits execution but denies
+# Set-ScheduledTask from the installer process.
+#
+# Preserve the existing task and the exact runner file it references.
+# Register a task only when one does not already exist.
 
 $updaterArguments =
     "--install-dir `"$updaterWorkingDirectory`""
@@ -956,6 +954,7 @@ $updaterAction =
         -Execute $updaterRunner `
         -Argument $updaterArguments `
         -WorkingDirectory $updaterHostRoot
+
 $updaterLogonTrigger =
     New-ScheduledTaskTrigger `
         -AtLogOn `
@@ -981,13 +980,66 @@ $existingUpdaterTask =
         -TaskName $UpdaterTaskName `
         -ErrorAction SilentlyContinue
 
-if ($existingUpdaterTask) {
-    Set-ScheduledTask `
-        -TaskName $UpdaterTaskName `
-        -Action $updaterAction | Out-Null
+$preservedUpdaterRunner =
+    $null
 
-    Write-Host "UPDATER_TASK_ACTION_REFRESHED=true"
-} else {
+if ($existingUpdaterTask) {
+    $existingUpdaterAction =
+        @($existingUpdaterTask.Actions) |
+        Select-Object -First 1
+
+    if (-not $existingUpdaterAction) {
+        throw "windows_existing_updater_task_action_missing"
+    }
+
+    $existingUpdaterExecute =
+        [Environment]::ExpandEnvironmentVariables(
+            ([string]$existingUpdaterAction.Execute).Trim('"')
+        )
+
+    if (
+        [string]::IsNullOrWhiteSpace(
+            $existingUpdaterExecute
+        )
+    ) {
+        throw "windows_existing_updater_task_execute_missing"
+    }
+
+    $existingUpdaterExecute =
+        [IO.Path]::GetFullPath(
+            $existingUpdaterExecute
+        )
+
+    $trustedUpdaterRoot =
+        [IO.Path]::GetFullPath(
+            $updaterHostRoot
+        ).TrimEnd('\') + '\'
+
+    if (-not (
+        $existingUpdaterExecute.StartsWith(
+            $trustedUpdaterRoot,
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    )) {
+        throw "windows_existing_updater_task_action_untrusted"
+    }
+
+    if (-not (
+        Test-Path `
+            -LiteralPath $existingUpdaterExecute `
+            -PathType Leaf
+    )) {
+        throw "windows_existing_updater_runner_missing"
+    }
+
+    $preservedUpdaterRunner =
+        $existingUpdaterExecute
+
+    Write-Host "UPDATER_TASK_PRESERVED_EXISTING=true"
+    Write-Host "UPDATER_TASK_ACTION_PRESERVED=true"
+    Write-Host "UPDATER_TASK_RUNNER=$preservedUpdaterRunner"
+}
+else {
     Register-ScheduledTask `
         -TaskName $UpdaterTaskName `
         -Action $updaterAction `
@@ -997,11 +1049,52 @@ if ($existingUpdaterTask) {
         ) `
         -Principal $principal `
         -Settings $updaterSettings `
-        -Force | Out-Null
+        -Force |
+    Out-Null
+
+    $preservedUpdaterRunner =
+        $updaterRunner
 
     Write-Host "UPDATER_TASK_REGISTERED=true"
     Write-Host "UPDATER_TASK_INTERVAL=PT1H"
 }
+
+# Remove only updater-runner copies that are neither the new staged
+# runner nor the runner referenced by the preserved scheduled task.
+Get-ChildItem `
+    -LiteralPath $updaterHostRoot `
+    -Filter "edgeswarm-updater-runner-*.exe" `
+    -File `
+    -ErrorAction SilentlyContinue |
+Where-Object {
+    $candidate =
+        [IO.Path]::GetFullPath(
+            $_.FullName
+        )
+
+    $isNewRunner =
+        $candidate.Equals(
+            [IO.Path]::GetFullPath($updaterRunner),
+            [StringComparison]::OrdinalIgnoreCase
+        )
+
+    $isPreservedRunner =
+        $preservedUpdaterRunner -and
+        $candidate.Equals(
+            [IO.Path]::GetFullPath(
+                $preservedUpdaterRunner
+            ),
+            [StringComparison]::OrdinalIgnoreCase
+        )
+
+    -not $isNewRunner -and
+    -not $isPreservedRunner
+} |
+Remove-Item `
+    -Force `
+    -ErrorAction SilentlyContinue
+
+Write-Host "UPDATER_RUNNER_CLEANUP=PASS"
 
 # UPDATE_PAUSE_LOCK_RELEASE_V1
 $UpdatePauseLockPath =
