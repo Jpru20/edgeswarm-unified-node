@@ -165,16 +165,41 @@ edgeswarm_main_binary_released_v1:
     Abort
   ${EndIf}
 
+  ; WINDOWS_SUPERVISOR_POSTINSTALL_DIAGNOSTIC_RETRY_V3
+  ;
+  ; Capture the exact PowerShell output produced inside the
+  ; NSIS process context and retry the complete idempotent
+  ; supervisor configuration when a transient invocation fails.
+  Delete "$INSTDIR\supervisor-install.stdout.log"
+  Delete "$INSTDIR\supervisor-install.stderr.log"
+
+  StrCpy $3 0
+
+edgeswarm_supervisor_install_retry_v3:
+  IntOp $3 $3 + 1
+
+  DetailPrint "EdgeSwarm supervisor configuration attempt $3 of 3..."
+
   ExecWait \
-    '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\resources\windows\supervisor-task.ps1" -Mode Install -SupervisorPath "$INSTDIR\edgeswarm-node-supervisor.exe" -AppPath "$INSTDIR\edgeswarm-unified-node.exe"' \
+    '"$SYSDIR\cmd.exe" /D /S /C ""$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\resources\windows\supervisor-task.ps1" -Mode Install -SupervisorPath "$INSTDIR\edgeswarm-node-supervisor.exe" -AppPath "$INSTDIR\edgeswarm-unified-node.exe" >> "$INSTDIR\supervisor-install.stdout.log" 2>> "$INSTDIR\supervisor-install.stderr.log""' \
     $2
 
-  ${If} $2 != 0
-    MessageBox MB_ICONSTOP \
-      "EdgeSwarm background supervisor configuration failed. Exit code: $2"
-    Abort
+  ${If} $2 == 0
+    Goto edgeswarm_supervisor_install_ready_v3
   ${EndIf}
 
+  DetailPrint "EdgeSwarm supervisor configuration attempt $3 failed. Exit code: $2"
+
+  ${If} $3 < 3
+    Sleep 2000
+    Goto edgeswarm_supervisor_install_retry_v3
+  ${EndIf}
+
+  MessageBox MB_ICONSTOP \
+    "EdgeSwarm background supervisor configuration failed after 3 attempts. Exit code: $2$\r$\n$\r$\nDiagnostic logs:$\r$\n$INSTDIR\supervisor-install.stdout.log$\r$\n$INSTDIR\supervisor-install.stderr.log"
+  Abort
+
+edgeswarm_supervisor_install_ready_v3:
   DetailPrint "EdgeSwarm background supervisor configured."
 !macroend
 
