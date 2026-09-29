@@ -779,9 +779,88 @@ if ($existingSupervisorTask) {
     Write-Host "SUPERVISOR_TASK_REGISTERED=true"
 }
 
-if (-not (Get-Process "edgeswarm-node-supervisor" -ErrorAction SilentlyContinue)) {
-    Start-ScheduledTask -TaskName $TaskName
+# WINDOWS_SUPERVISOR_TASK_SETTLE_V2
+#
+# The preinstall hook may have only just stopped the preserved
+# Scheduled Task. Wait until Task Scheduler no longer reports it
+# running and the exact installed supervisor process is gone before
+# continuing with post-install configuration.
+function Get-InstalledSupervisorProcessesV2 {
+    @(
+        Get-CimInstance `
+            Win32_Process `
+            -Filter "Name='edgeswarm-node-supervisor.exe'" `
+            -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.ExecutablePath -and
+            ([string]$_.ExecutablePath).Equals(
+                $SupervisorPath,
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        }
+    )
 }
+
+if ($existingSupervisorTask) {
+    $SupervisorSettleDeadline =
+        (Get-Date).AddSeconds(20)
+
+    do {
+        $SupervisorTaskState =
+            (
+                Get-ScheduledTask `
+                    -TaskName $TaskName `
+                    -ErrorAction SilentlyContinue
+            ).State
+
+        $SupervisorProcesses =
+            @(Get-InstalledSupervisorProcessesV2)
+
+        if (
+            $SupervisorTaskState -ne "Running" -and
+            $SupervisorProcesses.Count -eq 0
+        ) {
+            break
+        }
+
+        Start-Sleep `
+            -Milliseconds 250
+    }
+    while (
+        (Get-Date) -lt
+        $SupervisorSettleDeadline
+    )
+
+    $SupervisorTaskState =
+        (
+            Get-ScheduledTask `
+                -TaskName $TaskName `
+                -ErrorAction SilentlyContinue
+        ).State
+
+    $SupervisorProcesses =
+        @(Get-InstalledSupervisorProcessesV2)
+
+    Write-Host `
+        "SUPERVISOR_TASK_SETTLED_STATE=$SupervisorTaskState"
+
+    Write-Host `
+        "SUPERVISOR_PROCESS_SETTLED_COUNT=$($SupervisorProcesses.Count)"
+
+    if ($SupervisorTaskState -eq "Running") {
+        throw "supervisor_task_settle_timeout"
+    }
+
+    if ($SupervisorProcesses.Count -ne 0) {
+        throw "supervisor_process_settle_timeout"
+    }
+
+    Write-Host "SUPERVISOR_TASK_SETTLE=PASS"
+}
+
+# Do not start the supervisor yet.
+# update-pause.lock intentionally remains active until all
+# post-install task configuration has finished.
 # WINDOWS_NATIVE_HIDDEN_UPDATER_RUNNER_V2
 #
 # Task Scheduler executes a GUI-subsystem native runner rather than
@@ -937,16 +1016,99 @@ Remove-Item `
 
 Write-Host "UPDATE_PAUSE_LOCK_CLEARED=true"
 
-if (-not (
-    Get-Process `
-        "edgeswarm-node-supervisor" `
-        -ErrorAction SilentlyContinue
-)) {
-    Start-ScheduledTask `
-        -TaskName $TaskName
+# WINDOWS_SUPERVISOR_START_RETRY_V2
+#
+# The update pause lock is now gone. Start the preserved/new task
+# only after the old instance has settled. Retry bounded transient
+# Task Scheduler failures and verify the actual installed process.
+$SupervisorAlreadyRunning =
+    @(Get-InstalledSupervisorProcessesV2).Count -gt 0
+
+if (-not $SupervisorAlreadyRunning) {
+    $SupervisorStartSucceeded =
+        $false
+
+    $SupervisorStartLastError =
+        ""
+
+    for (
+        $SupervisorStartAttempt = 1;
+        $SupervisorStartAttempt -le 5;
+        $SupervisorStartAttempt++
+    ) {
+        try {
+            Start-ScheduledTask `
+                -TaskName $TaskName `
+                -ErrorAction Stop
+
+            $SupervisorProcessDeadline =
+                (Get-Date).AddSeconds(5)
+
+            do {
+                $SupervisorProcesses =
+                    @(Get-InstalledSupervisorProcessesV2)
+
+                if ($SupervisorProcesses.Count -gt 0) {
+                    $SupervisorStartSucceeded =
+                        $true
+
+                    break
+                }
+
+                Start-Sleep `
+                    -Milliseconds 250
+            }
+            while (
+                (Get-Date) -lt
+                $SupervisorProcessDeadline
+            )
+
+            if ($SupervisorStartSucceeded) {
+                Write-Host `
+                    "SUPERVISOR_TASK_START_ATTEMPT=$SupervisorStartAttempt"
+
+                break
+            }
+
+            $SupervisorStartLastError =
+                "supervisor_process_not_observed_after_start"
+        }
+        catch {
+            $SupervisorStartLastError =
+                $_.Exception.Message
+        }
+
+        Write-Host `
+            "SUPERVISOR_TASK_START_RETRY=$SupervisorStartAttempt error=$SupervisorStartLastError"
+
+        if ($SupervisorStartAttempt -lt 5) {
+            Start-Sleep `
+                -Seconds 1
+        }
+    }
+
+    if (-not $SupervisorStartSucceeded) {
+        throw `
+            "supervisor_task_start_failed_after_retries:$SupervisorStartLastError"
+    }
 
     Write-Host "SUPERVISOR_TASK_STARTED_AFTER_INSTALL=true"
 }
+else {
+    Write-Host "SUPERVISOR_TASK_ALREADY_RUNNING_AFTER_INSTALL=true"
+}
+
+$SupervisorProcesses =
+    @(Get-InstalledSupervisorProcessesV2)
+
+Write-Host `
+    "SUPERVISOR_PROCESS_FINAL_COUNT=$($SupervisorProcesses.Count)"
+
+if ($SupervisorProcesses.Count -eq 0) {
+    throw "supervisor_process_missing_after_install"
+}
+
+Write-Host "SUPERVISOR_INSTALL_LIFECYCLE=PASS"
 
 # WINDOWS_V160_TO_V161_GUI_RELAUNCH_BRIDGE_V1
 #
