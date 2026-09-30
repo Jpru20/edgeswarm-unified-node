@@ -220,4 +220,22 @@ edgeswarm_supervisor_install_ready_v3:
   ${EndIf}
 
   DetailPrint "EdgeSwarm background supervisor stopped."
+
+  ; WINDOWS_UNINSTALL_AUTH_CLEANUP_V1
+  ;
+  ; A real uninstall must not leave a restorable authenticated
+  ; session or wallet restart credential behind. Keep models,
+  ; identity, certificates and other provider data intact.
+  DetailPrint "Clearing EdgeSwarm authentication state..."
+
+  Delete "$LOCALAPPDATA\EdgeSwarm\unified-node\auth_session.json"
+  Delete "$LOCALAPPDATA\EdgeSwarm\unified-node\.auth_session.*.tmp"
+  Delete "$LOCALAPPDATA\EdgeSwarm\unified-node\wallet_restart_credential.dpapi"
+
+  ; Remove persisted runtime intent/status as well. Missing desired
+  ; state fails closed to user_stopped on a later reinstall.
+  Delete "$LOCALAPPDATA\EdgeSwarm\unified-node\desired_state.json"
+  Delete "$LOCALAPPDATA\EdgeSwarm\unified-node\node_status.json"
+
+  DetailPrint "EdgeSwarm authentication state cleared."
 !macroend

@@ -10,6 +10,9 @@ use edgeswarm_unified_node_lib::core::desired_state::{
 use fs2::FileExt;
 
 #[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
 use std::{
     fs::{self, File, OpenOptions},
     process::{Child, Command, Stdio},
@@ -45,6 +48,10 @@ const POLL_INTERVAL_V1: Duration =
 #[cfg(target_os = "windows")]
 const STOP_GRACE_V1: Duration =
     Duration::from_secs(15);
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW_V1: u32 =
+    0x08000000;
 
 #[cfg(target_os = "windows")]
 const STABLE_RUNTIME_V1: Duration =
@@ -327,6 +334,83 @@ fn spawn_headless_v1(
 }
 
 #[cfg(target_os = "windows")]
+fn force_stop_worker_tree_v1(
+    worker: &mut Child,
+) -> Result<(), String> {
+    let worker_pid =
+        worker.id();
+
+    let taskkill =
+        std::env::var_os(
+            "SystemRoot"
+        )
+        .map(
+            std::path::PathBuf::from
+        )
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(
+                r"C:\Windows"
+            )
+        })
+        .join("System32")
+        .join("taskkill.exe");
+
+    if !taskkill.is_file() {
+        return Err(
+            "supervisor_taskkill_binary_missing"
+                .into()
+        );
+    }
+
+    let status =
+        Command::new(taskkill)
+            .arg("/PID")
+            .arg(
+                worker_pid.to_string()
+            )
+            .arg("/T")
+            .arg("/F")
+            .creation_flags(
+                CREATE_NO_WINDOW_V1
+            )
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|_| {
+                "supervisor_worker_tree_kill_launch_failed"
+                    .to_string()
+            })?;
+
+    if !status.success() {
+        if matches!(
+            worker.try_wait(),
+            Ok(Some(_))
+        ) {
+            println!(
+                "SUPERVISOR_WORKER_TREE_ALREADY_EXITED=true"
+            );
+
+            return Ok(());
+        }
+
+        return Err(format!(
+            "supervisor_worker_tree_kill_exit_{}",
+            status.code().unwrap_or(-1)
+        ));
+    }
+
+    let _ =
+        worker.wait();
+
+    println!(
+        "SUPERVISOR_WORKER_TREE_FORCED_STOP_PID={worker_pid}"
+    );
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
 fn restart_delay_v1(
     failures: usize,
 ) -> Duration {
@@ -507,11 +591,9 @@ fn run_supervisor_v1(
                                 "SUPERVISOR_STOP_GRACE_EXPIRED=true"
                             );
 
-                            let _ =
-                                worker.kill();
-
-                            let _ =
-                                worker.wait();
+                            force_stop_worker_tree_v1(
+                                worker
+                            )?;
 
                             println!(
                                 "SUPERVISOR_HEADLESS_FORCED_STOP=true"

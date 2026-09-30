@@ -95,6 +95,41 @@ type NodeState = {
   models: ModelState[];
 };
 
+function nodeActionErrorMessage(
+  error: unknown,
+  starting: boolean,
+): string {
+  const code = String(error);
+
+  if (
+    starting &&
+    code.includes(
+      "node_start_restart_credential_unavailable",
+    )
+  ) {
+    return (
+      "Unable to start node: saved restart credential " +
+      "is unavailable. Please sign in again."
+    );
+  }
+
+  if (
+    starting &&
+    code.includes(
+      "node_start_requires_authenticated_session",
+    )
+  ) {
+    return (
+      "Unable to start node: your session is no longer " +
+      "authenticated. Please sign in again."
+    );
+  }
+
+  return starting
+    ? "Unable to start node. Please try again."
+    : "Unable to stop node. Please try again.";
+}
+
 function App() {
   const [appVersion, setAppVersion] = useState("");
 
@@ -125,6 +160,8 @@ function App() {
       modelDownload: null,
     });
   const [nodeActionBusy, setNodeActionBusy] = useState(false);
+  const [nodeActionError, setNodeActionError] = useState("");
+  const [signOutBusy, setSignOutBusy] = useState(false);
 
   // PROVIDER_LEDGER_UI_V1
   const [totalEarnedUsd, setTotalEarnedUsd] = useState(0);
@@ -234,22 +271,74 @@ function App() {
   }, []);
 
   async function toggleNode() {
+    const starting =
+      !serviceStatus.desiredRunning;
+
     setNodeActionBusy(true);
+    setNodeActionError("");
 
     try {
-      const command = serviceStatus.desiredRunning
-        ? "stop_node"
-        : "start_node";
+      const command = starting
+        ? "start_node"
+        : "stop_node";
 
       const current =
         await invoke<NodeServiceStatus>(command);
 
       setServiceStatus(current);
-      setStatus("");
+      setNodeActionError("");
     } catch (error) {
-      setStatus(String(error));
+      console.error(
+        "NODE_ACTION_FAILED",
+        String(error),
+      );
+
+      setNodeActionError(
+        nodeActionErrorMessage(
+          error,
+          starting,
+        ),
+      );
     } finally {
       setNodeActionBusy(false);
+    }
+  }
+
+  async function handleSignOut() {
+    setSignOutBusy(true);
+    setNodeActionError("");
+
+    try {
+      await invoke("auth_logout");
+
+      setProviderEmail("");
+      setPassword("");
+      setMfaCode("");
+      setNodeState(null);
+      setTotalEarnedUsd(0);
+
+      setServiceStatus({
+        running: false,
+        desiredRunning: false,
+        stopping: false,
+        lastError: null,
+        logs: [],
+        modelDownload: null,
+      });
+
+      setStatus("");
+      setScreen("login");
+    } catch (error) {
+      console.error(
+        "AUTH_LOGOUT_FAILED",
+        String(error),
+      );
+
+      setNodeActionError(
+        "Unable to sign out. Please try again.",
+      );
+    } finally {
+      setSignOutBusy(false);
     }
   }
 
@@ -659,6 +748,15 @@ function App() {
           </button>
         </section>
 
+        {nodeActionError && (
+          <div
+            className="swarm-node-action-error"
+            role="alert"
+          >
+            {nodeActionError}
+          </div>
+        )}
+
         {serviceStatus.certification?.state === "running" && (
           <section className="swarm-card swarm-certification-card">
             <div className="swarm-card-heading">
@@ -944,7 +1042,21 @@ function App() {
         </details>
 
         <footer className="swarm-footer">
-          <span>{providerEmail}</span>
+          <div className="swarm-footer-account">
+            <span>{providerEmail}</span>
+
+            <button
+              className="swarm-signout-button"
+              type="button"
+              onClick={() => void handleSignOut()}
+              disabled={signOutBusy}
+            >
+              {signOutBusy
+                ? "Signing out..."
+                : "Sign out"}
+            </button>
+          </div>
+
           <span>Swarm v{appVersion || "..."}</span>
         </footer>
       </div>

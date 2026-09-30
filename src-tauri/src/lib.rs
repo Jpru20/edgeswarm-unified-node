@@ -531,6 +531,18 @@ mod desktop {
 
                     session.save_secure()?;
 
+                    #[cfg(target_os = "windows")]
+                    {
+                        println!(
+                            "AUTH_VERIFY_STAGE=windows_restart_credential"
+                        );
+
+                        crate::core::windows_restart_credential::
+                            persist_windows_restart_credential_v1(
+                                wallet_password.as_str()
+                            )?;
+                    }
+
                     #[cfg(target_os = "macos")]
                     {
                         println!(
@@ -612,6 +624,43 @@ mod desktop {
         Ok(AuthVerifyResult {
             email: verified_email,
         })
+    }
+
+    #[tauri::command]
+    fn auth_logout(
+        auth_state: tauri::State<'_, Mutex<AppAuthState>>,
+    ) -> Result<(), String> {
+        // Sign Out always removes provider availability first.
+        persist_desired_node_state_v1(
+            DesiredNodeStateV1::UserStopped,
+            "user_logout",
+        )?;
+
+        // Remove the durable session before clearing process state.
+        // Once this succeeds, a future app launch cannot auth_restore.
+        AuthSession::delete_default()?;
+
+        {
+            let mut state = auth_state
+                .lock()
+                .map_err(|_| {
+                    "auth_state_lock_failed".to_string()
+                })?;
+
+            state.pending_email = None;
+            state.pending_access_token = None;
+            state.pending_factor_id = None;
+            state.pending_challenge_id = None;
+            state.authenticated_email = None;
+
+            // Zeroizing<String> erases its contents when dropped.
+            state.wallet_password = None;
+        }
+
+        println!("AUTH_LOGOUT_LOCAL_SESSION_REMOVED=true");
+        println!("AUTH_LOGOUT_PROVIDER_STOP_REQUESTED=true");
+
+        Ok(())
     }
 
     #[cfg(not(any(
@@ -751,31 +800,73 @@ mod desktop {
         auth_state: tauri::State<'_, Mutex<AppAuthState>>,
         runtime: tauri::State<'_, NodeRuntimeState>,
     ) -> Result<NodeServiceStatus, String> {
-        let wallet_password = {
+        let (authenticated, wallet_password) = {
             let state = auth_state
                 .lock()
-                .map_err(|_| "auth_state_lock_failed".to_string())?;
-
-            if state.authenticated_email.is_none() {
-                return Err(
-                    "node_start_requires_authenticated_session".into()
-                );
-            }
-
-            let password = state
-                .wallet_password
-                .as_ref()
-                .ok_or_else(|| {
-                    "node_start_wallet_password_missing".to_string()
+                .map_err(|_| {
+                    "auth_state_lock_failed".to_string()
                 })?;
 
-            Zeroizing::new(password.as_str().to_owned())
+            (
+                state.authenticated_email.is_some(),
+                state.wallet_password
+                    .as_ref()
+                    .map(|password| {
+                        Zeroizing::new(
+                            password.as_str().to_owned()
+                        )
+                    }),
+            )
         };
 
-        crate::core::windows_restart_credential::
-            persist_windows_restart_credential_v1(
-                wallet_password.as_str(),
-            )?;
+        let persisted_credential_available =
+            if authenticated && wallet_password.is_none() {
+                match crate::core::
+                    windows_restart_credential::
+                    read_windows_restart_credential_v1()
+                {
+                    Ok(credential) => {
+                        drop(credential);
+                        true
+                    }
+
+                    Err(error) => {
+                        println!(
+                            "NODE_START_WINDOWS_RESTART_CREDENTIAL_ERROR={error}"
+                        );
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+
+        let action =
+            crate::core::start_credential_policy::
+                decide_start_credential_action_v1(
+                    authenticated,
+                    wallet_password.is_some(),
+                    persisted_credential_available,
+                )?;
+
+        if action
+            == crate::core::start_credential_policy::
+                StartCredentialActionV1::
+                    RefreshPersistedCredential
+        {
+            let password =
+                wallet_password
+                    .as_ref()
+                    .ok_or_else(|| {
+                        "node_start_wallet_password_missing"
+                            .to_string()
+                    })?;
+
+            crate::core::windows_restart_credential::
+                persist_windows_restart_credential_v1(
+                    password.as_str(),
+                )?;
+        }
 
         crate::core::windows_supervisor_task::
             ensure_windows_supervisor_task_v1()?;
@@ -795,37 +886,70 @@ mod desktop {
         auth_state: tauri::State<'_, Mutex<AppAuthState>>,
         runtime: tauri::State<'_, NodeRuntimeState>,
     ) -> Result<NodeServiceStatus, String> {
-        let wallet_password = {
+        let (authenticated, wallet_password) = {
             let state = auth_state
                 .lock()
                 .map_err(|_| {
                     "auth_state_lock_failed".to_string()
                 })?;
 
-            if state.authenticated_email.is_none() {
-                return Err(
-                    "node_start_requires_authenticated_session"
-                        .into()
-                );
-            }
-
-            let password =
+            (
+                state.authenticated_email.is_some(),
                 state.wallet_password
+                    .as_ref()
+                    .map(|password| {
+                        Zeroizing::new(
+                            password.as_str().to_owned()
+                        )
+                    }),
+            )
+        };
+
+        let persisted_credential_available =
+            if authenticated && wallet_password.is_none() {
+                match crate::core::
+                    macos_supervisor_agent::
+                    check_restart_credential_v2()
+                {
+                    Ok(()) => true,
+
+                    Err(error) => {
+                        println!(
+                            "NODE_START_MACOS_RESTART_CREDENTIAL_ERROR={error}"
+                        );
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+
+        let action =
+            crate::core::start_credential_policy::
+                decide_start_credential_action_v1(
+                    authenticated,
+                    wallet_password.is_some(),
+                    persisted_credential_available,
+                )?;
+
+        if action
+            == crate::core::start_credential_policy::
+                StartCredentialActionV1::
+                    RefreshPersistedCredential
+        {
+            let password =
+                wallet_password
                     .as_ref()
                     .ok_or_else(|| {
                         "node_start_wallet_password_missing"
                             .to_string()
                     })?;
 
-            Zeroizing::new(
-                password.as_str().to_owned()
-            )
-        };
-
-        crate::core::macos_supervisor_agent::
-            persist_restart_credential_v2(
-                wallet_password.as_str()
-            )?;
+            crate::core::macos_supervisor_agent::
+                persist_restart_credential_v2(
+                    password.as_str()
+                )?;
+        }
 
         crate::core::macos_supervisor_agent::
             ensure_launch_agent_v1()?;
@@ -1627,6 +1751,7 @@ mod desktop {
                 auth_restore,
                 auth_begin,
                 auth_verify,
+                auth_logout,
                 provider_ledger_sync,
                 node_service_status,
                 request_capacity_test,

@@ -247,6 +247,39 @@ fn xml_escape(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+pub fn check_restart_credential_v2(
+) -> Result<(), String> {
+    let broker =
+        ensure_credential_broker_v2()?;
+
+    let status =
+        Command::new(broker)
+            .arg(
+                "--emit-restart-credential"
+            )
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|_| {
+                "macos_credential_broker_check_launch_failed"
+                    .to_string()
+            })?;
+
+    if !status.success() {
+        return Err(
+            "macos_restart_credential_unavailable"
+                .into()
+        );
+    }
+
+    println!(
+        "MACOS_RESTART_CREDENTIAL_CHECK=PASS"
+    );
+
+    Ok(())
+}
+
 pub fn persist_restart_credential_v2(
     password: &str,
 ) -> Result<(), String> {

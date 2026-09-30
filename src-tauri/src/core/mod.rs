@@ -34,6 +34,7 @@ pub mod production_prompt;
 pub mod production_task_http;
 pub mod real_capacity_certification;
 pub mod result_signing;
+pub mod start_credential_policy;
 pub mod task_client;
 pub mod task_state;
 pub mod wallet_account;

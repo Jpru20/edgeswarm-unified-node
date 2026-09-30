@@ -3,6 +3,7 @@ use reqwest::blocking::Client;
 use serde_json::Value;
 use std::{
     env,
+    net::TcpListener,
     path::PathBuf,
     process::{Child, Command, Stdio},
     thread,
@@ -119,9 +120,32 @@ pub struct ManagedLlamaProcess {
     acceleration: String,
 }
 
+fn ensure_managed_endpoint_available_v1(
+    host: &str,
+    port: u16,
+) -> Result<(), String> {
+    let listener =
+        TcpListener::bind(
+            (host, port)
+        )
+        .map_err(|_| {
+            "llama_server_managed_port_in_use"
+                .to_string()
+        })?;
+
+    drop(listener);
+
+    Ok(())
+}
+
 impl ManagedLlamaProcess {
     pub fn start(config: &LlamaProcessConfig) -> Result<Self, String> {
         validate_config(config)?;
+
+        ensure_managed_endpoint_available_v1(
+            &config.host,
+            config.port,
+        )?;
 
         let mut command = Command::new(&config.executable);
 
@@ -500,5 +524,29 @@ mod tests {
         } else {
             assert_eq!(runtime_executable_filename_v1(), "llama-server");
         }
+    }
+
+    #[test]
+    fn managed_runtime_rejects_occupied_port_v1() {
+        let listener =
+            TcpListener::bind(
+                ("127.0.0.1", 0)
+            )
+            .unwrap();
+
+        let port =
+            listener
+                .local_addr()
+                .unwrap()
+                .port();
+
+        assert_eq!(
+            ensure_managed_endpoint_available_v1(
+                "127.0.0.1",
+                port,
+            )
+            .unwrap_err(),
+            "llama_server_managed_port_in_use"
+        );
     }
 }

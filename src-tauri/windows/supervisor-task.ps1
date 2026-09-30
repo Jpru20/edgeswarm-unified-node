@@ -779,12 +779,21 @@ if ($existingSupervisorTask) {
     Write-Host "SUPERVISOR_TASK_REGISTERED=true"
 }
 
-# WINDOWS_SUPERVISOR_TASK_SETTLE_V2
+# WINDOWS_SUPERVISOR_TASK_SETTLE_V3
 #
-# The preinstall hook may have only just stopped the preserved
-# Scheduled Task. Wait until Task Scheduler no longer reports it
-# running and the exact installed supervisor process is gone before
-# continuing with post-install configuration.
+# Settlement is required only while resuming an actual application
+# update. Normal Start Node calls may enter Install mode while the
+# supervisor is intentionally already running; that is healthy and
+# must not be treated as a settle failure.
+$UpdatePauseLockPath =
+    Join-Path `
+        (Split-Path -Parent $AppPath) `
+        "update-pause.lock"
+
+$SupervisorSettleRequired =
+    $existingSupervisorTask -and
+    (Test-Path -LiteralPath $UpdatePauseLockPath)
+
 function Get-InstalledSupervisorProcessesV2 {
     @(
         Get-CimInstance `
@@ -801,7 +810,9 @@ function Get-InstalledSupervisorProcessesV2 {
     )
 }
 
-if ($existingSupervisorTask) {
+if ($SupervisorSettleRequired) {
+    Write-Host "SUPERVISOR_TASK_SETTLE_REQUIRED_FOR_UPDATE=true"
+
     $SupervisorSettleDeadline =
         (Get-Date).AddSeconds(20)
 
@@ -856,6 +867,10 @@ if ($existingSupervisorTask) {
     }
 
     Write-Host "SUPERVISOR_TASK_SETTLE=PASS"
+}
+elseif ($existingSupervisorTask) {
+    Write-Host "SUPERVISOR_TASK_SETTLE_REQUIRED_FOR_UPDATE=false"
+    Write-Host "SUPERVISOR_TASK_SETTLE_SKIPPED_ACTIVE_RUNTIME=true"
 }
 
 # Do not start the supervisor yet.

@@ -360,6 +360,32 @@ impl AuthSession {
         result
     }
 
+    fn delete_at_path_v1(
+        path: &Path,
+    ) -> Result<(), String> {
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+
+            Err(error)
+                if error.kind()
+                    == std::io::ErrorKind::NotFound =>
+            {
+                Ok(())
+            }
+
+            Err(error) => Err(format!(
+                "auth_session_delete_failed:{}",
+                error.kind()
+            )),
+        }
+    }
+
+    pub fn delete_default() -> Result<(), String> {
+        Self::delete_at_path_v1(
+            &Self::default_path()
+        )
+    }
+
     pub fn summary(&self) -> AuthSessionSummary {
         AuthSessionSummary {
             auth_file_exists: self.path.is_file(),
@@ -487,6 +513,44 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn delete_persisted_session_is_idempotent_v1() {
+        let root = std::env::temp_dir().join(
+            format!(
+                "edgeswarm-auth-delete-test-{}",
+                std::process::id()
+            )
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let path =
+            root.join("auth_session.json");
+
+        fs::write(
+            &path,
+            b"{\"test\":true}\n",
+        )
+        .unwrap();
+
+        assert!(path.is_file());
+
+        AuthSession::
+            delete_at_path_v1(&path)
+            .unwrap();
+
+        assert!(!path.exists());
+
+        // Missing is also success so Sign Out can be retried safely.
+        AuthSession::
+            delete_at_path_v1(&path)
+            .unwrap();
+
+        let _ =
+            fs::remove_dir_all(&root);
     }
 
     #[test]

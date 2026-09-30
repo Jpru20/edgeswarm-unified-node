@@ -587,6 +587,16 @@ button:disabled { cursor: default; }
   cursor: pointer;
 }
 
+.swarm-node-action-error {
+  margin: -4px 4px 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(185, 28, 28, 0.08);
+  color: #b42318;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .swarm-primary-button.stop {
   background: #24242c;
 }
@@ -799,6 +809,26 @@ button:disabled { cursor: default; }
   padding: 18px 4px 0;
   color: #8b8b94;
   font-size: 11px;
+}
+
+.swarm-footer-account {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.swarm-signout-button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: #6754e8;
+  font: inherit;
+  cursor: pointer;
+}
+
+.swarm-signout-button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 @media (max-width: 560px) {
