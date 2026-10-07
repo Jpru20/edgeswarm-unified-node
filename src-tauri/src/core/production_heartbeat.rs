@@ -280,6 +280,7 @@ pub struct ProductionHeartbeatMetadataV1 {
     pub package_type: String,
     pub runtime_sha256: Option<String>,
     pub public_release_safe: bool,
+    pub data_scraper_ssrf_guard_v1: bool,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub update_lifecycle: Option<ProductionUpdateLifecycleV1>,
@@ -594,6 +595,9 @@ impl ProductionHeartbeatV1 {
 
                 public_release_safe:
                     false,
+
+                data_scraper_ssrf_guard_v1:
+                    true,
 
                 update_lifecycle,
 

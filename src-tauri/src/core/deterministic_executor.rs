@@ -1,10 +1,19 @@
 use crate::core::task_client::TaskEnvelope;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use regex::Regex;
-use reqwest::blocking::Client;
+use reqwest::{
+    blocking::Client,
+    header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION},
+    redirect::Policy,
+    Url,
+};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::time::{Duration, Instant};
+use std::{
+    io::Read,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
+    time::{Duration, Instant},
+};
 
 #[derive(Debug, Clone)]
 pub struct DeterministicResult {
@@ -510,22 +519,331 @@ fn compute(task: &TaskEnvelope) -> String {
     }
 }
 
+const SCRAPE_MAX_BODY_BYTES_V1: u64 = 2 * 1024 * 1024;
+const SCRAPE_MAX_REDIRECTS_V1: usize = 5;
+
+fn scrape_ipv4_public_v1(address: Ipv4Addr) -> bool {
+    let [a, b, c, _d] = address.octets();
+
+    if a == 0 || a == 10 || a == 127 || a >= 224 {
+        return false;
+    }
+
+    if a == 100 && (64..=127).contains(&b) {
+        return false;
+    }
+
+    if a == 169 && b == 254 {
+        return false;
+    }
+
+    if a == 172 && (16..=31).contains(&b) {
+        return false;
+    }
+
+    if a == 192 && b == 168 {
+        return false;
+    }
+
+    if a == 192 && b == 0 && c == 0 {
+        return false;
+    }
+
+    if a == 192 && b == 0 && c == 2 {
+        return false;
+    }
+
+    if a == 192 && b == 88 && c == 99 {
+        return false;
+    }
+
+    if a == 198 && (b == 18 || b == 19) {
+        return false;
+    }
+
+    if a == 198 && b == 51 && c == 100 {
+        return false;
+    }
+
+    if a == 203 && b == 0 && c == 113 {
+        return false;
+    }
+
+    true
+}
+
+fn scrape_ipv6_public_v1(address: Ipv6Addr) -> bool {
+    if address.is_unspecified()
+        || address.is_loopback()
+        || address.is_multicast()
+    {
+        return false;
+    }
+
+    let segments = address.segments();
+
+    if segments[0] & 0xfe00 == 0xfc00 {
+        return false;
+    }
+
+    if segments[0] & 0xffc0 == 0xfe80 {
+        return false;
+    }
+
+    if segments[0] == 0x2001 && segments[1] == 0x0db8 {
+        return false;
+    }
+
+    if segments[..5] == [0, 0, 0, 0, 0] {
+        if segments[5] == 0xffff {
+            let v4 = Ipv4Addr::new(
+                (segments[6] >> 8) as u8,
+                segments[6] as u8,
+                (segments[7] >> 8) as u8,
+                segments[7] as u8,
+            );
+
+            return scrape_ipv4_public_v1(v4);
+        }
+
+        if segments[5] == 0 {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn scrape_ip_public_v1(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(value) => scrape_ipv4_public_v1(value),
+        IpAddr::V6(value) => scrape_ipv6_public_v1(value),
+    }
+}
+
+fn scrape_hostname_reserved_v1(host: &str) -> bool {
+    let normalized = host
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+
+    normalized == "localhost"
+        || normalized.ends_with(".localhost")
+        || normalized == "localhost.localdomain"
+        || normalized.ends_with(".local")
+        || normalized.ends_with(".internal")
+        || normalized.ends_with(".lan")
+        || normalized.ends_with(".home")
+        || normalized.ends_with(".home.arpa")
+}
+
+fn validate_scrape_url_v1(
+    raw_url: &str,
+) -> Result<(Url, Option<(String, SocketAddr)>), String> {
+    let url = Url::parse(raw_url)
+        .map_err(|_| "scrape_url_invalid".to_string())?;
+
+    if url.scheme() != "https" {
+        return Err("scrape_url_https_required".into());
+    }
+
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("scrape_url_userinfo_not_allowed".into());
+    }
+
+    let host = url
+        .host_str()
+        .ok_or_else(|| "scrape_url_host_missing".to_string())?
+        .trim()
+        .to_string();
+
+    if host.is_empty() || scrape_hostname_reserved_v1(&host) {
+        return Err("scrape_url_reserved_host".into());
+    }
+
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| "scrape_url_port_missing".to_string())?;
+
+    if port != 443 {
+        return Err("scrape_url_port_not_allowed".into());
+    }
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if !scrape_ip_public_v1(ip) {
+            return Err("scrape_url_non_public_address".into());
+        }
+
+        return Ok((url, None));
+    }
+
+    let resolved = (host.as_str(), port)
+        .to_socket_addrs()
+        .map_err(|_| "scrape_dns_resolution_failed".to_string())?
+        .collect::<Vec<_>>();
+
+    if resolved.is_empty() {
+        return Err("scrape_dns_resolution_empty".into());
+    }
+
+    if resolved
+        .iter()
+        .any(|address| !scrape_ip_public_v1(address.ip()))
+    {
+        return Err("scrape_url_resolves_non_public_address".into());
+    }
+
+    Ok((
+        url,
+        Some((
+            host,
+            resolved[0],
+        )),
+    ))
+}
+
+fn scrape_content_type_allowed_v1(value: &str) -> bool {
+    let content_type = value
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+
+    content_type.starts_with("text/")
+        || matches!(
+            content_type.as_str(),
+            "application/json"
+                | "application/xml"
+                | "application/xhtml+xml"
+                | "application/rss+xml"
+                | "application/atom+xml"
+        )
+}
+
+fn fetch_public_scrape_text_v1(
+    raw_url: &str,
+) -> Result<(String, String), String> {
+    let mut current = Url::parse(raw_url)
+        .map_err(|_| "scrape_url_invalid".to_string())?;
+
+    for redirect_index in 0..=SCRAPE_MAX_REDIRECTS_V1 {
+        let (validated_url, pinned_address) =
+            validate_scrape_url_v1(current.as_str())?;
+
+        let mut client_builder = Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(15))
+            .redirect(Policy::none())
+            .no_proxy()
+            .user_agent(concat!(
+                "Mozilla/5.0 EdgeSwarmNode/",
+                env!("CARGO_PKG_VERSION")
+            ));
+
+        if let Some((host, address)) = pinned_address {
+            client_builder = client_builder.resolve(&host, address);
+        }
+
+        let client = client_builder
+            .build()
+            .map_err(|_| "scrape_http_client_failed".to_string())?;
+
+        let response = client
+            .get(validated_url.clone())
+            .send()
+            .map_err(|error| format!("scrape_network_failed:{error}"))?;
+
+        if response.status().is_redirection() {
+            if redirect_index >= SCRAPE_MAX_REDIRECTS_V1 {
+                return Err("scrape_redirect_limit_exceeded".into());
+            }
+
+            let location = response
+                .headers()
+                .get(LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| "scrape_redirect_location_missing".to_string())?;
+
+            current = validated_url
+                .join(location)
+                .map_err(|_| "scrape_redirect_url_invalid".to_string())?;
+
+            continue;
+        }
+
+        if response.status().as_u16() != 200 {
+            return Err(format!(
+                "scrape_http_status:{}",
+                response.status().as_u16()
+            ));
+        }
+
+        if let Some(content_type) = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+        {
+            if !scrape_content_type_allowed_v1(content_type) {
+                return Err("scrape_response_content_type_not_allowed".into());
+            }
+        }
+
+        if let Some(content_length) = response
+            .headers()
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            if content_length > SCRAPE_MAX_BODY_BYTES_V1 {
+                return Err("scrape_response_too_large".into());
+            }
+        }
+
+        let mut bytes = Vec::new();
+        let mut limited_reader =
+            response.take(SCRAPE_MAX_BODY_BYTES_V1 + 1);
+
+        limited_reader
+            .read_to_end(&mut bytes)
+            .map_err(|_| "scrape_response_read_failed".to_string())?;
+
+        if bytes.len() as u64 > SCRAPE_MAX_BODY_BYTES_V1 {
+            return Err("scrape_response_too_large".into());
+        }
+
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+
+        return Ok((
+            validated_url.to_string(),
+            text,
+        ));
+    }
+
+    Err("scrape_redirect_limit_exceeded".into())
+}
+
 fn scrape(prompt: &str) -> String {
-    let url = Regex::new(r"https?://[^\s)>\]]+").ok()
-        .and_then(|r| r.find(prompt))
-        .map(|m| m.as_str().trim_end_matches(&['.', ','][..]))
-        .unwrap_or(prompt.trim());
+    let url = Regex::new(r"https://[^\s)>\]]+")
+        .ok()
+        .and_then(|regex| regex.find(prompt))
+        .map(|matched| {
+            matched
+                .as_str()
+                .trim_end_matches(&['.', ','][..])
+                .to_string()
+        });
 
-    let result = Client::builder()
-        .timeout(Duration::from_secs(15))
-        .user_agent(concat!("Mozilla/5.0 EdgeSwarmNode/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .and_then(|c| c.get(url).send());
+    let Some(url) = url else {
+        return json!({
+            "error":"scrape_failed",
+            "message":"scrape_url_https_required"
+        })
+        .to_string();
+    };
 
-    match result {
-        Ok(response) if response.status().as_u16() == 200 => {
-            let mut text = response.text().unwrap_or_default();
-
+    match fetch_public_scrape_text_v1(&url) {
+        Ok((source_url, mut text)) => {
             for pattern in [
                 r"(?is)<script\b[^>]*>.*?</script>",
                 r"(?is)<style\b[^>]*>.*?</style>",
@@ -536,7 +854,8 @@ fn scrape(prompt: &str) -> String {
                 }
             }
 
-            let clean = text.split_whitespace()
+            let clean = text
+                .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ")
                 .chars()
@@ -544,21 +863,32 @@ fn scrape(prompt: &str) -> String {
                 .collect::<String>();
 
             json!({
-                "source_url":url,
+                "source_url":source_url,
                 "content":clean,
                 "node_attestation":"EdgeSwarm macOS/Linux public beta deterministic node"
-            }).to_string()
+            })
+            .to_string()
         }
-        Ok(response) => json!({
-            "error":"scrape_http_error",
-            "statusCode":response.status().as_u16(),
-            "source_url":url
-        }).to_string(),
-        Err(error) => json!({
-            "error":"scrape_failed",
-            "message":error.to_string(),
-            "source_url":url
-        }).to_string(),
+        Err(error) => {
+            if let Some(status_code) =
+                error.strip_prefix("scrape_http_status:")
+            {
+                return json!({
+                    "error":"scrape_http_error",
+                    "statusCode":
+                        status_code.parse::<u16>().unwrap_or(0),
+                    "source_url":url
+                })
+                .to_string();
+            }
+
+            json!({
+                "error":"scrape_failed",
+                "message":error,
+                "source_url":url
+            })
+            .to_string()
+        }
     }
 }
 
@@ -667,6 +997,127 @@ trailing text"#;
     }
 }
 
+
+#[cfg(test)]
+mod scrape_security_tests {
+    use super::*;
+
+    #[test]
+    fn blocks_private_and_local_ipv4_ranges() {
+        for value in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "100.64.0.1",
+            "169.254.169.254",
+            "172.16.0.1",
+            "192.168.1.1",
+            "198.18.0.1",
+            "192.0.2.1",
+            "198.51.100.1",
+            "203.0.113.1",
+        ] {
+            let address: Ipv4Addr = value.parse().unwrap();
+            assert!(
+                !scrape_ipv4_public_v1(address),
+                "{value} must be blocked"
+            );
+        }
+    }
+
+    #[test]
+    fn blocks_private_and_local_ipv6_ranges() {
+        for value in [
+            "::1",
+            "::",
+            "fc00::1",
+            "fd12:3456::1",
+            "fe80::1",
+            "2001:db8::1",
+            "::ffff:127.0.0.1",
+            "::ffff:192.168.1.1",
+        ] {
+            let address: Ipv6Addr = value.parse().unwrap();
+            assert!(
+                !scrape_ipv6_public_v1(address),
+                "{value} must be blocked"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_public_ip_literals_only_over_https_443() {
+        assert!(
+            validate_scrape_url_v1(
+                "https://8.8.8.8/"
+            )
+            .is_ok()
+        );
+
+        assert_eq!(
+            validate_scrape_url_v1(
+                "http://8.8.8.8/"
+            )
+            .unwrap_err(),
+            "scrape_url_https_required"
+        );
+
+        assert_eq!(
+            validate_scrape_url_v1(
+                "https://8.8.8.8:8443/"
+            )
+            .unwrap_err(),
+            "scrape_url_port_not_allowed"
+        );
+    }
+
+    #[test]
+    fn rejects_loopback_userinfo_and_reserved_hosts() {
+        assert_eq!(
+            validate_scrape_url_v1(
+                "https://127.0.0.1/"
+            )
+            .unwrap_err(),
+            "scrape_url_non_public_address"
+        );
+
+        assert_eq!(
+            validate_scrape_url_v1(
+                "https://user:pass@8.8.8.8/"
+            )
+            .unwrap_err(),
+            "scrape_url_userinfo_not_allowed"
+        );
+
+        assert_eq!(
+            validate_scrape_url_v1(
+                "https://localhost/"
+            )
+            .unwrap_err(),
+            "scrape_url_reserved_host"
+        );
+    }
+
+    #[test]
+    fn restricts_scrape_response_types() {
+        assert!(
+            scrape_content_type_allowed_v1(
+                "text/html; charset=utf-8"
+            )
+        );
+
+        assert!(
+            scrape_content_type_allowed_v1(
+                "application/json"
+            )
+        );
+
+        assert!(
+            !scrape_content_type_allowed_v1(
+                "application/octet-stream"
+            )
+        );
+    }
+}
 
 #[cfg(test)]
 mod compute_parity_tests {
