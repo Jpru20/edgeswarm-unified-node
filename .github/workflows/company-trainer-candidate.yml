@@ -95,13 +95,14 @@ print(hashlib.sha256(raw).hexdigest())
 
       - name: Rust unit tests
         shell: pwsh
-        working-directory: ${{ env.TRAINER_ROOT }}
-        run: cargo test --locked
+        run: |
+          Set-Location "$env:TRAINER_ROOT"
+          cargo test --locked
 
       - name: Build Windows trainer
         shell: pwsh
-        working-directory: ${{ env.TRAINER_ROOT }}
         run: |
+          Set-Location "$env:TRAINER_ROOT"
           cargo build --release --locked
           New-Item -ItemType Directory -Force -Path "$env:DIST_ROOT" | Out-Null
           Copy-Item ".\target\release\edgeswarm-lora-trainer.exe" "$env:DIST_ROOT\edgeswarm-lora-trainer.exe"
