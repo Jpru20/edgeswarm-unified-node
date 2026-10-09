@@ -4,9 +4,6 @@ on:
   push:
     branches:
       - company-trainer-build-20261009
-    paths:
-      - "trainer-build/**"
-      - ".github/workflows/company-trainer-candidate.yml"
 
 permissions:
   contents: read
@@ -25,101 +22,83 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Restore trainer source
+      - name: Restore source and prepare converter
         shell: pwsh
         run: |
-          $archive = Join-Path $env:RUNNER_TEMP "company-trainer-source.tar.gz"
+          $archive = Join-Path $env:RUNNER_TEMP "trainer-source.tar.gz"
           $raw = Get-Content "trainer-build/source.tar.gz.b64" -Raw
           [IO.File]::WriteAllBytes($archive, [Convert]::FromBase64String($raw))
-          $root = Join-Path $env:RUNNER_TEMP "company-trainer"
-          New-Item -ItemType Directory -Force -Path $root | Out-Null
-          tar -xzf $archive -C $root
-          $cargo = Get-ChildItem -Path $root -Filter Cargo.toml -Recurse | Select-Object -First 1
-          if (-not $cargo) { throw "Cargo.toml not found in trainer source archive" }
-          $trainerRoot = $cargo.Directory.FullName
-          "TRAINER_ROOT=$trainerRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "DIST_ROOT=$trainerRoot\dist\current" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "TRAINER_ROOT=$trainerRoot"
 
-      - name: Validate Python payload syntax
-        shell: pwsh
-        run: |
-          python -m py_compile "$env:TRAINER_ROOT\src\payload.py"
-          python -m py_compile "$env:TRAINER_ROOT\certification\promote_manifest.py"
+          $work = Join-Path $env:RUNNER_TEMP "trainer-work"
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+          tar -xzf $archive -C $work
 
-      - name: Stage pinned llama.cpp LoRA converter
-        shell: pwsh
-        run: |
+          $cargoFile = Get-ChildItem -Path $work -Filter Cargo.toml -Recurse | Select-Object -First 1
+          if (-not $cargoFile) { throw "trainer Cargo.toml missing" }
+          $trainer = $cargoFile.Directory.FullName
+          $dist = Join-Path $trainer "dist\current"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+
+          "TRAINER_ROOT=$trainer" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "DIST_ROOT=$dist" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+          python -m py_compile (Join-Path $trainer "src\payload.py")
+          python -m py_compile (Join-Path $trainer "certification\promote_manifest.py")
+
           $commit = "8a1a9b5126126e5228b95fa909d4b08fac65e8b3"
-          $clone = Join-Path $env:RUNNER_TEMP "llama.cpp"
-          git clone --filter=blob:none --no-checkout https://github.com/ggml-org/llama.cpp.git $clone
-          git -C $clone checkout $commit -- convert_lora_to_gguf.py conversion gguf-py
+          $llama = Join-Path $env:RUNNER_TEMP "llama.cpp"
+          git clone --filter=blob:none --no-checkout https://github.com/ggml-org/llama.cpp.git $llama
+          git -C $llama checkout $commit -- convert_lora_to_gguf.py conversion gguf-py
 
-          $converter = Join-Path $env:DIST_ROOT "llama.cpp"
+          $converter = Join-Path $dist "llama.cpp"
           New-Item -ItemType Directory -Force -Path $converter | Out-Null
-          Copy-Item (Join-Path $clone "convert_lora_to_gguf.py") $converter
-          Copy-Item (Join-Path $clone "conversion") $converter -Recurse
-          Copy-Item (Join-Path $clone "gguf-py") $converter -Recurse
+          Copy-Item (Join-Path $llama "convert_lora_to_gguf.py") $converter
+          Copy-Item (Join-Path $llama "conversion") $converter -Recurse
+          Copy-Item (Join-Path $llama "gguf-py") $converter -Recurse
 
-          @'
-import hashlib
-import json
-import os
+          $py = @"
+import hashlib,json,os
 from pathlib import Path
-
-root = Path(os.environ["DIST_ROOT"]) / "llama.cpp"
-files = {}
+root=Path(os.environ["DIST_ROOT"])/"llama.cpp"
+files={}
 for p in sorted(root.rglob("*")):
-    if p.is_file() and p.name != "converter-manifest.json":
-        rel = p.relative_to(root).as_posix()
-        files[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
-
-obj = {
-    "schemaVersion": 1,
-    "repo": "ggml-org/llama.cpp",
-    "commit": "8a1a9b5126126e5228b95fa909d4b08fac65e8b3",
-    "files": files,
-}
-raw = (json.dumps(obj, sort_keys=True, separators=(",", ":")) + "\n").encode()
-path = root / "converter-manifest.json"
-path.write_bytes(raw)
+    if p.is_file() and p.name!="converter-manifest.json":
+        files[p.relative_to(root).as_posix()]=hashlib.sha256(p.read_bytes()).hexdigest()
+obj={"schemaVersion":1,"repo":"ggml-org/llama.cpp","commit":"8a1a9b5126126e5228b95fa909d4b08fac65e8b3","files":files}
+raw=(json.dumps(obj,sort_keys=True,separators=(",",":"))+"\n").encode()
+(root/"converter-manifest.json").write_bytes(raw)
 print(hashlib.sha256(raw).hexdigest())
-'@ | Set-Content -Encoding utf8 "$env:RUNNER_TEMP\make_converter_manifest.py"
+"@
+          $manifestScript = Join-Path $env:RUNNER_TEMP "manifest.py"
+          Set-Content -Path $manifestScript -Value $py -Encoding utf8
+          $manifestSha = (python $manifestScript).Trim()
+          if ($manifestSha -notmatch '^[0-9a-f]{64}$') { throw "bad converter manifest sha" }
+          "EDGESWARM_CONVERTER_MANIFEST_SHA256=$manifestSha" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
 
-          $manifestSha = python "$env:RUNNER_TEMP\make_converter_manifest.py"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $manifestSha = $manifestSha.Trim()
-          if ($manifestSha -notmatch '^[0-9a-f]{64}$') { throw "bad converter manifest sha: $manifestSha" }
-          "EDGESWARM_CONVERTER_MANIFEST_SHA256=$manifestSha" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "CONVERTER_MANIFEST_SHA256=$manifestSha"
-
-      - name: Rust unit tests
+      - name: Test and build
         shell: pwsh
         run: |
-          Set-Location "$env:TRAINER_ROOT"
+          Set-Location $env:TRAINER_ROOT
+          cargo generate-lockfile
           cargo test --locked
-
-      - name: Build Windows trainer
-        shell: pwsh
-        run: |
-          Set-Location "$env:TRAINER_ROOT"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --release --locked
-          New-Item -ItemType Directory -Force -Path "$env:DIST_ROOT" | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
           Copy-Item ".\target\release\edgeswarm-lora-trainer.exe" "$env:DIST_ROOT\edgeswarm-lora-trainer.exe"
           Copy-Item ".\requirements-win-qlora.txt" "$env:DIST_ROOT\requirements-win-qlora.txt"
           Copy-Item ".\README.md" "$env:DIST_ROOT\README.md"
           Copy-Item ".\certification" "$env:DIST_ROOT\certification" -Recurse
+          Copy-Item ".\Cargo.lock" "$env:DIST_ROOT\Cargo.lock"
 
-      - name: Executable self-test
+      - name: Self-test and CLI contract
         shell: pwsh
         run: |
-          & "$env:DIST_ROOT\edgeswarm-lora-trainer.exe" --self-test
+          $exe = Join-Path $env:DIST_ROOT "edgeswarm-lora-trainer.exe"
+          & $exe --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: CLI validation contract
-        shell: pwsh
-        run: |
-          $fixture = Join-Path $env:RUNNER_TEMP "trainer-fixture"
+          $fixture = Join-Path $env:RUNNER_TEMP "fixture"
           New-Item -ItemType Directory -Force -Path $fixture | Out-Null
           $dataset = Join-Path $fixture "dataset.jsonl"
           '{"id":"00000000-0000-4000-8000-000000000001","input":"Return the approved incident severity.","target":"SEV-2","sourceType":"manual","securityLabel":"internal"}' | Set-Content -Encoding utf8NoBOM $dataset
@@ -129,16 +108,17 @@ print(hashlib.sha256(raw).hexdigest())
             schemaVersion = 1
             jobId = "00000000-0000-4000-8000-000000000010"
             companyModelId = "00000000-0000-4000-8000-000000000020"
-            companyModelVersion = 1
+            targetVersion = 1
             baseModelId = "qwen2.5:3b"
             baseCapability = "Neural-Inference-3B"
+            datasetId = "00000000-0000-4000-8000-000000000030"
             datasetSha256 = $datasetSha
             hyperparameters = @{
               rank = 16
               alpha = 32
               epochs = 1
               learningRate = 0.0002
-              maxSeqLength = 512
+              maxSequenceLength = 512
               batchSize = 1
               gradientAccumulationSteps = 1
               warmupRatio = 0.03
@@ -147,74 +127,54 @@ print(hashlib.sha256(raw).hexdigest())
           }
           $jobPath = Join-Path $fixture "job-spec.json"
           $job | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM $jobPath
-          & "$env:DIST_ROOT\edgeswarm-lora-trainer.exe" --job-spec $jobPath --dataset $dataset --adapter-output (Join-Path $fixture "adapter.gguf") --metrics-output (Join-Path $fixture "metrics.json") --validate-only
+
+          & $exe --job-spec $jobPath --dataset $dataset --adapter-output (Join-Path $fixture "adapter.gguf") --metrics-output (Join-Path $fixture "metrics.json") --validate-only
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Create candidate manifest
+      - name: Package candidate
         shell: pwsh
         run: |
-          @'
-import hashlib
-import json
-import os
-from pathlib import Path
+          $exe = Join-Path $env:DIST_ROOT "edgeswarm-lora-trainer.exe"
+          $sha = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $conv = Join-Path $env:DIST_ROOT "llama.cpp\converter-manifest.json"
+          $convSha = (Get-FileHash $conv -Algorithm SHA256).Hash.ToLowerInvariant()
 
-dist = Path(os.environ["DIST_ROOT"])
-exe = dist / "edgeswarm-lora-trainer.exe"
-sha = hashlib.sha256(exe.read_bytes()).hexdigest()
-converter_manifest = dist / "llama.cpp" / "converter-manifest.json"
-converter_sha = hashlib.sha256(converter_manifest.read_bytes()).hexdigest()
+          $manifest = [ordered]@{
+            schemaVersion = 1
+            engine = "edgeswarm-qlora-windows-v1"
+            status = "candidate"
+            trainerSha256 = $sha
+            supportedBaseModels = @("qwen2.5:3b","qwen2.5:7b","qwen2.5:14b")
+            version = "1.0.0-candidate.20261009"
+            capability = "LoRA-Training-V1"
+            converter = [ordered]@{
+              repo = "ggml-org/llama.cpp"
+              commit = "8a1a9b5126126e5228b95fa909d4b08fac65e8b3"
+              manifestSha256 = $convSha
+            }
+            certification = [ordered]@{
+              rustUnitTests = "pass"
+              contractTests = "pass"
+              executableSelfTest = "pass"
+              gpuQlora = "pending"
+            }
+          }
+          $manifest | ConvertTo-Json -Depth 12 | Set-Content -Encoding utf8NoBOM (Join-Path $env:DIST_ROOT "trainer-manifest.json")
 
-manifest = {
-    "schemaVersion": 1,
-    "trainer": "edgeswarm-lora-trainer",
-    "version": "1.0.0-candidate.20261009",
-    "status": "candidate",
-    "sha256": sha,
-    "capability": "LoRA-Training-V1",
-    "platforms": ["windows-x86_64-cuda"],
-    "supportedBaseModelIds": ["qwen2.5:3b", "qwen2.5:7b", "qwen2.5:14b"],
-    "converter": {
-        "repo": "ggml-org/llama.cpp",
-        "commit": "8a1a9b5126126e5228b95fa909d4b08fac65e8b3",
-        "manifestSha256": converter_sha,
-    },
-    "certification": {
-        "rustUnitTests": "pass",
-        "contractTests": "pass",
-        "executableSelfTest": "pass",
-        "gpuQlora": "pending",
-    },
-}
-(dist / "trainer-manifest.json").write_text(
-    json.dumps(manifest, indent=2) + "\n",
-    encoding="utf-8",
-)
-print("TRAINER_SHA256=" + sha)
-print("STATUS=candidate")
-'@ | Set-Content -Encoding utf8 "$env:RUNNER_TEMP\make_candidate_manifest.py"
-          python "$env:RUNNER_TEMP\make_candidate_manifest.py"
-
-      - name: Package artifact
-        shell: pwsh
-        run: |
-          $zip = Join-Path $env:RUNNER_TEMP "swarm_windows_lora_trainer_candidate_v1_20261009.zip"
-          if (Test-Path $zip) { Remove-Item $zip -Force }
-          Compress-Archive -Path "$env:DIST_ROOT\*" -DestinationPath $zip
+          $artifactDir = Join-Path $PWD "trainer-artifact"
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+          $zip = Join-Path $artifactDir "swarm_windows_lora_trainer_candidate_v1_20261009.zip"
+          Compress-Archive -Path "$env:DIST_ROOT\*" -DestinationPath $zip -Force
           $zipSha = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          $exeSha = (Get-FileHash "$env:DIST_ROOT\edgeswarm-lora-trainer.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
           @(
             "$zipSha  swarm_windows_lora_trainer_candidate_v1_20261009.zip",
-            "$exeSha  edgeswarm-lora-trainer.exe"
-          ) | Set-Content -Encoding ascii "$env:RUNNER_TEMP\SHA256SUMS.txt"
-          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\artifact" | Out-Null
-          Copy-Item $zip "$env:RUNNER_TEMP\artifact\"
-          Copy-Item "$env:RUNNER_TEMP\SHA256SUMS.txt" "$env:RUNNER_TEMP\artifact\"
+            "$sha  edgeswarm-lora-trainer.exe"
+          ) | Set-Content -Encoding ascii (Join-Path $artifactDir "SHA256SUMS.txt")
 
       - name: Upload candidate
         uses: actions/upload-artifact@v4
         with:
           name: edgeswarm-lora-trainer-candidate-v1
-          path: ${{ runner.temp }}\artifact\*
+          path: trainer-artifact/*
           if-no-files-found: error
           retention-days: 14
