@@ -80,7 +80,7 @@ pub fn read_auth() -> Result<LocalAuth, String> {
     })
 }
 
-fn bearer(token: &str) -> Result<HeaderValue, String> {
+pub(crate) fn bearer(token: &str) -> Result<HeaderValue, String> {
     let mut value = HeaderValue::from_str(&format!("Bearer {token}"))
         .map_err(|_| "bearer_header_invalid".to_string())?;
 
@@ -88,7 +88,7 @@ fn bearer(token: &str) -> Result<HeaderValue, String> {
     Ok(value)
 }
 
-fn api_base() -> String {
+pub(crate) fn api_base() -> String {
     env::var("GCP_BASE_URL")
         .unwrap_or_else(|_| "https://api.edgeswarm.io".into())
         .trim_end_matches('/')

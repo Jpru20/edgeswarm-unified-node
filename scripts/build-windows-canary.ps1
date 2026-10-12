@@ -1,0 +1,368 @@
+param([string]$ConfigPath = '',[string]$TargetDir = '')
+$ErrorActionPreference = 'Stop'
+$Repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+Set-Location $Repo
+if ([string]::IsNullOrWhiteSpace($ConfigPath)) { $ConfigPath = Join-Path $Repo '.env.release.local' }
+if (!(Test-Path -LiteralPath $ConfigPath)) { throw 'release_config_missing' }
+$Config = @{}
+Get-Content -LiteralPath $ConfigPath | ForEach-Object { $Line = $_.Trim(); if ($Line -and !$Line.StartsWith('#')) { $Parts = $Line -split '=',2; if ($Parts.Count -eq 2) { $Config[$Parts[0].Trim()] = $Parts[1].Trim() } } }
+$Url = [string]$Config['EDGESWARM_DEFAULT_SUPABASE_URL']
+$Key = [string]$Config['EDGESWARM_DEFAULT_SUPABASE_ANON_KEY']
+if ([string]::IsNullOrWhiteSpace($Url) -or !$Url.StartsWith('https://')) { throw 'release_supabase_url_invalid' }
+if ([string]::IsNullOrWhiteSpace($Key) -or $Key.Length -lt 50) { throw 'release_supabase_anon_key_invalid' }
+$Head = (git rev-parse HEAD).Trim()
+
+$ExpectedCanaryBase =
+    "aa6ac693a14a30991d4aae64a284b8b6e0f458c0"
+
+if ($Head -ne $ExpectedCanaryBase) {
+    throw "canary_source_base_mismatch_$Head"
+}
+
+$AllowedTrackedChanges = @(
+    "package.json",
+    "package-lock.json",
+    "src-tauri/Cargo.toml",
+    "src-tauri/Cargo.lock",
+    "src-tauri/tauri.conf.json",
+    "scripts/build-windows-release.ps1",
+    "src-tauri/src/core/deterministic_executor.rs",
+    "src-tauri/src/core/execution_model.rs",
+    "src-tauri/src/core/generation_policy.rs",
+    "src-tauri/src/core/mod.rs",
+    "src-tauri/src/core/node_service.rs",
+    "src-tauri/src/core/production_heartbeat.rs",
+    "src-tauri/src/core/production_inference.rs",
+    "src-tauri/src/core/production_task_http.rs",
+    "src-tauri/src/core/result_signing.rs",
+    "src-tauri/src/core/task_client.rs",
+    "src-tauri/src/runtime/llama_process.rs"
+)
+
+$TrackedStatus =
+    @(
+        git status `
+            --porcelain `
+            --untracked-files=no
+    )
+
+foreach ($Line in $TrackedStatus) {
+    if ([string]::IsNullOrWhiteSpace($Line)) {
+        continue
+    }
+
+    $Path = $Line.Substring(3).Trim().Replace('\','/')
+
+    if ($Path.Contains(" -> ")) {
+        $Path =
+            ($Path -split " -> ")[-1]
+    }
+
+    if ($AllowedTrackedChanges -notcontains $Path) {
+        throw "unexpected_canary_tracked_change_$Path"
+    }
+}
+
+foreach ($Required in $AllowedTrackedChanges) {
+    $Present =
+        $TrackedStatus |
+        Where-Object {
+            $_.Substring(3).Trim().Replace('\','/') -eq $Required
+        }
+
+    if (-not $Present) {
+        throw "required_canary_change_missing_$Required"
+    }
+}
+
+$AllowedUntrackedSource = @(
+    "scripts/build-windows-canary.ps1",
+    "src-tauri/src/core/company_model.rs",
+    "src-tauri/src/core/company_model_http.rs",
+    "src-tauri/src/core/lora_training.rs",
+    "src-tauri/src/core/training_runtime_provisioning_v1.rs",
+    "src-tauri/src/core/web_retrieval_tool_v1.rs"
+)
+
+$UntrackedSource =
+    @(
+        git ls-files `
+            --others `
+            --exclude-standard `
+            -- `
+            scripts `
+            src-tauri/src/core
+    ) |
+    ForEach-Object {
+        $_.Replace("\","/")
+    }
+
+foreach ($Path in $UntrackedSource) {
+    if ($Path -match '^src-tauri/src/core/[A-Za-z0-9_]+\.rs\.bak_[A-Za-z0-9_]+$') { continue }
+    if ($AllowedUntrackedSource -notcontains $Path) {
+        throw "unexpected_canary_untracked_source_$Path"
+    }
+}
+
+foreach ($Required in @(
+    "src-tauri/src/core/lora_training.rs",
+    "src-tauri/src/core/web_retrieval_tool_v1.rs"
+)) {
+    if ($UntrackedSource -notcontains $Required) {
+        throw "required_canary_source_missing_$Required"
+    }
+}
+
+Write-Host "CANARY_SOURCE_GUARD=PASS"
+$env:EDGESWARM_DEFAULT_SUPABASE_URL = $Url
+$env:EDGESWARM_DEFAULT_SUPABASE_ANON_KEY = $Key
+Remove-Item Env:SUPABASE_URL -ErrorAction SilentlyContinue
+Remove-Item Env:SUPABASE_ANON_KEY -ErrorAction SilentlyContinue
+Remove-Item Env:EDGESWARM_SUPABASE_URL -ErrorAction SilentlyContinue
+Remove-Item Env:EDGESWARM_SUPABASE_ANON_KEY -ErrorAction SilentlyContinue
+if ([string]::IsNullOrWhiteSpace($TargetDir)) { $Short = (git rev-parse --short=7 HEAD).Trim(); $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'; $TargetDir = Join-Path $env:USERPROFILE "edgeswarm-release-build-$Short-$Stamp" }
+New-Item -ItemType Directory -Force -Path $TargetDir | Out-Null
+$env:CARGO_TARGET_DIR = $TargetDir
+Write-Host 'RELEASE_CONFIG_VALID=PASS'
+Write-Host "SOURCE_COMMIT=$Head"
+Write-Host "TARGET_DIR=$TargetDir"
+$RuntimeSource = Join-Path $env:USERPROFILE "edgeswarm-runtime-build\release\windows-x64\current"
+$RuntimeExe = Join-Path $RuntimeSource "llama-server.exe"
+
+# WINDOWS_ACCELERATED_RUNTIME_PAYLOAD_V2
+$CudaRuntimeSource = Join-Path $env:USERPROFILE "edgeswarm-runtime-build\release\windows-x64\cuda\current"
+$VulkanRuntimeSource = Join-Path $env:USERPROFILE "edgeswarm-runtime-build\release\windows-x64\vulkan\current"
+
+$CudaRuntimeExe = Join-Path $CudaRuntimeSource "llama-server.exe"
+$CudaBackendDll = Join-Path $CudaRuntimeSource "ggml-cuda.dll"
+$VulkanRuntimeExe = Join-Path $VulkanRuntimeSource "llama-server.exe"
+$VulkanBackendDll = Join-Path $VulkanRuntimeSource "ggml-vulkan.dll"
+
+# WINDOWS_LORA_TRAINING_RUNTIME_V1
+$TrainingRuntimeSource =
+    Join-Path $env:USERPROFILE `
+        "edgeswarm-training-runtime\release\windows-x64\current"
+
+$TrainingRuntimeExe =
+    Join-Path $TrainingRuntimeSource `
+        "edgeswarm-lora-trainer.exe"
+
+$TrainingRuntimeManifest =
+    Join-Path $TrainingRuntimeSource `
+        "trainer-manifest.json"
+
+$EnableLoraTraining =
+    [string]$Config[
+        'EDGESWARM_ENABLE_LORA_TRAINING_V1'
+    ] -eq 'true'
+
+if ($EnableLoraTraining) {
+    foreach ($Required in @(
+        $TrainingRuntimeExe,
+        $TrainingRuntimeManifest
+    )) {
+        if (!(Test-Path -LiteralPath $Required)) {
+            throw "windows_lora_training_runtime_missing_$Required"
+        }
+    }
+
+    $TrainerSha =
+        (Get-FileHash `
+            $TrainingRuntimeExe `
+            -Algorithm SHA256
+        ).Hash.ToLower()
+
+    Write-Host "WINDOWS_LORA_TRAINING_ENABLED=true"
+    Write-Host "WINDOWS_LORA_TRAINER_SHA256=$TrainerSha"
+}
+else {
+    Write-Host "WINDOWS_LORA_TRAINING_ENABLED=false"
+}
+
+foreach ($Required in @(
+    $CudaRuntimeExe,
+    $CudaBackendDll,
+    $VulkanRuntimeExe,
+    $VulkanBackendDll
+)) {
+    if (!(Test-Path -LiteralPath $Required)) {
+        throw "windows_accelerated_runtime_payload_missing_$Required"
+    }
+}
+$RuntimeManifest = Get-Content (Join-Path $Repo "packaging\runtime\llama-runtime-v1.json") -Raw | ConvertFrom-Json
+$ExpectedRuntimeSha = [string]$RuntimeManifest.targets.'windows-x64'.validatedRuntimeSha256
+
+if (!(Test-Path $RuntimeExe)) { throw "windows_llama_runtime_missing" }
+if ([string]::IsNullOrWhiteSpace($ExpectedRuntimeSha)) { throw "windows_llama_manifest_sha_missing" }
+
+$ActualRuntimeSha = (Get-FileHash $RuntimeExe -Algorithm SHA256).Hash.ToLower()
+if ($ActualRuntimeSha -ne $ExpectedRuntimeSha.ToLower()) {
+    throw "windows_llama_runtime_sha_mismatch"
+}
+
+# WINDOWS_BACKGROUND_HELPERS_V1
+$TargetTriple = (& rustc --print host-tuple).Trim()
+
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($TargetTriple)) {
+    throw "windows_target_triple_detection_failed"
+}
+
+if ($TargetTriple -ne "x86_64-pc-windows-msvc") {
+    throw "windows_release_target_unsupported_$TargetTriple"
+}
+
+& cargo build `
+    --manifest-path (Join-Path $Repo "src-tauri\Cargo.toml") `
+    --release `
+    --no-default-features `
+    --features "release-helper-common,release-helper-windows" `
+    --bin edgeswarm-node-headless `
+    --bin edgeswarm-node-supervisor `
+    --bin edgeswarm-updater-runner
+
+if ($LASTEXITCODE -ne 0) {
+    throw "windows_helper_build_failed_$LASTEXITCODE"
+}
+
+$ReleaseDir = Join-Path $TargetDir "release"
+$SidecarDir = Join-Path $TargetDir "windows-sidecars"
+New-Item -ItemType Directory -Force -Path $SidecarDir | Out-Null
+
+$ExternalBin = @()
+
+foreach ($Name in @(
+    "edgeswarm-node-headless",
+    "edgeswarm-node-supervisor",
+    "edgeswarm-updater-runner"
+)) {
+    $Source = Join-Path $ReleaseDir "$Name.exe"
+
+    if (!(Test-Path $Source)) {
+        throw "windows_helper_missing_$Name"
+    }
+
+    $Base = Join-Path $SidecarDir $Name
+    $Staged = "$Base-$TargetTriple.exe"
+
+    Copy-Item $Source $Staged -Force
+
+    $ExternalBin += ($Base -replace '\\','/')
+
+    Write-Host "WINDOWS_HELPER_STAGED=$Name"
+}
+
+$TaskScriptSource =
+    Join-Path $Repo "src-tauri\windows\supervisor-task.ps1"
+
+if (!(Test-Path $TaskScriptSource)) {
+    throw "windows_supervisor_task_script_missing"
+}
+
+$RuntimeConfig =
+    Join-Path $TargetDir "tauri.runtime.config.json"
+
+$SourceJson =
+    ($RuntimeSource -replace '\\','/') + '/*'
+
+$CudaSourceJson =
+    ($CudaRuntimeSource -replace '\\','/') + '/*'
+
+$VulkanSourceJson =
+    ($VulkanRuntimeSource -replace '\\','/') + '/*'
+
+$TaskScriptJson =
+    ($TaskScriptSource -replace '\\','/')
+
+$Resources = @{}
+$Resources[$SourceJson] = "runtime/current/"
+
+$Resources[$CudaSourceJson] =
+    "resources/runtime/cuda/current/"
+
+$Resources[$VulkanSourceJson] =
+    "resources/runtime/vulkan/current/"
+
+if ($EnableLoraTraining) {
+    $TrainingSourceJson =
+        ($TrainingRuntimeSource -replace '\','/') +
+        '/*'
+
+    $Resources[$TrainingSourceJson] =
+        "resources/training/current/"
+}
+
+$Resources[$TaskScriptJson] =
+    "resources/windows/supervisor-task.ps1"
+
+@{
+    bundle = @{
+        externalBin = $ExternalBin
+        resources = $Resources
+    }
+} |
+    ConvertTo-Json -Depth 8 |
+    Set-Content $RuntimeConfig
+
+Write-Host "WINDOWS_EXTERNAL_BIN_COUNT=$($ExternalBin.Count)"
+Write-Host "WINDOWS_SUPERVISOR_TASK_STAGED=PASS"
+
+Write-Host "WINDOWS_LLAMA_RUNTIME_SHA256=$ActualRuntimeSha"
+Write-Host "WINDOWS_LLAMA_RUNTIME_STAGED=PASS"
+
+$CudaBytes =
+    (
+        Get-ChildItem $CudaRuntimeSource -File -Recurse |
+        Measure-Object Length -Sum
+    ).Sum
+
+$VulkanBytes =
+    (
+        Get-ChildItem $VulkanRuntimeSource -File -Recurse |
+        Measure-Object Length -Sum
+    ).Sum
+
+Write-Host "WINDOWS_CUDA_RUNTIME_SOURCE=$CudaRuntimeSource"
+Write-Host "WINDOWS_CUDA_RUNTIME_BYTES=$CudaBytes"
+Write-Host "WINDOWS_CUDA_RUNTIME_STAGED=PASS"
+
+Write-Host "WINDOWS_VULKAN_RUNTIME_SOURCE=$VulkanRuntimeSource"
+Write-Host "WINDOWS_VULKAN_RUNTIME_BYTES=$VulkanBytes"
+Write-Host "WINDOWS_VULKAN_RUNTIME_STAGED=PASS"
+
+npm.cmd run tauri build -- --config $RuntimeConfig
+if ($LASTEXITCODE -ne 0) { throw "tauri_build_failed_$LASTEXITCODE" }
+$Exe = Join-Path $TargetDir 'release\edgeswarm-unified-node.exe'
+$Msi = Get-ChildItem (Join-Path $TargetDir 'release\bundle\msi') -Filter '*.msi' | Select-Object -First 1
+$Nsis = Get-ChildItem (Join-Path $TargetDir 'release\bundle\nsis') -Filter '*.exe' | Select-Object -First 1
+if (!(Test-Path $Exe) -or !$Msi -or !$Nsis) { throw 'release_artifact_missing' }
+
+# WINDOWS_PUBLIC_INSTALLER_POLICY_V16
+#
+# v1.6 publishes NSIS only. MSI remains an internal validation
+# artifact until MSI uninstall cleanup for the supervisor task
+# has been independently certified.
+$PublicReleaseManifest =
+    Join-Path $TargetDir "windows-public-release.json"
+
+@{
+    platform = "windows-x64"
+    publicInstallerKind = "nsis"
+    publicInstallerPath = $Nsis.FullName
+    msiPublicRelease = $false
+    msiValidationPath = $Msi.FullName
+    policy = "v1.6_nsis_public_msi_internal"
+} |
+    ConvertTo-Json -Depth 6 |
+    Set-Content $PublicReleaseManifest
+
+Write-Host "PUBLIC_WINDOWS_INSTALLER_KIND=NSIS"
+Write-Host "PUBLIC_WINDOWS_INSTALLER=$($Nsis.FullName)"
+Write-Host "MSI_PUBLIC_RELEASE=false"
+Write-Host "WINDOWS_RELEASE_POLICY_MANIFEST=$PublicReleaseManifest"
+$BinaryText = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($Exe))
+if (!$BinaryText.Contains($Url)) { throw 'compiled_supabase_url_not_found' }
+if (!$BinaryText.Contains($Key)) { throw 'compiled_supabase_anon_key_not_found' }
+Write-Host 'COMPILED_CONFIG_VERIFIED=PASS'
+& (Join-Path $PSScriptRoot 'verify-windows-msi-payload.ps1') -Msi $Msi.FullName -TargetDir $TargetDir
+foreach ($File in @($Exe,$Msi.FullName,$Nsis.FullName)) { $Item = Get-Item $File; $Hash = (Get-FileHash $File -Algorithm SHA256).Hash; $Sig = (Get-AuthenticodeSignature $File).Status; Write-Host "ARTIFACT=$($Item.FullName)"; Write-Host "BYTES=$($Item.Length)"; Write-Host "SHA256=$Hash"; Write-Host "SIGNATURE=$Sig" }
+Write-Host 'RELEASE_BUILD_COMPLETE=PASS'

@@ -160,7 +160,7 @@ impl ProductionLlamaClient {
                 production_generation_settings_adaptive_v1(
                     prompt,
                     None,
-                    Some(requested),
+                    None,
                 )
             } else {
                 production_generation_settings_v1(
@@ -170,14 +170,32 @@ impl ProductionLlamaClient {
                 )
             };
 
-        let max_tokens =
-            if adaptive_execution {
-                generation.max_tokens.max(1)
+        let request_max_tokens: i64 =
+            if adaptive_execution &&
+                generation.max_tokens == u32::MAX
+            {
+                -1
             } else {
                 generation.max_tokens
                     .max(1)
-                    .min(4096)
+                    .min(4096) as i64
             };
+
+        let max_tokens =
+            if request_max_tokens < 0 {
+                0
+            } else {
+                request_max_tokens as u32
+            };
+
+        println!(
+            "INFERENCE_OUTPUT_TOKEN_LIMIT={}",
+            if request_max_tokens < 0 {
+                "unbounded".to_string()
+            } else {
+                request_max_tokens.to_string()
+            }
+        );
 
         let mut body = json!({
             "model": "local-model",
@@ -189,7 +207,7 @@ impl ProductionLlamaClient {
             ],
             "temperature": generation.temperature,
             "top_p": generation.top_p,
-            "max_tokens": max_tokens,
+            "max_tokens": request_max_tokens,
             "stop": generation.stop,
             "stream": true,
             "stream_options": {
@@ -237,10 +255,25 @@ impl ProductionLlamaClient {
         let status = response.status();
 
         if !status.is_success() {
-            return Err(format!("production_llama_http_{}", status.as_u16()));
-        }
+            let body =
+                response
+                    .text()
+                    .unwrap_or_default()
+                    .replace('\r', " ")
+                    .replace('\n', " ");
 
-        let reader = BufReader::new(response);
+            let body: String =
+                body
+                    .chars()
+                    .take(800)
+                    .collect();
+
+            return Err(format!(
+                "production_llama_http_{}_body={}",
+                status.as_u16(),
+                body
+            ));
+        }let reader = BufReader::new(response);
 
         let mut output = String::new();
 
@@ -434,7 +467,7 @@ impl ProductionLlamaClient {
                 production_generation_settings_adaptive_v1(
                     prompt,
                     None,
-                    Some(requested),
+                    None,
                 )
             } else {
                 production_generation_settings_v1(
@@ -444,14 +477,32 @@ impl ProductionLlamaClient {
                 )
             };
 
-        let max_tokens =
-            if adaptive_execution {
-                generation.max_tokens.max(1)
+        let request_max_tokens: i64 =
+            if adaptive_execution &&
+                generation.max_tokens == u32::MAX
+            {
+                -1
             } else {
                 generation.max_tokens
                     .max(1)
-                    .min(4096)
+                    .min(4096) as i64
             };
+
+        let max_tokens =
+            if request_max_tokens < 0 {
+                0
+            } else {
+                request_max_tokens as u32
+            };
+
+        println!(
+            "INFERENCE_OUTPUT_TOKEN_LIMIT={}",
+            if request_max_tokens < 0 {
+                "unbounded".to_string()
+            } else {
+                request_max_tokens.to_string()
+            }
+        );
 
         let mut body = json!({
             "model": "local-model",
@@ -463,7 +514,7 @@ impl ProductionLlamaClient {
             ],
             "temperature": generation.temperature,
             "top_p": generation.top_p,
-            "max_tokens": max_tokens,
+            "max_tokens": request_max_tokens,
             "stop": generation.stop,
             "stream": false
         });
@@ -506,10 +557,23 @@ impl ProductionLlamaClient {
             .map_err(|_| "production_llama_response_read_failed".to_string())?;
 
         if !status.is_success() {
-            return Err(format!("production_llama_http_{}", status.as_u16()));
-        }
+            let body =
+                raw
+                    .replace('\r', " ")
+                    .replace('\n', " ");
 
-        let parsed: Value = serde_json::from_str(&raw)
+            let body: String =
+                body
+                    .chars()
+                    .take(800)
+                    .collect();
+
+            return Err(format!(
+                "production_llama_http_{}_body={}",
+                status.as_u16(),
+                body
+            ));
+        }let parsed: Value = serde_json::from_str(&raw)
             .map_err(|_| "production_llama_response_invalid".to_string())?;
 
         let output = parsed

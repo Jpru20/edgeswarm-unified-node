@@ -17,10 +17,14 @@ pub mod hardware;
 pub mod hardware_identity;
 pub mod heartbeat;
 pub mod identity;
+pub mod company_model;
+pub mod company_model_http;
+pub mod lora_training;
 pub mod model;
 pub mod model_discovery;
 pub mod model_fingerprint;
 pub mod model_provisioning;
+pub mod training_runtime_provisioning_v1;
 pub mod model_registry;
 pub mod node_service;
 pub mod node_status_bridge;
@@ -43,6 +47,7 @@ pub mod wallet_client;
 pub mod wallet_identity;
 pub mod wallet_public_identity;
 pub mod wallet_vault;
+pub mod web_retrieval_tool_v1;
 pub mod workload_validator;
 
 #[cfg(target_os = "macos")]

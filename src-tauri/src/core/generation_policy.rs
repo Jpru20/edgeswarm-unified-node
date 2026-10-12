@@ -147,7 +147,7 @@ pub fn production_generation_settings_adaptive_v1(
 
     let mut budget =
         max_tokens
-            .unwrap_or(4096)
+            .unwrap_or(u32::MAX)
             .max(1);
 
     // Exact extraction is intrinsically small. Preserve the

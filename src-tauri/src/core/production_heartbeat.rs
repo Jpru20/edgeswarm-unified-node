@@ -1,5 +1,9 @@
 use crate::core::{
     capacity::CapacityStatus,
+    lora_training::{
+        self,
+        LORA_TRAINING_CAPABILITY_V1,
+    },
     NodeState,
 };
 use serde::Serialize;
@@ -286,6 +290,11 @@ pub struct ProductionHeartbeatMetadataV1 {
     pub update_lifecycle: Option<ProductionUpdateLifecycleV1>,
 
     pub model_capacity_v1: Vec<ProductionModelCapacityV1>,
+
+    pub company_model_v1: crate::core::company_model::CompanyModelHeartbeatV1,
+
+    pub lora_training_v1:
+        lora_training::LoraTrainingStatusV1,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -389,6 +398,43 @@ impl ProductionHeartbeatV1 {
 
         let primary = ready_models.first().copied();
 
+        // HIVE_INFERENCE_HEARTBEAT_V1
+        // Training intentionally remains out of scope for this Windows release.
+        let mut company_model_v1 =
+            crate::core::company_model::company_model_heartbeat_v1(state);
+
+        if !crate::core::company_model_http::company_model_node_enabled_v1() {
+            company_model_v1.ready = false;
+            company_model_v1.reason = "hive_inference_feature_disabled".into();
+        } else if company_model_v1.ready {
+            // Treat a missing, unreadable or changed adapter as unavailable.
+            let adapter_hash_verified_v1 =
+                crate::core::company_model::load_local_company_model_v1()
+                    .and_then(|local_v1| {
+                        crate::core::lora_training::sha256_file_v1(
+                            std::path::Path::new(&local_v1.adapter_path),
+                        )
+                        .ok()
+                        .map(|sha_v1| {
+                            sha_v1.eq_ignore_ascii_case(&local_v1.adapter_sha256)
+                        })
+                    })
+                    .unwrap_or(false);
+            if !adapter_hash_verified_v1 {
+                company_model_v1.ready = false;
+                company_model_v1.reason = "hive_adapter_hash_not_verified".into();
+            }
+        }
+        let hive_inference_ready_v1 = company_model_v1.ready;
+
+        let lora_training_v1 =
+            lora_training::detect_lora_training_v1(
+                state,
+                primary.map(|model| {
+                    model.selected_model.as_str()
+                }),
+            );
+
         let eligible_model_capabilities =
             ready_models
                 .iter()
@@ -399,14 +445,44 @@ impl ProductionHeartbeatV1 {
 
         // Every unified node retains the deterministic baseline.
         // Neural capabilities are added only after real certification.
+        let training_capabilities =
+            if lora_training_v1.enabled {
+                vec![
+                    LORA_TRAINING_CAPABILITY_V1
+                        .to_string()
+                ]
+            } else {
+                Vec::new()
+            };
+
         let capabilities = [
             "Exact-Extraction",
             "Data-Scraper",
             "Distributed-Compute",
+            "Web-Retrieval-Tool-V1",
         ]
         .iter()
-        .map(|capability| (*capability).to_string())
-        .chain(eligible_model_capabilities.iter().cloned())
+        .map(|capability| {
+            (*capability).to_string()
+        })
+        .chain(
+            eligible_model_capabilities
+                .iter()
+                .cloned()
+        )
+        .chain(
+            if hive_inference_ready_v1 {
+                Some(crate::core::company_model::
+                    COMPANY_MODEL_INFERENCE_CAPABILITY_V1.to_string())
+            } else {
+                None
+            }
+        )
+        .chain(
+            training_capabilities
+                .iter()
+                .cloned()
+        )
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
@@ -602,6 +678,10 @@ impl ProductionHeartbeatV1 {
                 update_lifecycle,
 
                 model_capacity_v1,
+
+                company_model_v1,
+
+                lora_training_v1,
             },
         }
     }

@@ -91,6 +91,96 @@ pub fn sign_result(
     ))
 }
 
+pub fn sign_result_with_attempt(
+    task_id: &str,
+    score: u16,
+    file_hash: &str,
+    hardware_id: &str,
+    attempt_id: Option<&str>,
+    private_key: &str,
+) -> Result<String, String> {
+    let message = result_message(
+        task_id,
+        score,
+        file_hash,
+        hardware_id,
+    );
+
+    let message = match attempt_id {
+        Some(id) if !id.is_empty() => format!("{message}|Attempt:{id}"),
+        Some(_) => return Err("attempt_id_empty".to_string()),
+        None => message,
+    };
+
+    let key = signing_key(private_key)?;
+
+    let (signature, recovery_id) = key
+        .sign_digest_recoverable(
+            ethereum_message_digest(&message)
+        )
+        .map_err(|_| "result_signing_failed".to_string())?;
+
+    let mut output = Vec::with_capacity(65);
+    output.extend_from_slice(&signature.to_bytes());
+
+    // Match eth_account Account.sign_message().signature.hex():
+    // final recovery byte is Ethereum v=27/28.
+    output.push(27 + recovery_id.to_byte());
+
+    Ok(format!(
+        "0x{}",
+        output
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
+}
+
+pub fn tool_execution_message(
+    task_id: &str,
+    tool_execution_hash: &str,
+    hardware_id: &str,
+) -> String {
+    format!(
+        "Task:{task_id}|ToolExecutionHash:{tool_execution_hash}|HW:{hardware_id}"
+    )
+}
+
+pub fn sign_tool_execution(
+    task_id: &str,
+    tool_execution_hash: &str,
+    hardware_id: &str,
+    private_key: &str,
+) -> Result<String, String> {
+    let message = tool_execution_message(
+        task_id,
+        tool_execution_hash,
+        hardware_id,
+    );
+
+    let key = signing_key(private_key)?;
+
+    let (signature, recovery_id) = key
+        .sign_digest_recoverable(
+            ethereum_message_digest(&message)
+        )
+        .map_err(
+            |_| "tool_execution_signing_failed".to_string()
+        )?;
+
+    let mut output = Vec::with_capacity(65);
+    output.extend_from_slice(&signature.to_bytes());
+    output.push(27 + recovery_id.to_byte());
+
+    Ok(format!(
+        "0x{}",
+        output
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
+}
+
 pub fn recover_result_signer(
     task_id: &str,
     score: u16,
@@ -196,5 +286,23 @@ mod tests {
         );
 
         assert_eq!(signature.len(), 132);
+    }
+
+    #[test]
+    fn tool_execution_signature_has_eip191_shape() {
+        let private_key =
+            "0000000000000000000000000000000000000000000000000000000000000001";
+
+        let signature =
+            sign_tool_execution(
+                "1234",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                private_key,
+            )
+            .unwrap();
+
+        assert_eq!(signature.len(), 132);
+        assert!(signature.starts_with("0x"));
     }
 }

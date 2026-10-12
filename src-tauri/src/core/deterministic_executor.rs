@@ -721,7 +721,7 @@ fn scrape_content_type_allowed_v1(value: &str) -> bool {
         )
 }
 
-fn fetch_public_scrape_text_v1(
+pub(crate) fn fetch_public_scrape_text_v1(
     raw_url: &str,
 ) -> Result<(String, String), String> {
     let mut current = Url::parse(raw_url)
@@ -922,6 +922,8 @@ mod tests {
 
     fn task(required: &str, prompt: &str) -> TaskEnvelope {
         TaskEnvelope {
+            attempt_id: None,
+            company_model: None,
             task_id: json!(1),
             client_name: None,
             prompt: prompt.into(),
@@ -935,6 +937,7 @@ mod tests {
             max_output_tokens: None,
             execution_contract: None,
             streaming_contract: None,
+            tool_contract: None,
         }
     }
 
@@ -1192,5 +1195,115 @@ mod compute_parity_tests {
             ),
             25
         );
+    }
+}
+
+// P0 Windows node retrieval security regression tests, October 10, 2026.
+// These test the actual hardened fetcher/validator used by web_retrieval_tool_v1.
+#[cfg(test)]
+mod windows_retrieval_security_cert_v1 {
+    use super::*;
+
+    #[test]
+    fn rejects_private_ipv4_metadata_and_reserved_hosts() {
+        for address in [
+            "https://127.0.0.1/",
+            "https://10.1.2.3/",
+            "https://172.16.0.1/",
+            "https://192.168.1.1/",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://100.64.0.1/",
+            "https://192.0.2.1/",
+            "https://198.51.100.1/",
+            "https://203.0.113.1/",
+            "https://localhost/",
+            "https://sub.localhost/",
+            "https://service.internal/",
+            "https://router.home.arpa/",
+        ] {
+            assert!(
+                validate_scrape_url_v1(address).is_err(),
+                "unsafe destination unexpectedly accepted: {address}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_insecure_ports_userinfo_and_ipv6_loopback() {
+        for address in [
+            "http://example.com/",
+            "https://example.com:4443/",
+            "https://name:secret@example.com/",
+            "https://[::1]/",
+            "https://[fc00::1]/",
+            "https://[fe80::1]/",
+            "https://[::ffff:127.0.0.1]/",
+        ] {
+            assert!(
+                validate_scrape_url_v1(address).is_err(),
+                "unsafe destination unexpectedly accepted: {address}"
+            );
+        }
+    }
+
+    #[test]
+    fn redirect_destination_policy_rejects_private_and_insecure_targets() {
+        let from = Url::parse("https://example.com/initial").unwrap();
+        for target in [
+            "https://127.0.0.1/private",
+            "https://169.254.169.254/latest/meta-data/",
+            "http://example.com/insecure",
+            "https://localhost/",
+            "https://example.com:8443/",
+        ] {
+            let next = from.join(target).unwrap();
+            assert!(
+                validate_scrape_url_v1(next.as_str()).is_err(),
+                "unsafe redirect destination unexpectedly accepted: {target}"
+            );
+        }
+    }
+
+    #[test]
+    fn actual_fetch_function_fails_closed_before_local_network_access() {
+        for address in [
+            "https://127.0.0.1/",
+            "https://169.254.169.254/latest/meta-data/",
+            "http://example.com/",
+        ] {
+            let error = fetch_public_scrape_text_v1(address).unwrap_err();
+            assert!(
+                error.starts_with("scrape_url_"),
+                "expected URL-policy rejection for {address}, got {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn binary_response_mime_types_are_rejected() {
+        assert!(!scrape_content_type_allowed_v1("application/octet-stream"));
+        assert!(!scrape_content_type_allowed_v1("image/png"));
+        assert!(scrape_content_type_allowed_v1("text/html; charset=utf-8"));
+        assert!(scrape_content_type_allowed_v1("application/json"));
+    }
+
+    #[test]
+    #[ignore = "requires direct public HTTPS egress on the Windows node"]
+    fn real_public_https_fetch_example_com() {
+        let (final_url, body) =
+            fetch_public_scrape_text_v1("https://example.com/")
+                .expect("node-side HTTPS fetch must succeed");
+        assert!(final_url.starts_with("https://"));
+        assert!(body.len() >= 80, "unexpectedly empty public web document");
+        assert!(body.to_ascii_lowercase().contains("example domain"));
+    }
+
+    #[test]
+    #[ignore = "requires third-party public HTTPS redirect service"]
+    fn real_external_https_redirect_to_loopback_is_rejected() {
+        let error = fetch_public_scrape_text_v1(
+            "https://httpbin.org/redirect-to?url=https%3A%2F%2F127.0.0.1%2F"
+        ).unwrap_err();
+        assert_eq!(error, "scrape_url_non_public_address");
     }
 }

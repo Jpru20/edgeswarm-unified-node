@@ -49,10 +49,132 @@ pub struct AdaptiveExecutionContract {
     #[serde(default)]
     pub structured_failure_telemetry: Option<bool>,
 }
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeWebSearchContractV1 {
+    #[serde(default)]
+    pub broker_path: Option<String>,
+
+    #[serde(default)]
+    pub max_searches: Option<u64>,
+
+    #[serde(default)]
+    pub max_results_per_search: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeWebFetchContractV1 {
+    #[serde(default)]
+    pub max_fetches: Option<u64>,
+
+    #[serde(default)]
+    pub max_bytes_per_fetch: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeInitialSearchResultV1 {
+    #[serde(default)]
+    pub id: Option<u64>,
+
+    #[serde(default)]
+    pub rank: Option<u64>,
+
+    #[serde(default)]
+    pub title: String,
+
+    pub url: String,
+
+    #[serde(default)]
+    pub domain: String,
+
+    #[serde(default)]
+    pub description: String,
+
+    #[serde(default)]
+    pub published_at: Option<String>,
+
+    #[serde(default)]
+    pub retrieved_at: Option<String>,
+
+    #[serde(default)]
+    pub provider: String,
+
+    pub broker_ticket: String,
+    pub ticket_expires_at: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeInitialSearchV1 {
+    #[serde(default)]
+    pub version: Option<String>,
+
+    #[serde(default)]
+    pub provider: String,
+
+    #[serde(default)]
+    pub query: String,
+
+    #[serde(default)]
+    pub results: Vec<NodeInitialSearchResultV1>,
+
+    #[serde(default)]
+    pub result_count: u64,
+
+    #[serde(default)]
+    pub cache_hit: bool,
+
+    #[serde(default)]
+    pub provider_elapsed_ms: u64,
+
+    #[serde(default)]
+    pub broker_elapsed_ms: u64,
+
+    #[serde(default)]
+    pub ticket_expires_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeToolContractV1 {
+    #[serde(default)]
+    pub version: Option<String>,
+
+    #[serde(default)]
+    pub stage: Option<String>,
+
+    #[serde(default)]
+    pub initial_query: Option<String>,
+
+    #[serde(default)]
+    pub initial_search: Option<NodeInitialSearchV1>,
+
+    #[serde(default)]
+    pub required_capabilities: Vec<String>,
+
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+
+    #[serde(default)]
+    pub web_search: Option<NodeWebSearchContractV1>,
+
+    #[serde(default)]
+    pub web_fetch: Option<NodeWebFetchContractV1>,
+
+    #[serde(default)]
+    pub max_tool_steps: Option<u64>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskEnvelope {
     pub task_id: Value,
+
+    #[serde(default)]
+    pub attempt_id: Option<String>,
 
     #[serde(default)]
     pub client_name: Option<String>,
@@ -65,6 +187,9 @@ pub struct TaskEnvelope {
 
     #[serde(default)]
     pub selected_model: Option<String>,
+
+    #[serde(default)]
+    pub company_model: Option<crate::core::company_model::CompanyModelExecutionContractV1>,
 
     #[serde(default)]
     pub model_route_reason: Option<String>,
@@ -90,6 +215,9 @@ pub struct TaskEnvelope {
 
     #[serde(default)]
     pub streaming_contract: Option<StreamingContract>,
+
+    #[serde(default)]
+    pub tool_contract: Option<NodeToolContractV1>,
 }
 
 impl TaskEnvelope {
@@ -124,6 +252,9 @@ pub struct GetJobsResponse {
 #[serde(rename_all = "camelCase")]
 pub struct ResultPayload {
     pub task_id: Value,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
     pub worker: String,
     pub provider_email: String,
     pub score: u16,
@@ -227,12 +358,13 @@ pub fn build_submit_result(
     let task_id = task.task_id_text();
 
     let signature =
-        result_signing::sign_result(&task_id, score, &file_hash, hardware_id, private_key)?;
+        result_signing::sign_result_with_attempt(&task_id, score, &file_hash, hardware_id, task.attempt_id.as_deref(), private_key)?;
 
     Ok(SubmitResultEnvelope {
         file_hash,
         payload: ResultPayload {
             task_id: task.task_id.clone(),
+            attempt_id: task.attempt_id.clone(),
             worker: worker.to_string(),
             provider_email: provider_email.to_lowercase(),
             score,
@@ -283,6 +415,8 @@ mod tests {
     #[test]
     fn builds_signed_result_envelope() {
         let task = TaskEnvelope {
+            attempt_id: None,
+            company_model: None,
             task_id: Value::from(2001),
             client_name: None,
             prompt: "Say hello".into(),
@@ -296,6 +430,7 @@ mod tests {
             max_output_tokens: Some(128),
             execution_contract: None,
             streaming_contract: None,
+            tool_contract: None,
         };
 
         let result = build_submit_result(
