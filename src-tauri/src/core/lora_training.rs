@@ -22,8 +22,14 @@ use std::{
 pub const LORA_TRAINING_CAPABILITY_V1: &str =
     "LoRA-Training-V1";
 
-pub const LORA_TRAINING_ENGINE_V1: &str =
-    "edgeswarm-qlora-windows-v1";
+#[cfg(target_os = "windows")]
+pub const LORA_TRAINING_ENGINE_V1: &str = "edgeswarm-qlora-windows-v1";
+
+#[cfg(target_os = "linux")]
+pub const LORA_TRAINING_ENGINE_V1: &str = "edgeswarm-qlora-linux-cuda-v1";
+
+#[cfg(target_os = "macos")]
+pub const LORA_TRAINING_ENGINE_V1: &str = "edgeswarm-mlx-macos-metal-v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -269,30 +275,23 @@ pub fn detect_lora_training_v1(
     state: &NodeState,
     primary_model_id: Option<&str>,
 ) -> LoraTrainingStatusV1 {
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = state;
-        let _ = primary_model_id;
+    // HIVE_CROSS_PLATFORM_TRAINER_ELIGIBILITY_V1
+    // Different native trainer artifacts have distinct pinned engines.
+    // No platform is eligible without its own certified manifest and hash.
+    let backend = state.acceleration.backend.trim();
+    let expected_backend = if cfg!(target_os = "macos") {
+        "metal"
+    } else if cfg!(any(target_os = "windows", target_os = "linux")) {
+        "cuda"
+    } else {
+        return disabled("platform_training_backend_unsupported");
+    };
 
-        return disabled(
-            "platform_not_windows_v1"
-        );
+    if !backend.eq_ignore_ascii_case(expected_backend) {
+        return disabled(format!("training_backend_required:{expected_backend}"));
     }
 
-    #[cfg(target_os = "windows")]
     {
-        if !state
-            .acceleration
-            .backend
-            .eq_ignore_ascii_case(
-                "cuda"
-            )
-        {
-            return disabled(
-                "cuda_required"
-            );
-        }
-
         let model_id =
             match primary_model_id {
                 Some(value)
@@ -516,8 +515,7 @@ pub fn detect_lora_training_v1(
                 ),
 
             reason:
-                "certified_windows_qlora_runtime"
-                    .into(),
+                format!("certified_native_lora_runtime:{expected_backend}"),
         }
     }
 }
