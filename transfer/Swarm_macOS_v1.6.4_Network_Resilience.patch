@@ -1,0 +1,144 @@
+diff --git a/src-tauri/src/core/node_service.rs b/src-tauri/src/core/node_service.rs
+--- a/src-tauri/src/core/node_service.rs
++++ b/src-tauri/src/core/node_service.rs
+@@ -524,9 +524,44 @@
+     false
+ }
+ 
+-#[cfg(test)]
+-#[test]
+-fn transient_node_transport_errors_are_classified_v1() {
++#[cfg(target_os = "macos")]
++fn macos_transient_auth_refresh_error_v1(error: &str) -> bool {
++    if error.starts_with("supabase_refresh_request_failed:") {
++        return true;
++    }
++    error
++        .strip_prefix("supabase_refresh_http_")
++        .and_then(|value| value.parse::<u16>().ok())
++        .map(|status| matches!(status, 408 | 425 | 429) || (500..=599).contains(&status))
++        .unwrap_or(false)
++}
++
++#[cfg(target_os = "macos")]
++fn macos_outage_retry_pause_v1(stop: &AtomicBool, seconds: u64) -> bool {
++    for _ in 0..seconds.saturating_mul(4) {
++        if stop.load(Ordering::Acquire) {
++            return false;
++        }
++        thread::sleep(Duration::from_millis(250));
++    }
++    !stop.load(Ordering::Acquire)
++}
++
++#[cfg(all(test, target_os = "macos"))]
++#[test]
++fn macos_transient_auth_error_classification_v1() {
++    assert!(macos_transient_auth_refresh_error_v1(
++        "supabase_refresh_request_failed:transport"
++    ));
++    assert!(macos_transient_auth_refresh_error_v1("supabase_refresh_http_503"));
++    assert!(!macos_transient_auth_refresh_error_v1("supabase_refresh_http_400"));
++    assert!(!macos_transient_auth_refresh_error_v1("auth_session_mfa_not_verified"));
++    assert!(!macos_outage_retry_pause_v1(&AtomicBool::new(true), 0));
++}
++
++#[cfg(test)]
++#[test]
++fn transient_node_transport_errors_are_classified_v1() {
+     assert!(transient_node_transport_error_v1(
+         "task_poll_network_failed"
+     ));
+@@ -1759,8 +1794,35 @@
+     stop: Arc<AtomicBool>,
+     mut wallet_password: Zeroizing<String>,
+ ) -> Result<(), String> {
+-    let auth_client = SupabaseAuthClient::from_env()?;
+-    auth_client.ensure_valid_session(true)?;
++    let auth_client = SupabaseAuthClient::from_env()?;
++
++    // MACOS_AUTH_STARTUP_OUTAGE_RESILIENCE_V1
++    // Retry only transient transport/server failures. Invalid MFA,
++    // rejected credentials and malformed sessions still fail closed.
++    #[cfg(target_os = "macos")]
++    {
++        let mut retry_delay_secs_v1 = 2_u64;
++        loop {
++            if stop.load(Ordering::Acquire) {
++                return Ok(());
++            }
++            match auth_client.ensure_valid_session(true) {
++                Ok(_) => break,
++                Err(error) if macos_transient_auth_refresh_error_v1(&error) => {
++                    println!("MACOS_AUTH_STARTUP_TRANSIENT_FAILURE=true");
++                    println!("MACOS_AUTH_STARTUP_RETRY_DELAY_SEC={retry_delay_secs_v1}");
++                    if !macos_outage_retry_pause_v1(stop.as_ref(), retry_delay_secs_v1) {
++                        return Ok(());
++                    }
++                    retry_delay_secs_v1 = retry_delay_secs_v1.saturating_mul(2).min(60);
++                }
++                Err(error) => return Err(error),
++            }
++        }
++    }
++
++    #[cfg(not(target_os = "macos"))]
++    auth_client.ensure_valid_session(true)?;
+ 
+     let mut auth = read_auth()?;
+     let mut state = NodeState::detect();
+@@ -2068,12 +2130,36 @@
+         .build()
+         .map_err(|_| "backend_http_client_failed".to_string())?;
+ 
+-    let readiness_status = send_heartbeat(
+-        &http,
+-        &auth_client,
+-        &mut auth,
+-        &base_heartbeat,
+-    )?;
++    // MACOS_READINESS_OUTAGE_RESILIENCE_V1
++    // Keep the certified runtime alive through transient backend outages.
++    #[cfg(target_os = "macos")]
++    let readiness_status = {
++        let mut retry_delay_secs_v1 = 2_u64;
++        loop {
++            if stop.load(Ordering::Acquire) {
++                return Ok(());
++            }
++            match send_heartbeat(&http, &auth_client, &mut auth, &base_heartbeat) {
++                Ok(status) => break status,
++                Err(error) if transient_node_transport_error_v1(&error) => {
++                    println!("MACOS_READINESS_TRANSIENT_FAILURE={error}");
++                    println!("MACOS_READINESS_RETRY_DELAY_SEC={retry_delay_secs_v1}");
++                    if !macos_outage_retry_pause_v1(stop.as_ref(), retry_delay_secs_v1) {
++                        return Ok(());
++                    }
++                    retry_delay_secs_v1 = retry_delay_secs_v1.saturating_mul(2).min(60);
++                }
++                Err(error) => return Err(error),
++            }
++        }
++    };
++    #[cfg(not(target_os = "macos"))]
++    let readiness_status = send_heartbeat(
++        &http,
++        &auth_client,
++        &mut auth,
++        &base_heartbeat,
++    )?;
+ 
+     println!("READINESS_HEARTBEAT_HTTP_STATUS={readiness_status}");
+ 
+diff --git a/src-tauri/src/bin/edgeswarm_node_supervisor_macos.rs b/src-tauri/src/bin/edgeswarm_node_supervisor_macos.rs
+--- a/src-tauri/src/bin/edgeswarm_node_supervisor_macos.rs
++++ b/src-tauri/src/bin/edgeswarm_node_supervisor_macos.rs
+@@ -30,7 +30,7 @@
+         Duration::from_secs(60);
+ 
+     const RESTART_DELAYS: [u64; 6] =
+-        [1, 2, 5, 10, 20, 30];
++        [1, 2, 5, 30, 120, 900];
+ 
+     struct SupervisorLock {
+         _file: File,
