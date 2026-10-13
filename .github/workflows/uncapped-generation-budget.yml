@@ -1,0 +1,20 @@
+name: Uncapped generation budget
+on:
+  pull_request:
+    paths:
+      - src-tauri/src/core/generation_policy.rs
+      - .github/workflows/uncapped-generation-budget.yml
+  push:
+    branches:
+      - fix/uncap-generative-output-20261013
+permissions:
+  contents: read
+jobs:
+  generation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test generation policy
+        working-directory: src-tauri
+        run: cargo test generation_policy --lib --locked
