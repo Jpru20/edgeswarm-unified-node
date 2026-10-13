@@ -7,9 +7,6 @@ pub struct GenerationSettings {
     pub stop: Vec<String>,
 }
 
-const QWEN_GENERATIVE_MAX_TOKENS: u32 = 384;
-const QWEN_CODE_MAX_TOKENS: u32 = 1024;
-const QWEN_JSON_MAX_TOKENS: u32 = 640;
 const QWEN_EXACT_MAX_TOKENS: u32 = 120;
 
 fn is_code_generation_prompt_v2(prompt: &str) -> bool {
@@ -66,30 +63,18 @@ pub fn production_generation_settings_v1(
 ) -> GenerationSettings {
     let mode = task_mode.unwrap_or("").trim().to_lowercase();
 
-    let (generation_mode, mut budget, temperature, top_p) = if mode == "exact_extraction" {
-        ("exact_extraction", QWEN_EXACT_MAX_TOKENS, 0.0, 0.1)
+    // Respect the task's requested budget for customer-facing generation.
+    // Exact extraction retains a small structured-output safety boundary.
+    let (generation_mode, budget, temperature, top_p) = if mode == "exact_extraction" {
+        ("exact_extraction", max_tokens.unwrap_or(QWEN_EXACT_MAX_TOKENS).max(1).min(QWEN_EXACT_MAX_TOKENS), 0.0, 0.1)
     } else if is_code_generation_prompt_v2(prompt) {
-        ("code", QWEN_CODE_MAX_TOKENS, 0.10, 0.85)
+        ("code", max_tokens.unwrap_or(4096).max(1), 0.10, 0.85)
     } else if is_json_response_prompt_v2(prompt) {
-        ("json", QWEN_JSON_MAX_TOKENS, 0.05, 0.75)
+        ("json", max_tokens.unwrap_or(4096).max(1), 0.05, 0.75)
     } else {
-        ("general", QWEN_GENERATIVE_MAX_TOKENS, 0.15, 0.8)
+        ("general", max_tokens.unwrap_or(4096).max(1), 0.15, 0.8)
     };
-
-    if let Some(maximum) = max_tokens {
-        budget = budget.min(maximum.max(1));
-    }
-
-    if generation_mode == "general" {
-        let text = prompt.to_lowercase();
-
-        if ["one concise sentence", "one sentence", "single sentence"]
-            .iter()
-            .any(|phrase| text.contains(phrase))
-        {
-            budget = budget.min(64);
-        }
-    }
+    let budget = budget;
 
     GenerationSettings {
         mode: generation_mode.into(),
@@ -159,23 +144,6 @@ pub fn production_generation_settings_adaptive_v1(
             );
     }
 
-    // An explicit concise-answer instruction is itself a
-    // task-specific output constraint, not a global model cap.
-    if generation_mode == "general" {
-        let text = prompt.to_lowercase();
-
-        if [
-            "one concise sentence",
-            "one sentence",
-            "single sentence",
-        ]
-        .iter()
-        .any(|phrase| text.contains(phrase))
-        {
-            budget = budget.min(64);
-        }
-    }
-
     GenerationSettings {
         mode:
             generation_mode.into(),
@@ -198,6 +166,24 @@ mod tests {
         certification_workload::built_in_3b_realworld_v2,
         production_prompt::compile_certification_prompt,
     };
+
+    #[test]
+    fn legacy_general_no_longer_caps_at_384() {
+        let settings = production_generation_settings_v1(
+            "Write a detailed 1500 word explanation.", None, Some(4096),
+        );
+        assert_eq!(settings.max_tokens, 4096);
+    }
+
+    #[test]
+    fn legacy_code_and_json_honor_request_budget() {
+        assert_eq!(production_generation_settings_v1(
+            "Return code only. Build a React component.", None, Some(4096),
+        ).max_tokens, 4096);
+        assert_eq!(production_generation_settings_v1(
+            "Return valid JSON only using keys: summary.", None, Some(4096),
+        ).max_tokens, 4096);
+    }
 
     #[test]
     fn adaptive_general_honors_backend_budget() {
@@ -239,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_explicit_one_sentence_remains_concise() {
+    fn adaptive_explicit_one_sentence_is_prompt_not_hidden_token_cap() {
         let settings =
             production_generation_settings_adaptive_v1(
                 "Answer in one concise sentence.",
@@ -247,7 +233,7 @@ mod tests {
                 Some(4096),
             );
 
-        assert_eq!(settings.max_tokens, 64);
+        assert_eq!(settings.max_tokens, 4096);
     }
 
     #[test]
@@ -264,7 +250,7 @@ mod tests {
         );
 
         assert_eq!(settings.mode, "json");
-        assert_eq!(settings.max_tokens, workload.max_output_tokens.min(640));
+        assert_eq!(settings.max_tokens, workload.max_output_tokens);
         assert!((settings.temperature - 0.05).abs() < 0.0001);
         assert!((settings.top_p - 0.75).abs() < 0.0001);
     }
