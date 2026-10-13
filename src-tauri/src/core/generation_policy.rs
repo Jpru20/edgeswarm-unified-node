@@ -74,18 +74,7 @@ pub fn production_generation_settings_v1(
     } else {
         ("general", max_tokens.unwrap_or(4096).max(1), 0.15, 0.8)
     };
-    let mut budget = budget;
-
-    if generation_mode == "general" {
-        let text = prompt.to_lowercase();
-
-        if ["one concise sentence", "one sentence", "single sentence"]
-            .iter()
-            .any(|phrase| text.contains(phrase))
-        {
-            budget = budget.min(64);
-        }
-    }
+    let budget = budget;
 
     GenerationSettings {
         mode: generation_mode.into(),
@@ -153,23 +142,6 @@ pub fn production_generation_settings_adaptive_v1(
             budget.min(
                 QWEN_EXACT_MAX_TOKENS
             );
-    }
-
-    // An explicit concise-answer instruction is itself a
-    // task-specific output constraint, not a global model cap.
-    if generation_mode == "general" {
-        let text = prompt.to_lowercase();
-
-        if [
-            "one concise sentence",
-            "one sentence",
-            "single sentence",
-        ]
-        .iter()
-        .any(|phrase| text.contains(phrase))
-        {
-            budget = budget.min(64);
-        }
     }
 
     GenerationSettings {
@@ -253,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_explicit_one_sentence_remains_concise() {
+    fn adaptive_explicit_one_sentence_is_prompt_not_hidden_token_cap() {
         let settings =
             production_generation_settings_adaptive_v1(
                 "Answer in one concise sentence.",
@@ -261,7 +233,7 @@ mod tests {
                 Some(4096),
             );
 
-        assert_eq!(settings.max_tokens, 64);
+        assert_eq!(settings.max_tokens, 4096);
     }
 
     #[test]
