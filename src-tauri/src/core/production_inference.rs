@@ -17,6 +17,18 @@ pub struct ProductionInferenceResult {
     pub prompt_eval_ms: Option<u64>,
     pub generation_ms: Option<u64>,
     pub max_tokens: u32,
+    pub finish_reason: Option<String>,
+    pub token_count_method: &'static str,
+}
+
+// Completion state is provider-reported; do not infer semantic completion from length.
+fn completion_finish_reason_v1(message: &Value) -> Option<String> {
+    message
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty() && reason.len() <= 64)
+        .map(str::to_owned)
 }
 
 #[derive(Clone)]
@@ -265,6 +277,8 @@ impl ProductionLlamaClient {
         let mut runtime_tps = None::<f64>;
         let mut prompt_eval_ms = None::<u64>;
         let mut generation_ms = None::<u64>;
+        let mut finish_reason = None::<String>;
+        let mut runtime_token_count_reported = false;
 
         for line_result in reader.lines() {
             let line =
@@ -288,6 +302,10 @@ impl ProductionLlamaClient {
 
             let parsed: Value = serde_json::from_str(data)
                 .map_err(|_| "production_llama_stream_json_failed".to_string())?;
+
+            if let Some(reason) = completion_finish_reason_v1(&parsed) {
+                finish_reason = Some(reason);
+            }
 
             let delta = parsed
                 .pointer("/choices/0/delta/content")
@@ -318,6 +336,7 @@ impl ProductionLlamaClient {
                 })
             {
                 output_tokens = value;
+                runtime_token_count_reported = true;
             }
 
             if let Some(value) = parsed
@@ -385,6 +404,12 @@ impl ProductionLlamaClient {
             prompt_eval_ms,
             generation_ms,
             max_tokens,
+            finish_reason,
+            token_count_method: if runtime_token_count_reported {
+                "runtime-reported"
+            } else {
+                "node-char-estimate"
+            },
         })
     }
 
@@ -581,6 +606,8 @@ impl ProductionLlamaClient {
             .or_else(|| parsed.pointer("/timings/prompt_n").and_then(Value::as_u64))
             .unwrap_or(0);
 
+        let finish_reason = completion_finish_reason_v1(&parsed);
+
         let output_tokens = parsed
             .pointer("/usage/completion_tokens")
             .and_then(Value::as_u64)
@@ -621,6 +648,34 @@ impl ProductionLlamaClient {
             prompt_eval_ms,
             generation_ms,
             max_tokens,
+            finish_reason,
+            token_count_method: if output_tokens > 0 {
+                "runtime-reported"
+            } else {
+                "node-unavailable"
+            },
         })
+    }
+}
+
+// Completion/length tests reuse the production parser; no synthetic executor.
+#[cfg(test)]
+mod finish_reason_tests {
+    use super::*;
+    #[test]
+    fn records_natural_stop_and_token_exhaustion() {
+        assert_eq!(
+            completion_finish_reason_v1(&json!({"choices":[{"finish_reason":"stop"}]})),
+            Some("stop".to_string())
+        );
+        assert_eq!(
+            completion_finish_reason_v1(&json!({"choices":[{"finish_reason":"length"}]})),
+            Some("length".to_string())
+        );
+    }
+    #[test]
+    fn missing_finish_reason_stays_unknown() {
+        assert_eq!(completion_finish_reason_v1(&json!({"choices":[{}]})), None);
+        assert_eq!(completion_finish_reason_v1(&json!({})), None);
     }
 }
