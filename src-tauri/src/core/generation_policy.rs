@@ -7,9 +7,6 @@ pub struct GenerationSettings {
     pub stop: Vec<String>,
 }
 
-const QWEN_GENERATIVE_MAX_TOKENS: u32 = 384;
-const QWEN_CODE_MAX_TOKENS: u32 = 1024;
-const QWEN_JSON_MAX_TOKENS: u32 = 640;
 const QWEN_EXACT_MAX_TOKENS: u32 = 120;
 
 fn is_code_generation_prompt_v2(prompt: &str) -> bool {
@@ -66,31 +63,17 @@ pub fn production_generation_settings_v1(
 ) -> GenerationSettings {
     let mode = task_mode.unwrap_or("").trim().to_lowercase();
 
-    let (generation_mode, mut budget, temperature, top_p) = if mode == "exact_extraction" {
-        ("exact_extraction", QWEN_EXACT_MAX_TOKENS, 0.0, 0.1)
+    // Respect the task's requested budget for customer-facing generation.
+    // Exact extraction retains a small structured-output safety boundary.
+    let (generation_mode, budget, temperature, top_p) = if mode == "exact_extraction" {
+        ("exact_extraction", max_tokens.unwrap_or(QWEN_EXACT_MAX_TOKENS).max(1).min(QWEN_EXACT_MAX_TOKENS), 0.0, 0.1)
     } else if is_code_generation_prompt_v2(prompt) {
-        ("code", QWEN_CODE_MAX_TOKENS, 0.10, 0.85)
+        ("code", max_tokens.unwrap_or(u32::MAX).max(1), 0.10, 0.85)
     } else if is_json_response_prompt_v2(prompt) {
-        ("json", QWEN_JSON_MAX_TOKENS, 0.05, 0.75)
+        ("json", max_tokens.unwrap_or(u32::MAX).max(1), 0.05, 0.75)
     } else {
-        ("general", QWEN_GENERATIVE_MAX_TOKENS, 0.15, 0.8)
+        ("general", max_tokens.unwrap_or(u32::MAX).max(1), 0.15, 0.8)
     };
-
-    if let Some(maximum) = max_tokens {
-        budget = budget.min(maximum.max(1));
-    }
-
-    if generation_mode == "general" {
-        let text = prompt.to_lowercase();
-
-        if ["one concise sentence", "one sentence", "single sentence"]
-            .iter()
-            .any(|phrase| text.contains(phrase))
-        {
-            budget = budget.min(64);
-        }
-    }
-
     GenerationSettings {
         mode: generation_mode.into(),
         max_tokens: budget.max(1),
@@ -101,9 +84,8 @@ pub fn production_generation_settings_v1(
 }
 
 // ADAPTIVE_GENERATION_BUDGET_V1
-// Legacy tasks retain the historical mode-specific ceilings.
-// adaptive-execution-v1 makes the backend-provided output budget
-// authoritative while preserving task-specific generation settings.
+// Legacy and adaptive neural tasks respect the authorized output budget.
+// Without an explicit limit, llama.cpp decides when to stop naturally.
 pub fn production_generation_settings_adaptive_v1(
     prompt: &str,
     task_mode: Option<&str>,
@@ -159,23 +141,6 @@ pub fn production_generation_settings_adaptive_v1(
             );
     }
 
-    // An explicit concise-answer instruction is itself a
-    // task-specific output constraint, not a global model cap.
-    if generation_mode == "general" {
-        let text = prompt.to_lowercase();
-
-        if [
-            "one concise sentence",
-            "one sentence",
-            "single sentence",
-        ]
-        .iter()
-        .any(|phrase| text.contains(phrase))
-        {
-            budget = budget.min(64);
-        }
-    }
-
     GenerationSettings {
         mode:
             generation_mode.into(),
@@ -198,6 +163,42 @@ mod tests {
         certification_workload::built_in_3b_realworld_v2,
         production_prompt::compile_certification_prompt,
     };
+
+    #[test]
+    fn legacy_general_no_longer_caps_at_384() {
+        let settings = production_generation_settings_v1(
+            "Write a detailed 1500 word explanation.", None, Some(4096),
+        );
+        assert_eq!(settings.max_tokens, 4096);
+    }
+
+    #[test]
+    fn legacy_code_and_json_honor_request_budget() {
+        assert_eq!(production_generation_settings_v1(
+            "Return code only. Build a React component.", None, Some(4096),
+        ).max_tokens, 4096);
+        assert_eq!(production_generation_settings_v1(
+            "Return valid JSON only using keys: summary.", None, Some(4096),
+        ).max_tokens, 4096);
+    }
+
+    #[test]
+    fn missing_customer_budget_does_not_invent_a_hidden_limit() {
+        assert_eq!(production_generation_settings_v1(
+            "Write a complete technical report.", None, None,
+        ).max_tokens, u32::MAX);
+        assert_eq!(production_generation_settings_adaptive_v1(
+            "Write a complete technical report.", None, None,
+        ).max_tokens, u32::MAX);
+    }
+
+    #[test]
+    fn exact_extraction_keeps_its_structured_output_contract() {
+        let settings = production_generation_settings_v1(
+            "Extract the ID only.", Some("exact_extraction"), Some(4096),
+        );
+        assert_eq!(settings.max_tokens, 120);
+    }
 
     #[test]
     fn adaptive_general_honors_backend_budget() {
@@ -239,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_explicit_one_sentence_remains_concise() {
+    fn adaptive_explicit_one_sentence_is_prompt_not_hidden_token_cap() {
         let settings =
             production_generation_settings_adaptive_v1(
                 "Answer in one concise sentence.",
@@ -247,7 +248,7 @@ mod tests {
                 Some(4096),
             );
 
-        assert_eq!(settings.max_tokens, 64);
+        assert_eq!(settings.max_tokens, 4096);
     }
 
     #[test]
@@ -264,7 +265,7 @@ mod tests {
         );
 
         assert_eq!(settings.mode, "json");
-        assert_eq!(settings.max_tokens, workload.max_output_tokens.min(640));
+        assert_eq!(settings.max_tokens, workload.max_output_tokens);
         assert!((settings.temperature - 0.05).abs() < 0.0001);
         assert!((settings.top_p - 0.75).abs() < 0.0001);
     }
