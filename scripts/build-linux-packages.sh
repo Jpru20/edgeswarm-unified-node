@@ -56,6 +56,7 @@ else
         cd src-tauri
         CARGO_TARGET_DIR="$BUILD_TARGET" \
             cargo build --release --no-default-features \
+            --features release-helper-common \
             --bin edgeswarm-node-headless \
             --bin edgeswarm-node-setup
     )

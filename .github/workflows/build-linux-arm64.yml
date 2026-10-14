@@ -2,6 +2,11 @@ name: Build Linux ARM64
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - "src-tauri/**"
+      - "scripts/build-linux-packages.sh"
+      - ".github/workflows/build-linux-arm64.yml"
 
 permissions:
   contents: read
