@@ -410,7 +410,9 @@ fn build_task_submit_payload(
             println!("INFERENCE_SUCCEEDED=true");
             println!("INFERENCE_LATENCY_MS={}", result.latency_ms);
 
-            serde_json::to_value(build_submit_result(
+            // Retain the signed answer contract. Usage/finish telemetry is
+            // supplementary and must never redefine its signed content.
+            let mut envelope = serde_json::to_value(build_submit_result(
                 task,
                 &result.ai_output,
                 provider_email,
@@ -422,7 +424,22 @@ fn build_task_submit_payload(
                 active_runtime.ok_or_else(|| "active_runtime_missing".to_string())?,
                 runtime_acceleration,
             )?)
-            .map_err(|_| "result_payload_encode_failed".to_string())
+            .map_err(|_| "result_payload_encode_failed".to_string())?;
+
+            if let Some(payload) = envelope.get_mut("payload").and_then(Value::as_object_mut) {
+                payload.insert("input_tokens".into(), json!(result.input_tokens));
+                payload.insert("output_tokens".into(), json!(result.output_tokens));
+                payload.insert("tokens_generated".into(), json!(result.output_tokens));
+                payload.insert("tokens_per_second".into(), json!(result.tokens_per_second));
+                payload.insert("max_tokens".into(), json!(result.max_tokens));
+                payload.insert("token_count_method".into(), json!(result.token_count_method));
+                if let Some(reason) = result.finish_reason.as_ref() {
+                    payload.insert("finish_reason".into(), json!(reason));
+                }
+            }
+            println!("INFERENCE_FINISH_REASON={}", result.finish_reason.as_deref().unwrap_or("unknown"));
+            println!("INFERENCE_OUTPUT_TOKENS={}", result.output_tokens);
+            Ok(envelope)
         }
         Err(error) => {
             println!("INFERENCE_SUCCEEDED=false");
