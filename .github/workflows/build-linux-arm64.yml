@@ -53,16 +53,47 @@ jobs:
           bash -n scripts/build-linux-packages.sh
           git diff --check
 
+      - name: Read release version from source
+        run: |
+          VERSION="$(awk -F'"' '/^version = "/ {print $2; exit}' src-tauri/Cargo.toml)"
+          test -n "$VERSION"
+          echo "RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "SOURCE_RELEASE_VERSION=$VERSION"
+
+      # Reuse the runtime already shipped with the official v1.6.4 ARM64
+      # release. The package digest comes from its published GitHub asset
+      # and the inner llama-server digest from the existing runtime manifest.
+      - name: Stage certified ARM64 llama.cpp runtime
+        run: |
+          PACKAGE="$RUNNER_TEMP/EdgeSwarm_Node_Linux_arm64_v1.6.4.deb"
+          EXPECTED_PACKAGE_SHA="e0f3633af19c1d9d9bf3a7424f0a0adb68b51ea7011768958258d19827484aad"
+          EXPECTED_RUNTIME_SHA="$(node -e 'const m=require("./packaging/runtime/llama-runtime-v1.json"); process.stdout.write(m.targets["linux-arm64"].validatedRuntimeSha256 || "")')"
+          test -n "$EXPECTED_RUNTIME_SHA"
+          curl --fail --location --retry 3 --connect-timeout 20 \
+            --output "$PACKAGE" \
+            "https://github.com/Jpru20/edgeswarm-unified-node/releases/download/v1.6.4/EdgeSwarm_Node_Linux_arm64_v1.6.4.deb"
+          printf '%s  %s\n' "$EXPECTED_PACKAGE_SHA" "$PACKAGE" | sha256sum -c -
+          STAGING="$RUNNER_TEMP/edgeswarm-certified-arm64-runtime"
+          dpkg-deb -x "$PACKAGE" "$STAGING"
+          SOURCE="$STAGING/usr/lib/edgeswarm-node/runtime/current"
+          test -x "$SOURCE/llama-server"
+          printf '%s  %s\n' "$EXPECTED_RUNTIME_SHA" "$SOURCE/llama-server" | sha256sum -c -
+          DEST="$HOME/edgeswarm-runtime-build/release/linux-arm64/current"
+          mkdir -p "$DEST"
+          cp -a "$SOURCE/." "$DEST/"
+          echo "EDGESWARM_EXPECTED_LLAMA_SHA256=$EXPECTED_RUNTIME_SHA" >> "$GITHUB_ENV"
+          echo "CERTIFIED_ARM64_LLAMA_RUNTIME=PASS"
+
       - name: Build ARM64 packages
         run: |
           bash scripts/build-linux-packages.sh
 
       - name: Validate ARM64 artifacts
         run: |
-          OUT="release/linux/1.5.15/arm64"
-          DEB="$OUT/EdgeSwarm_Node_Linux_arm64_v1.5.15.deb"
-          RPM="$OUT/EdgeSwarm_Node_Linux_arm64_v1.5.15.rpm"
-          TAR="$OUT/EdgeSwarm_Node_Linux_arm64_v1.5.15.tar.gz"
+          OUT="release/linux/${RELEASE_VERSION}/arm64"
+          DEB="$OUT/EdgeSwarm_Node_Linux_arm64_v${RELEASE_VERSION}.deb"
+          RPM="$OUT/EdgeSwarm_Node_Linux_arm64_v${RELEASE_VERSION}.rpm"
+          TAR="$OUT/EdgeSwarm_Node_Linux_arm64_v${RELEASE_VERSION}.tar.gz"
 
           test -f "$DEB"
           test -f "$RPM"
@@ -76,12 +107,12 @@ jobs:
           )
 
           echo "=== DEB ==="
-          test "$(dpkg-deb -f "$DEB" Version)" = "1.5.15"
+          test "$(dpkg-deb -f "$DEB" Version)" = "$RELEASE_VERSION"
           test "$(dpkg-deb -f "$DEB" Architecture)" = "arm64"
           dpkg-deb -f "$DEB" Package Version Architecture Depends
 
           echo "=== RPM ==="
-          test "$(rpm -qp --queryformat '%{VERSION}' "$RPM")" = "1.5.15"
+          test "$(rpm -qp --queryformat '%{VERSION}' "$RPM")" = "$RELEASE_VERSION"
           test "$(rpm -qp --queryformat '%{ARCH}' "$RPM")" = "aarch64"
           rpm -qp --queryformat 'NAME=%{NAME}\nVERSION=%{VERSION}\nARCH=%{ARCH}\n' "$RPM"
 
@@ -90,17 +121,17 @@ jobs:
           dpkg-deb -x "$DEB" "$TMP"
 
           file \
-            "$TMP/usr/lib/edgeswarm-node/edgeswarm-unified-node" \
+            "$TMP/usr/lib/edgeswarm-node/edgeswarm-node-setup" \
             "$TMP/usr/lib/edgeswarm-node/edgeswarm-node-headless"
 
-          file "$TMP/usr/lib/edgeswarm-node/edgeswarm-unified-node" |
+          file "$TMP/usr/lib/edgeswarm-node/edgeswarm-node-setup" |
             grep -Ei 'ARM aarch64|aarch64'
 
           file "$TMP/usr/lib/edgeswarm-node/edgeswarm-node-headless" |
             grep -Ei 'ARM aarch64|aarch64'
 
           sha256sum \
-            "$TMP/usr/lib/edgeswarm-node/edgeswarm-unified-node" \
+            "$TMP/usr/lib/edgeswarm-node/edgeswarm-node-setup" \
             "$TMP/usr/lib/edgeswarm-node/edgeswarm-node-headless"
 
           rm -rf "$TMP"
@@ -110,6 +141,6 @@ jobs:
       - name: Upload ARM64 release artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: EdgeSwarm-Linux-ARM64-v1.5.15
-          path: release/linux/1.5.15/arm64/*
+          name: EdgeSwarm-Linux-ARM64-v${{ env.RELEASE_VERSION }}
+          path: release/linux/${{ env.RELEASE_VERSION }}/arm64/*
           if-no-files-found: error
