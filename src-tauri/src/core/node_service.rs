@@ -20,7 +20,9 @@ use crate::core::{
     wallet_client::WorkerWalletClient,
     wallet_identity::{select_wallet_row, WalletRowDecision},
     wallet_public_identity::WalletPublicIdentity,
-    wallet_vault, NodeState,
+    wallet_vault,
+    web_retrieval_tool_v1::prepare_node_web_retrieval_v1,
+    NodeState,
 };
 use crate::runtime::llama_process::{
     resolve_llama_server_path_v1, resolve_model_root_v1, resolve_cpu_llama_server_path_v1, runtime_acceleration_for_config_v1, LlamaProcessConfig, ManagedLlamaProcess,
@@ -345,7 +347,7 @@ fn build_task_submit_payload(
         println!("ADAPTIVE_EXECUTION_ACTIVE=true");
 
         println!(
-            "ADAPTIVE_OUTPUT_TOKEN_BUDGET={}",
+            "ADAPTIVE_BACKEND_OUTPUT_TOKEN_HINT={}",
             effective_max_output_tokens_v1
                 .unwrap_or(4096)
         );
@@ -408,7 +410,9 @@ fn build_task_submit_payload(
             println!("INFERENCE_SUCCEEDED=true");
             println!("INFERENCE_LATENCY_MS={}", result.latency_ms);
 
-            serde_json::to_value(build_submit_result(
+            // Retain the signed answer contract. Usage/finish telemetry is
+            // supplementary and must never redefine its signed content.
+            let mut envelope = serde_json::to_value(build_submit_result(
                 task,
                 &result.ai_output,
                 provider_email,
@@ -420,10 +424,37 @@ fn build_task_submit_payload(
                 active_runtime.ok_or_else(|| "active_runtime_missing".to_string())?,
                 runtime_acceleration,
             )?)
-            .map_err(|_| "result_payload_encode_failed".to_string())
+            .map_err(|_| "result_payload_encode_failed".to_string())?;
+
+            if let Some(payload) = envelope.get_mut("payload").and_then(Value::as_object_mut) {
+                // Missing token counters must not become fabricated zero usage.
+                // The backend has an existing char-estimate fallback.
+                if result.input_tokens > 0 {
+                    payload.insert("input_tokens".into(), json!(result.input_tokens));
+                }
+                if result.output_tokens > 0 {
+                    payload.insert("output_tokens".into(), json!(result.output_tokens));
+                    payload.insert("tokens_generated".into(), json!(result.output_tokens));
+                }
+                if result.tokens_per_second.is_finite() && result.tokens_per_second > 0.0 {
+                    payload.insert("tokens_per_second".into(), json!(result.tokens_per_second));
+                }
+                // Zero denotes the llama.cpp natural-stop path, not a zero-token budget.
+                if result.max_tokens > 0 {
+                    payload.insert("max_tokens".into(), json!(result.max_tokens));
+                }
+                payload.insert("token_count_method".into(), json!(result.token_count_method));
+                if let Some(reason) = result.finish_reason.as_ref() {
+                    payload.insert("finish_reason".into(), json!(reason));
+                }
+            }
+            println!("INFERENCE_FINISH_REASON={}", result.finish_reason.as_deref().unwrap_or("unknown"));
+            println!("INFERENCE_OUTPUT_TOKENS={}", result.output_tokens);
+            Ok(envelope)
         }
-        Err(_) => {
+        Err(error) => {
             println!("INFERENCE_SUCCEEDED=false");
+            println!("INFERENCE_ERROR={error}");
             failure_payload(
                 task,
                 provider_email,
@@ -739,8 +770,49 @@ fn run_claimed_task_worker_v1(
     active_runtime: Option<String>,
     runtime_acceleration: String,
     poll_capabilities: Vec<String>,
+    active_company_runtime_v1:
+        Option<crate::core::company_model::CompanyModelRuntimeKeyV1>,
     stop: Arc<AtomicBool>,
 ) -> Result<TaskWorkerOutcomeV1, String> {
+    // HIVE_COMPANY_MODEL_WORKER_AFFINITY_V1
+    // Neither normal nor company tasks may cross runtime modes.
+    match (&task.company_model, &active_company_runtime_v1) {
+        (None, None) => {}
+        (Some(contract_v1), Some(active_v1)) => {
+            if !crate::core::company_model_http::
+                company_model_node_enabled_v1()
+                || contract_v1.contract_version
+                    != crate::core::company_model::
+                        COMPANY_MODEL_EXECUTION_CONTRACT_V1
+                || !contract_v1.company_model_id.eq_ignore_ascii_case(
+                    &active_v1.company_model_id
+                )
+                || contract_v1.company_model_version != active_v1.version
+                || !contract_v1.base_model_id.eq_ignore_ascii_case(
+                    &active_v1.base_model_id
+                )
+                || !contract_v1.adapter_sha256.eq_ignore_ascii_case(
+                    &active_v1.adapter_sha256
+                )
+                || active_selected_model.as_deref()
+                    .map(|model_v1| model_v1.eq_ignore_ascii_case(
+                        &active_v1.base_model_id
+                    )) != Some(true)
+            {
+                return Err("hive_task_adapter_affinity_mismatch".into());
+            }
+
+            let actual_sha_v1 = crate::core::lora_training::
+                sha256_file_v1(&active_v1.adapter_path)?;
+            if !actual_sha_v1.eq_ignore_ascii_case(
+                &active_v1.adapter_sha256
+            ) {
+                return Err("hive_task_adapter_hash_mismatch".into());
+            }
+        }
+        _ => return Err("hive_task_runtime_mode_mismatch".into()),
+    }
+
     let auth_client = SupabaseAuthClient::from_env()?;
 
     let http = Client::builder()
@@ -1144,24 +1216,182 @@ let mut stream_callback_v1 =
     }
 };
 
-let submit_payload = build_task_submit_payload(
-    &task,
-    llama.as_ref(),
-    &provider_email_for_task_v1,
-    &wallet_address,
-    &hardware,
-    private_key.as_str(),
-    active_selected_model.as_deref(),
-    active_capability.as_deref(),
-    active_runtime.as_deref(),
-    &runtime_acceleration,
-    use_streaming_execution_v1,
-    if use_streaming_execution_v1 {
-        Some(&mut stream_callback_v1 as &mut dyn FnMut(&str))
+// NODE_NATIVE_WEB_RETRIEVAL_V1
+//
+// A stage=required tool contract means the backend has already
+// performed search #1 and delivered ticketed URLs with the task.
+// This node fetches/parses those URLs locally, reasons over the
+// evidence, and uses the broker only for search #2+.
+let mut execution_task_v1 =
+    task.clone();
+
+let mut tool_execution_json_v1:
+    Option<String> = None;
+
+let mut node_web_retrieval_error_v1:
+    Option<String> = None;
+
+let node_web_retrieval_required_v1 =
+    task.tool_contract
+        .as_ref()
+        .and_then(|contract| {
+            contract.stage.as_deref()
+        })
+        .map(|stage| {
+            stage.eq_ignore_ascii_case(
+                "required"
+            )
+        })
+        .unwrap_or(false);
+
+if node_web_retrieval_required_v1 {
+    match llama.as_ref() {
+        Some(llama_client_v1) => {
+            match prepare_node_web_retrieval_v1(
+                &task,
+                llama_client_v1,
+                &auth.access_token,
+                &provider_email_for_task_v1,
+                &hardware,
+            ) {
+                Ok(Some(prepared_v1)) => {
+                    println!(
+                        "NODE_WEB_RETRIEVAL_V1=PASS searches={} sources={} ms={}",
+                        prepared_v1.search_count,
+                        prepared_v1.source_count,
+                        prepared_v1.elapsed_ms
+                    );
+
+                    execution_task_v1.prompt =
+                        prepared_v1.prompt;
+
+                    tool_execution_json_v1 =
+                        Some(
+                            prepared_v1.ledger_json
+                        );
+                }
+
+                Ok(None) => {
+                    node_web_retrieval_error_v1 =
+                        Some(
+                            "node_web_retrieval_required_contract_not_runnable"
+                                .into()
+                        );
+                }
+
+                Err(error) => {
+                    println!(
+                        "NODE_WEB_RETRIEVAL_V1=FAIL error={}",
+                        error
+                    );
+
+                    node_web_retrieval_error_v1 =
+                        Some(error);
+                }
+            }
+        }
+
+        None => {
+            node_web_retrieval_error_v1 =
+                Some(
+                    "node_web_retrieval_neural_runtime_unavailable"
+                        .into()
+                );
+        }
+    }
+}
+
+let mut submit_payload =
+    if node_web_retrieval_error_v1.is_some() {
+        failure_payload(
+            &task,
+            &provider_email_for_task_v1,
+            &wallet_address,
+            &hardware,
+            private_key.as_str(),
+            "node_web_retrieval_failed",
+        )?
     } else {
-        None
-    },
-)?;
+        build_task_submit_payload(
+            &execution_task_v1,
+            llama.as_ref(),
+            &provider_email_for_task_v1,
+            &wallet_address,
+            &hardware,
+            private_key.as_str(),
+            active_selected_model.as_deref(),
+            active_capability.as_deref(),
+            active_runtime.as_deref(),
+            &runtime_acceleration,
+            use_streaming_execution_v1,
+            if use_streaming_execution_v1 {
+                Some(
+                    &mut stream_callback_v1
+                        as &mut dyn FnMut(&str)
+                )
+            } else {
+                None
+            },
+        )?
+    };
+
+if let Some(tool_execution_json_v1) =
+    tool_execution_json_v1
+{
+    let tool_execution_hash_v1 =
+        Sha256::digest(
+            tool_execution_json_v1.as_bytes()
+        )
+        .iter()
+        .map(|byte| {
+            format!("{byte:02x}")
+        })
+        .collect::<String>();
+
+    let tool_execution_signature_v1 =
+        result_signing::sign_tool_execution(
+            &task.task_id_text(),
+            &tool_execution_hash_v1,
+            &hardware,
+            private_key.as_str(),
+        )?;
+
+    let payload_object_v1 =
+        submit_payload
+            .get_mut("payload")
+            .and_then(
+                Value::as_object_mut
+            )
+            .ok_or_else(|| {
+                "tool_execution_payload_object_missing"
+                    .to_string()
+            })?;
+
+    payload_object_v1.insert(
+        "toolExecutionJson".into(),
+        Value::String(
+            tool_execution_json_v1
+        ),
+    );
+
+    payload_object_v1.insert(
+        "toolExecutionHash".into(),
+        Value::String(
+            tool_execution_hash_v1
+        ),
+    );
+
+    payload_object_v1.insert(
+        "toolExecutionSignature".into(),
+        Value::String(
+            tool_execution_signature_v1
+        ),
+    );
+
+    println!(
+        "NODE_WEB_RETRIEVAL_LEDGER_SIGNED=true"
+    );
+}
 
 drop(stream_callback_v1);
 
@@ -1776,9 +2006,14 @@ pub fn run_node_service(
         return Err("runner_no_executable_capabilities".into());
     }
 
-    let poll_capabilities = base_heartbeat.capabilities.clone();
+    let mut poll_capabilities = base_heartbeat.capabilities.clone();
 
     let mut _managed_llama: Option<ManagedLlamaProcess> = None;
+
+    // HIVE_DISPATCHER_RUNTIME_ISOLATION_V1
+    // None is the clean base runtime. Some is an exact Company LoRA.
+    let mut active_company_runtime_v1:
+        Option<crate::core::company_model::CompanyModelRuntimeKeyV1> = None;
 
     let mut llama = if neural_ready {
         let llama_base_url = match env::var("EDGESWARM_LLAMA_BASE_URL") {
@@ -1887,6 +2122,16 @@ pub fn run_node_service(
     // is available.
     let mut queued_claimed_tasks_v1: Vec<TaskEnvelope> = Vec::new();
 
+    // SWARM_TRAINING_RUNTIME_ARTIFACT_POLL_V1
+    // Separate from Company Model inference, gated off by default.
+    let mut last_training_runtime_artifact_poll_v1 =
+        Instant::now() - Duration::from_secs(900);
+    let training_runtime_download_in_flight_v1 =
+        Arc::new(AtomicBool::new(false));
+
+    let mut last_hive_deployment_poll_v1 =
+        Instant::now() - Duration::from_secs(120);
+
     loop {
         if stop.load(Ordering::Acquire)
             && queued_claimed_tasks_v1.is_empty()
@@ -1923,6 +2168,9 @@ pub fn run_node_service(
                             single_task_mode_v1,
                         )?;
 
+                        // Capacity test restores an unadapted llama runtime.
+                        active_company_runtime_v1 = None;
+
                         let status_v1 = send_heartbeat(
                             &http,
                             &auth_client,
@@ -1954,6 +2202,137 @@ pub fn run_node_service(
                     }
                 }
             }
+        }
+
+        // HIVE_DEPLOYMENT_POLL_INTEGRATION_V1
+        // Deployment only: do not advertise or claim Company Model
+        // inference until dispatcher isolation is validated.
+        if queued_claimed_tasks_v1.is_empty()
+            && !stop.load(Ordering::Acquire)
+            && crate::core::company_model_http::
+                company_model_node_enabled_v1()
+            && last_hive_deployment_poll_v1.elapsed()
+                >= Duration::from_secs(60)
+        {
+            match crate::core::company_model_http::
+                fetch_company_deployment_v1(
+                    &http,
+                    &auth_client,
+                    &mut auth,
+                    &hardware,
+                )
+            {
+                Ok(Some(deployment_v1)) => {
+                    match crate::core::company_model_http::
+                        provision_company_deployment_v1(
+                            &http,
+                            &deployment_v1,
+                        )
+                    {
+                        Ok(()) => {
+                            println!(
+                                "HIVE_DEPLOYMENT_STAGED_VERSION={}",
+                                deployment_v1.version
+                            );
+                            // HIVE_DEPLOYMENT_CAPABILITY_REFRESH_V1
+                            // Refresh only capability + Company Model metadata;
+                            // retain the actively selected base model heartbeat.
+                            let refreshed_hive_v1 =
+                                ProductionHeartbeatV1::from_node_state(
+                                    &state,
+                                    env!("CARGO_PKG_VERSION"),
+                                    "laptop",
+                                    &[],
+                                );
+                            base_heartbeat.capabilities = refreshed_hive_v1.capabilities;
+                            base_heartbeat.metadata.company_model_v1 =
+                                refreshed_hive_v1.metadata.company_model_v1;
+                            poll_capabilities = base_heartbeat.capabilities.clone();
+
+                            match send_heartbeat(
+                                &http,
+                                &auth_client,
+                                &mut auth,
+                                &base_heartbeat,
+                            ) {
+                                Ok(status_v1) => println!(
+                                    "HIVE_DEPLOYMENT_HEARTBEAT_HTTP_STATUS={status_v1}"
+                                ),
+                                Err(error_v1) => println!(
+                                    "HIVE_DEPLOYMENT_HEARTBEAT_ERROR={error_v1}"
+                                ),
+                            }
+                        }
+
+                        Err(error_v1) => {
+                            println!(
+                                "HIVE_DEPLOYMENT_PROVISION_ERROR={error_v1}"
+                            );
+                        }
+                    }
+                }
+
+                Ok(None) => {}
+
+                Err(error_v1) => {
+                    println!(
+                        "HIVE_DEPLOYMENT_POLL_ERROR={error_v1}"
+                    );
+                }
+            }
+
+            last_hive_deployment_poll_v1 = Instant::now();
+        }
+        // TRAINING_RUNTIME_AUTO_PROVISION_CANDIDATE_V1
+        // Download runs on a background thread so inference polling remains
+        // responsive. No executable is started or training capability added.
+        if queued_claimed_tasks_v1.is_empty()
+            && !stop.load(Ordering::Acquire)
+            && last_training_runtime_artifact_poll_v1.elapsed()
+                >= Duration::from_secs(900)
+            && crate::core::training_runtime_provisioning_v1::
+                automatic_provisioning_enabled_v1()
+            && !training_runtime_download_in_flight_v1.swap(
+                true,
+                Ordering::AcqRel,
+            )
+        {
+            last_training_runtime_artifact_poll_v1 = Instant::now();
+            let training_state_v1 = state.clone();
+            let training_hardware_v1 = hardware.clone();
+            let training_in_flight_v1 =
+                training_runtime_download_in_flight_v1.clone();
+            thread::spawn(move || {
+                let outcome_v1 = std::panic::catch_unwind(
+                    std::panic::AssertUnwindSafe(|| {
+                        (|| -> Result<Option<String>, String> {
+                            let client_v1 = SupabaseAuthClient::from_env()?;
+                            let mut auth_v1 = read_auth()?;
+                            crate::core::training_runtime_provisioning_v1::
+                                poll_and_stage_candidate_v1(
+                                    &training_state_v1,
+                                    &training_hardware_v1,
+                                    &client_v1,
+                                    &mut auth_v1,
+                                )
+                        })()
+                    }),
+                );
+                // Always release this in-process guard, including panics.
+                training_in_flight_v1.store(false, Ordering::Release);
+                match outcome_v1 {
+                    Ok(Ok(Some(hash_v1))) => println!(
+                        "TRAINING_RUNTIME_INACTIVE_CANDIDATE_STAGED_SHA256={hash_v1}"
+                    ),
+                    Ok(Ok(None)) => {},
+                    Ok(Err(error_v1)) => println!(
+                        "TRAINING_RUNTIME_PROVISION_SKIPPED_OR_FAILED={error_v1}"
+                    ),
+                    Err(_) => println!(
+                        "TRAINING_RUNTIME_PROVISION_WORKER_PANICKED=true"
+                    ),
+                }
+            });
         }
 
         let tasks_v1 = if !queued_claimed_tasks_v1.is_empty() {
@@ -2120,15 +2499,73 @@ pub fn run_node_service(
             });
 
         let mut batch_model_v1: Option<String> = None;
+        let mut batch_company_runtime_v1:
+            Option<crate::core::company_model::CompanyModelRuntimeKeyV1> = None;
+        let mut batch_company_mode_set_v1 = false;
         let mut executable_tasks_v1 = Vec::new();
 
         for task_v1 in tasks_v1 {
+            let company_runtime_v1 =
+                match task_v1.company_model.as_ref() {
+                    Some(contract_v1) => {
+                        if !crate::core::company_model_http::
+                            company_model_node_enabled_v1()
+                        {
+                            return Err("hive_inference_feature_disabled".into());
+                        }
+                        Some(crate::core::company_model::
+                            runtime_key_for_contract_v1(
+                                &state,
+                                contract_v1,
+                                task_v1.selected_model.as_deref(),
+                            )?)
+                    }
+                    None => None,
+                };
+
+            if !batch_company_mode_set_v1 {
+                batch_company_runtime_v1 = company_runtime_v1.clone();
+                batch_company_mode_set_v1 = true;
+            } else if batch_company_runtime_v1 != company_runtime_v1 {
+                println!("HIVE_TASK_DEFERRED_FOR_ADAPTER_AFFINITY={}",
+                    task_v1.task_id_text());
+                queued_claimed_tasks_v1.push(task_v1);
+                continue;
+            }
+
             let target_v1 =
-                crate::core::execution_model::certified_model_for_task(
-                    &state,
-                    &task_v1,
-                    current_active_model_v1.as_ref(),
-                )?;
+                if let Some(company_v1) = company_runtime_v1.as_ref() {
+                    let model_v1 = state.models.iter().find(|model_v1| {
+                        model_v1.selected_model.eq_ignore_ascii_case(
+                            &company_v1.base_model_id
+                        ) && model_v1.status == "ready"
+                            && model_v1.capacity_status
+                                == crate::core::capacity::CapacityStatus::Certified
+                            && model_v1.certified_concurrency.unwrap_or(0) > 0
+                    }).ok_or_else(|| "hive_certified_base_unavailable".to_string())?;
+
+                    if let Some(required_v1) = task_v1.required_model.as_deref() {
+                        if required_v1.starts_with("Neural-Inference")
+                            && required_v1 != "Neural-Inference"
+                            && required_v1 != model_v1.capability
+                        {
+                            return Err("hive_required_model_mismatch".into());
+                        }
+                    }
+
+                    Some(crate::core::execution_model::ActiveModelV1 {
+                        selected_model: model_v1.selected_model.clone(),
+                        capability: model_v1.capability.clone(),
+                        runtime: model_v1.runtime.clone(),
+                        tier: model_v1.tier,
+                    })
+                } else {
+                    crate::core::execution_model::certified_model_for_task(
+                        &state,
+                        &task_v1,
+                        current_active_model_v1.as_ref(),
+                    )?
+                };
 
             if let Some(target_v1) = target_v1 {
                 if let Some(batch_model_id_v1) =
@@ -2152,6 +2589,14 @@ pub fn run_node_service(
             }
 
             executable_tasks_v1.push(task_v1);
+        }
+
+        if batch_model_v1.is_none()
+            && active_company_runtime_v1.is_some()
+            && batch_company_runtime_v1.is_none()
+        {
+            batch_model_v1 = Some(active_selected_model.clone()
+                .ok_or_else(|| "hive_clean_base_restore_model_missing".to_string())?);
         }
 
         if let Some(batch_model_id_v1) =
@@ -2186,7 +2631,7 @@ pub fn run_node_service(
                 crate::core::execution_model::runtime_switch_required(
                     active_selected_model.as_deref(),
                     &target_v1,
-                );
+                ) || active_company_runtime_v1 != batch_company_runtime_v1;
 
             println!(
                 "MODEL_RUNTIME_SWITCH_REQUIRED={switch_required_v1}"
@@ -2212,11 +2657,20 @@ pub fn run_node_service(
                 let desired_acceleration_v1 =
                     target_state_v1.acceleration.clone();
 
-                let config_v1 =
+                let mut config_v1 =
                     execution_config_for_certified_model_v1(
                         model_path_v1,
                         &desired_acceleration_v1,
                     )?;
+
+                if let Some(company_v1) = batch_company_runtime_v1.as_ref() {
+                    if !company_v1.base_model_id.eq_ignore_ascii_case(
+                        batch_model_id_v1
+                    ) {
+                        return Err("hive_active_base_mismatch".into());
+                    }
+                    config_v1.lora_adapter_path = Some(company_v1.adapter_path.clone());
+                }
 
                 let runtime_v1 =
                     ManagedLlamaProcess::start(&config_v1)?;
@@ -2233,6 +2687,9 @@ pub fn run_node_service(
                 _managed_llama = Some(runtime_v1);
                 llama = Some(client_v1);
 
+                // Only mark the adapter active after the runtime health check.
+                active_company_runtime_v1 = batch_company_runtime_v1.clone();
+
                 active_selected_model =
                     Some(target_v1.selected_model.clone());
 
@@ -2247,6 +2704,12 @@ pub fn run_node_service(
                         &state,
                         batch_model_id_v1,
                     );
+
+                // V1 Company Model execution is serial, even if the
+                // base model is certified for concurrent normal inference.
+                if active_company_runtime_v1.is_some() {
+                    operational_limit_v1 = 1;
+                }
 
                 if single_task_mode_v1 {
                     operational_limit_v1 = 1;
@@ -2409,6 +2872,8 @@ pub fn run_node_service(
             let capabilities_v1 =
                 poll_capabilities.clone();
 
+            let company_runtime_v1 = active_company_runtime_v1.clone();
+
             let stop_v1 =
                 stop.clone();
 
@@ -2431,6 +2896,7 @@ pub fn run_node_service(
                                 runtime_v1,
                                 acceleration_v1,
                                 capabilities_v1,
+                                company_runtime_v1,
                                 stop_v1,
                             )
                         })
@@ -2601,6 +3067,31 @@ pub fn run_node_service(
                 if let Some(correction_task_v1) =
                     correction_v1
                 {
+                    let correction_company_v1 =
+                        match correction_task_v1.company_model.as_ref() {
+                            Some(contract_v1) => {
+                                if !crate::core::company_model_http::
+                                    company_model_node_enabled_v1()
+                                {
+                                    return Err("hive_inference_feature_disabled".into());
+                                }
+                                Some(crate::core::company_model::
+                                    runtime_key_for_contract_v1(
+                                        &state,
+                                        contract_v1,
+                                        correction_task_v1.selected_model.as_deref(),
+                                    )?)
+                            }
+                            None => None,
+                        };
+
+                    if correction_company_v1 != active_company_runtime_v1 {
+                        println!("HIVE_CORRECTION_DEFERRED_FOR_ADAPTER_AFFINITY={}",
+                            correction_task_v1.task_id_text());
+                        queued_claimed_tasks_v1.push(correction_task_v1);
+                        continue;
+                    }
+
                     let correction_id_v1 =
                         correction_task_v1.task_id_text();
 
@@ -2639,6 +3130,8 @@ pub fn run_node_service(
                     let capabilities_v1 =
                         poll_capabilities.clone();
 
+                    let company_runtime_v1 = active_company_runtime_v1.clone();
+
                     let stop_v1 =
                         stop.clone();
 
@@ -2661,6 +3154,7 @@ pub fn run_node_service(
                                         runtime_v1,
                                         acceleration_v1,
                                         capabilities_v1,
+                                        company_runtime_v1,
                                         stop_v1,
                                     )
                                 })
@@ -2855,6 +3349,31 @@ pub fn run_node_service(
                         current_model_v1.as_ref(),
                     )?;
 
+                let refill_company_v1 =
+                    match refill_task_v1.company_model.as_ref() {
+                        Some(contract_v1) => {
+                            if !crate::core::company_model_http::
+                                company_model_node_enabled_v1()
+                            {
+                                return Err("hive_inference_feature_disabled".into());
+                            }
+                            Some(crate::core::company_model::
+                                runtime_key_for_contract_v1(
+                                    &state,
+                                    contract_v1,
+                                    refill_task_v1.selected_model.as_deref(),
+                                )?)
+                        }
+                        None => None,
+                    };
+
+                if refill_company_v1 != active_company_runtime_v1 {
+                    println!("HIVE_REFILL_DEFERRED_FOR_ADAPTER_AFFINITY={}",
+                        refill_task_v1.task_id_text());
+                    queued_claimed_tasks_v1.push(refill_task_v1);
+                    continue;
+                }
+
                 if let Some(target_v1) =
                     refill_target_v1.as_ref()
                 {
@@ -2913,6 +3432,8 @@ pub fn run_node_service(
                 let capabilities_v1 =
                     poll_capabilities.clone();
 
+                let company_runtime_v1 = active_company_runtime_v1.clone();
+
                 let stop_v1 =
                     stop.clone();
 
@@ -2935,6 +3456,7 @@ pub fn run_node_service(
                                     runtime_v1,
                                     acceleration_v1,
                                     capabilities_v1,
+                                    company_runtime_v1,
                                     stop_v1,
                                 )
                             })

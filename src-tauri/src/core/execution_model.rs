@@ -242,6 +242,8 @@ mod tests {
 
     fn task(required: &str, selected: Option<&str>) -> TaskEnvelope {
         TaskEnvelope {
+            attempt_id: None,
+            company_model: None,
             task_id: json!("routing-test"),
             client_name: None,
             prompt: "test".into(),
@@ -255,6 +257,7 @@ mod tests {
             max_output_tokens: None,
             execution_contract: None,
             streaming_contract: None,
+            tool_contract: None,
         }
     }
 

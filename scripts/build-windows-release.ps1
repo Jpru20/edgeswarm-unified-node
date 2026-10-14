@@ -39,6 +39,47 @@ $CudaBackendDll = Join-Path $CudaRuntimeSource "ggml-cuda.dll"
 $VulkanRuntimeExe = Join-Path $VulkanRuntimeSource "llama-server.exe"
 $VulkanBackendDll = Join-Path $VulkanRuntimeSource "ggml-vulkan.dll"
 
+# WINDOWS_LORA_TRAINING_RUNTIME_V1
+$TrainingRuntimeSource =
+    Join-Path $env:USERPROFILE `
+        "edgeswarm-training-runtime\release\windows-x64\current"
+
+$TrainingRuntimeExe =
+    Join-Path $TrainingRuntimeSource `
+        "edgeswarm-lora-trainer.exe"
+
+$TrainingRuntimeManifest =
+    Join-Path $TrainingRuntimeSource `
+        "trainer-manifest.json"
+
+$EnableLoraTraining =
+    [string]$Config[
+        'EDGESWARM_ENABLE_LORA_TRAINING_V1'
+    ] -eq 'true'
+
+if ($EnableLoraTraining) {
+    foreach ($Required in @(
+        $TrainingRuntimeExe,
+        $TrainingRuntimeManifest
+    )) {
+        if (!(Test-Path -LiteralPath $Required)) {
+            throw "windows_lora_training_runtime_missing_$Required"
+        }
+    }
+
+    $TrainerSha =
+        (Get-FileHash `
+            $TrainingRuntimeExe `
+            -Algorithm SHA256
+        ).Hash.ToLower()
+
+    Write-Host "WINDOWS_LORA_TRAINING_ENABLED=true"
+    Write-Host "WINDOWS_LORA_TRAINER_SHA256=$TrainerSha"
+}
+else {
+    Write-Host "WINDOWS_LORA_TRAINING_ENABLED=false"
+}
+
 foreach ($Required in @(
     $CudaRuntimeExe,
     $CudaBackendDll,
@@ -141,6 +182,16 @@ $Resources[$CudaSourceJson] =
 
 $Resources[$VulkanSourceJson] =
     "resources/runtime/vulkan/current/"
+
+if ($EnableLoraTraining) {
+    $TrainingSourceJson =
+        ($TrainingRuntimeSource -replace '\','/') +
+        '/*'
+
+    $Resources[$TrainingSourceJson] =
+        "resources/training/current/"
+}
+
 $Resources[$TaskScriptJson] =
     "resources/windows/supervisor-task.ps1"
 

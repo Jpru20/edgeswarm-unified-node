@@ -18,6 +18,7 @@ pub const LLAMA_MODEL_ALIAS: &str = "local-model";
 pub struct LlamaProcessConfig {
     pub executable: PathBuf,
     pub model_path: PathBuf,
+    pub lora_adapter_path: Option<PathBuf>,
     pub host: String,
     pub port: u16,
     pub context_tokens: u32,
@@ -100,9 +101,10 @@ impl LlamaProcessConfig {
         Ok(Self {
             executable,
             model_path: model_path.into(),
+            lora_adapter_path: None,
             host: LLAMA_DEFAULT_HOST.into(),
             port: LLAMA_DEFAULT_PORT,
-            context_tokens: 4096,
+            context_tokens: 0,
             threads: 8,
             gpu_layers,
             startup_timeout: Duration::from_secs(180),
@@ -148,6 +150,10 @@ impl ManagedLlamaProcess {
         )?;
 
         let mut command = Command::new(&config.executable);
+
+        if let Some(adapter) = config.lora_adapter_path.as_ref() {
+            command.arg("--lora").arg(adapter);
+        }
 
         command
             .arg("-m")
@@ -477,6 +483,12 @@ fn validate_config(config: &LlamaProcessConfig) -> Result<(), String> {
         return Err("llama_model_not_file".into());
     }
 
+    if let Some(adapter) = config.lora_adapter_path.as_ref() {
+        if !adapter.is_file() {
+            return Err("llama_lora_adapter_not_file".into());
+        }
+    }
+
     if config.host != "127.0.0.1" && config.host != "localhost" {
         return Err("llama_server_non_localhost_rejected".into());
     }
@@ -485,7 +497,7 @@ fn validate_config(config: &LlamaProcessConfig) -> Result<(), String> {
         return Err("llama_server_invalid_port".into());
     }
 
-    if config.context_tokens == 0 || config.threads == 0 {
+    if config.threads == 0 {
         return Err("llama_server_invalid_runtime_config".into());
     }
 
@@ -501,6 +513,7 @@ mod tests {
         let config = LlamaProcessConfig {
             executable: PathBuf::from("server"),
             model_path: PathBuf::from("model.gguf"),
+            lora_adapter_path: None,
             host: "127.0.0.1".into(),
             port: 18081,
             context_tokens: 4096,

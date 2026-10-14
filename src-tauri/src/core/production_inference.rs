@@ -17,6 +17,18 @@ pub struct ProductionInferenceResult {
     pub prompt_eval_ms: Option<u64>,
     pub generation_ms: Option<u64>,
     pub max_tokens: u32,
+    pub finish_reason: Option<String>,
+    pub token_count_method: &'static str,
+}
+
+// Completion state is provider-reported; do not infer semantic completion from length.
+fn completion_finish_reason_v1(message: &Value) -> Option<String> {
+    message
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty() && reason.len() <= 64)
+        .map(str::to_owned)
 }
 
 #[derive(Clone)]
@@ -137,19 +149,9 @@ impl ProductionLlamaClient {
         if prompt.is_empty() {
             return Err("production_task_prompt_empty".into());
         }
-        // ADAPTIVE_GENERATION_BUDGET_V1
-        const ADAPTIVE_DEFAULT_OUTPUT_TOKENS_V1: u64 = 4096;
-
-        let requested_u64 =
-            max_output_tokens
-                .unwrap_or(
-                    if adaptive_execution {
-                        ADAPTIVE_DEFAULT_OUTPUT_TOKENS_V1
-                    } else {
-                        512
-                    }
-                )
-                .max(1);
+        // No hidden task-length ceiling. A supplied budget remains authoritative;
+        // otherwise the llama.cpp runtime stops naturally at EOS or context limit.
+        let requested_u64 = max_output_tokens.unwrap_or(u32::MAX as u64).max(1);
 
         let requested =
             u32::try_from(requested_u64)
@@ -158,26 +160,37 @@ impl ProductionLlamaClient {
         let generation =
             if adaptive_execution {
                 production_generation_settings_adaptive_v1(
-                    prompt,
-                    None,
-                    Some(requested),
+                    prompt, None, max_output_tokens.map(|_| requested),
                 )
             } else {
                 production_generation_settings_v1(
-                    prompt,
-                    None,
-                    Some(requested.min(4096)),
+                    prompt, None, max_output_tokens.map(|_| requested),
                 )
             };
 
-        let max_tokens =
-            if adaptive_execution {
-                generation.max_tokens.max(1)
+        let request_max_tokens: i64 =
+            if generation.max_tokens == u32::MAX
+            {
+                -1
             } else {
-                generation.max_tokens
-                    .max(1)
-                    .min(4096)
+                generation.max_tokens.max(1) as i64
             };
+
+        let max_tokens =
+            if request_max_tokens < 0 {
+                0
+            } else {
+                request_max_tokens as u32
+            };
+
+        println!(
+            "INFERENCE_OUTPUT_TOKEN_LIMIT={}",
+            if request_max_tokens < 0 {
+                "unbounded".to_string()
+            } else {
+                request_max_tokens.to_string()
+            }
+        );
 
         let mut body = json!({
             "model": "local-model",
@@ -189,7 +202,7 @@ impl ProductionLlamaClient {
             ],
             "temperature": generation.temperature,
             "top_p": generation.top_p,
-            "max_tokens": max_tokens,
+            "max_tokens": request_max_tokens,
             "stop": generation.stop,
             "stream": true,
             "stream_options": {
@@ -237,10 +250,25 @@ impl ProductionLlamaClient {
         let status = response.status();
 
         if !status.is_success() {
-            return Err(format!("production_llama_http_{}", status.as_u16()));
-        }
+            let body =
+                response
+                    .text()
+                    .unwrap_or_default()
+                    .replace('\r', " ")
+                    .replace('\n', " ");
 
-        let reader = BufReader::new(response);
+            let body: String =
+                body
+                    .chars()
+                    .take(800)
+                    .collect();
+
+            return Err(format!(
+                "production_llama_http_{}_body={}",
+                status.as_u16(),
+                body
+            ));
+        }let reader = BufReader::new(response);
 
         let mut output = String::new();
 
@@ -249,6 +277,8 @@ impl ProductionLlamaClient {
         let mut runtime_tps = None::<f64>;
         let mut prompt_eval_ms = None::<u64>;
         let mut generation_ms = None::<u64>;
+        let mut finish_reason = None::<String>;
+        let mut runtime_token_count_reported = false;
 
         for line_result in reader.lines() {
             let line =
@@ -272,6 +302,10 @@ impl ProductionLlamaClient {
 
             let parsed: Value = serde_json::from_str(data)
                 .map_err(|_| "production_llama_stream_json_failed".to_string())?;
+
+            if let Some(reason) = completion_finish_reason_v1(&parsed) {
+                finish_reason = Some(reason);
+            }
 
             let delta = parsed
                 .pointer("/choices/0/delta/content")
@@ -302,6 +336,7 @@ impl ProductionLlamaClient {
                 })
             {
                 output_tokens = value;
+                runtime_token_count_reported = true;
             }
 
             if let Some(value) = parsed
@@ -369,6 +404,12 @@ impl ProductionLlamaClient {
             prompt_eval_ms,
             generation_ms,
             max_tokens,
+            finish_reason,
+            token_count_method: if runtime_token_count_reported {
+                "runtime-reported"
+            } else {
+                "node-char-estimate"
+            },
         })
     }
 
@@ -411,19 +452,9 @@ impl ProductionLlamaClient {
         if prompt.is_empty() {
             return Err("production_task_prompt_empty".into());
         }
-        // ADAPTIVE_GENERATION_BUDGET_V1
-        const ADAPTIVE_DEFAULT_OUTPUT_TOKENS_V1: u64 = 4096;
-
-        let requested_u64 =
-            max_output_tokens
-                .unwrap_or(
-                    if adaptive_execution {
-                        ADAPTIVE_DEFAULT_OUTPUT_TOKENS_V1
-                    } else {
-                        512
-                    }
-                )
-                .max(1);
+        // No hidden task-length ceiling. A supplied budget remains authoritative;
+        // otherwise the llama.cpp runtime stops naturally at EOS or context limit.
+        let requested_u64 = max_output_tokens.unwrap_or(u32::MAX as u64).max(1);
 
         let requested =
             u32::try_from(requested_u64)
@@ -432,26 +463,37 @@ impl ProductionLlamaClient {
         let generation =
             if adaptive_execution {
                 production_generation_settings_adaptive_v1(
-                    prompt,
-                    None,
-                    Some(requested),
+                    prompt, None, max_output_tokens.map(|_| requested),
                 )
             } else {
                 production_generation_settings_v1(
-                    prompt,
-                    None,
-                    Some(requested.min(4096)),
+                    prompt, None, max_output_tokens.map(|_| requested),
                 )
             };
 
-        let max_tokens =
-            if adaptive_execution {
-                generation.max_tokens.max(1)
+        let request_max_tokens: i64 =
+            if generation.max_tokens == u32::MAX
+            {
+                -1
             } else {
-                generation.max_tokens
-                    .max(1)
-                    .min(4096)
+                generation.max_tokens.max(1) as i64
             };
+
+        let max_tokens =
+            if request_max_tokens < 0 {
+                0
+            } else {
+                request_max_tokens as u32
+            };
+
+        println!(
+            "INFERENCE_OUTPUT_TOKEN_LIMIT={}",
+            if request_max_tokens < 0 {
+                "unbounded".to_string()
+            } else {
+                request_max_tokens.to_string()
+            }
+        );
 
         let mut body = json!({
             "model": "local-model",
@@ -463,7 +505,7 @@ impl ProductionLlamaClient {
             ],
             "temperature": generation.temperature,
             "top_p": generation.top_p,
-            "max_tokens": max_tokens,
+            "max_tokens": request_max_tokens,
             "stop": generation.stop,
             "stream": false
         });
@@ -506,10 +548,23 @@ impl ProductionLlamaClient {
             .map_err(|_| "production_llama_response_read_failed".to_string())?;
 
         if !status.is_success() {
-            return Err(format!("production_llama_http_{}", status.as_u16()));
-        }
+            let body =
+                raw
+                    .replace('\r', " ")
+                    .replace('\n', " ");
 
-        let parsed: Value = serde_json::from_str(&raw)
+            let body: String =
+                body
+                    .chars()
+                    .take(800)
+                    .collect();
+
+            return Err(format!(
+                "production_llama_http_{}_body={}",
+                status.as_u16(),
+                body
+            ));
+        }let parsed: Value = serde_json::from_str(&raw)
             .map_err(|_| "production_llama_response_invalid".to_string())?;
 
         let output = parsed
@@ -551,6 +606,8 @@ impl ProductionLlamaClient {
             .or_else(|| parsed.pointer("/timings/prompt_n").and_then(Value::as_u64))
             .unwrap_or(0);
 
+        let finish_reason = completion_finish_reason_v1(&parsed);
+
         let output_tokens = parsed
             .pointer("/usage/completion_tokens")
             .and_then(Value::as_u64)
@@ -591,6 +648,34 @@ impl ProductionLlamaClient {
             prompt_eval_ms,
             generation_ms,
             max_tokens,
+            finish_reason,
+            token_count_method: if output_tokens > 0 {
+                "runtime-reported"
+            } else {
+                "node-unavailable"
+            },
         })
+    }
+}
+
+// Completion/length tests reuse the production parser; no synthetic executor.
+#[cfg(test)]
+mod finish_reason_tests {
+    use super::*;
+    #[test]
+    fn records_natural_stop_and_token_exhaustion() {
+        assert_eq!(
+            completion_finish_reason_v1(&json!({"choices":[{"finish_reason":"stop"}]})),
+            Some("stop".to_string())
+        );
+        assert_eq!(
+            completion_finish_reason_v1(&json!({"choices":[{"finish_reason":"length"}]})),
+            Some("length".to_string())
+        );
+    }
+    #[test]
+    fn missing_finish_reason_stays_unknown() {
+        assert_eq!(completion_finish_reason_v1(&json!({"choices":[{}]})), None);
+        assert_eq!(completion_finish_reason_v1(&json!({})), None);
     }
 }
