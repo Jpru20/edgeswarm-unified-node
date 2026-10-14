@@ -864,3 +864,45 @@ button:disabled { cursor: default; }
   flex: 0 0 auto;
   box-shadow: 0 7px 20px rgba(31, 43, 120, 0.18);
 }
+
+/* SWARM_DASHBOARD_BRAND_PARITY_V165 */
+:root {
+ --swarm-emerald: oklch(0.42 0.10 165);
+ --swarm-primary: oklch(0.50 0.11 175);
+ --swarm-muted: oklch(0.46 0.025 200);
+ --swarm-text: oklch(0.22 0.02 200);
+ --swarm-surface: oklch(0.995 0.004 95);
+ --swarm-bg: oklch(0.985 0.008 95);
+ --swarm-ring: oklch(0.55 0.12 180);
+ --swarm-gradient: linear-gradient(135deg, oklch(0.55 0.13 165), oklch(0.62 0.12 200) 55%, oklch(0.68 0.12 230));
+ --swarm-glow: 0 18px 40px -16px oklch(0.55 0.12 175 / 0.45);
+}
+html, body, #root, .app {background: var(--swarm-bg); color: var(--swarm-text);}
+.auth-screen {padding: 55px 20px 25px;}
+.auth-card {padding: 26px 22px; border: 1px solid oklch(0.30 0.03 190 / .12); border-radius: 20px; background: var(--swarm-surface); box-shadow: 0 10px 34px oklch(0.22 0.02 200 / .06);}
+.auth-card h1 {color: var(--swarm-text);}
+.auth-card .muted {color: var(--swarm-muted);}
+.auth-card form > input, .auth-card .password-row {width: 100%; max-width: 100%;}
+.auth-card input {height: 38px; color: var(--swarm-text); background: #fff; border: 1px solid oklch(0.30 0.03 190 / .16); border-radius: 9px;}
+.auth-card input:focus-visible, button:focus-visible {outline: 2px solid var(--swarm-ring); outline-offset: 2px;}
+.auth-card .primary-button, .auth-card .verify-button {min-height: 38px; background: var(--swarm-gradient); color: white; border-radius: 10px; box-shadow: var(--swarm-glow); transition: filter 150ms ease, transform 150ms ease;}
+.auth-card .primary-button:hover:not(:disabled), .auth-card .verify-button:hover:not(:disabled) {background: var(--swarm-gradient); filter: brightness(1.06); transform: translateY(-1px);}
+.auth-card .show-button {background: oklch(0.95 0.02 165); color: var(--swarm-emerald); border-radius: 9px;}
+.auth-card .show-button:hover {background: oklch(0.92 0.035 165);}
+.auth-card .status-message.working {color: var(--swarm-emerald);}
+.dashboard-modern {background: var(--swarm-bg); color: var(--swarm-text);}
+.swarm-hero, .swarm-card, .swarm-diagnostics {background: var(--swarm-surface); border-color: oklch(0.30 0.03 190 / .12);}
+.swarm-brand-mark, .swarm-primary-button:not(.stop) {background: var(--swarm-gradient); box-shadow: var(--swarm-glow);}
+.swarm-primary-button, .swarm-text-button, .swarm-signout-button {transition: transform 150ms ease, filter 150ms ease;}
+.swarm-primary-button:hover:not(:disabled), .swarm-text-button:hover:not(:disabled) {filter: brightness(1.06); transform: translateY(-1px);}
+.swarm-primary-button.stop {background: var(--swarm-text); box-shadow: none;}
+.swarm-text-button, .swarm-signout-button {color: var(--swarm-primary);}
+.swarm-progress-fill {background: var(--swarm-gradient);}
+.swarm-live-badge, .swarm-cert-state.testing {background: oklch(0.95 0.02 165); color: var(--swarm-emerald);}
+.swarm-certification-card {border-color: oklch(0.55 0.12 180 / .25);}
+.swarm-brand-logo {object-fit: contain; background: white; box-shadow: 0 7px 20px oklch(0.42 0.10 165 / .16);}
+@media (prefers-reduced-motion: reduce) {
+ .swarm-primary-button, .swarm-text-button, .swarm-signout-button, .auth-card .primary-button, .auth-card .verify-button {transition:none;}
+ .swarm-primary-button:hover:not(:disabled), .swarm-text-button:hover:not(:disabled), .auth-card .primary-button:hover:not(:disabled), .auth-card .verify-button:hover:not(:disabled) {transform:none;}
+}
+.swarm-auth-logo {display:block; width:78px; height:78px; object-fit:contain; margin:0 auto 14px; border-radius:17px; background:white;}

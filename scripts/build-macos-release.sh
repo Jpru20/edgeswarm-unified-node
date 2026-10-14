@@ -71,6 +71,9 @@ cargo build \
 
 echo "MACOS_BACKGROUND_HELPERS_BUILT=PASS"
 
+# Generate macOS icon.icns and the shared native icon sizes from the source mark
+# after the clean-source gate, before the existing signed app packaging step.
+npm run tauri icon -- src/assets/swarm-logo.png
 npm run tauri build -- --bundles app
 
 APP="$TARGET/release/bundle/macos/Swarm.app"

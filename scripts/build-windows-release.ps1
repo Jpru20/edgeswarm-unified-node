@@ -230,6 +230,10 @@ Write-Host "WINDOWS_VULKAN_RUNTIME_SOURCE=$VulkanRuntimeSource"
 Write-Host "WINDOWS_VULKAN_RUNTIME_BYTES=$VulkanBytes"
 Write-Host "WINDOWS_VULKAN_RUNTIME_STAGED=PASS"
 
+# Generate Windows icon.ico and PNG sizes from the same branded dashboard mark
+# after the clean-source gate, before the existing Tauri packaging step.
+npm.cmd run tauri icon -- src/assets/swarm-logo.png
+if ($LASTEXITCODE -ne 0) { throw "swarm_brand_icon_generation_failed_$LASTEXITCODE" }
 npm.cmd run tauri build -- --config $RuntimeConfig
 if ($LASTEXITCODE -ne 0) { throw "tauri_build_failed_$LASTEXITCODE" }
 $Exe = Join-Path $TargetDir 'release\edgeswarm-unified-node.exe'

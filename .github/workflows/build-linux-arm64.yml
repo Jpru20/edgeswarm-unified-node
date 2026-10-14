@@ -5,6 +5,9 @@ on:
   pull_request:
     paths:
       - "src-tauri/**"
+      - "src/**"
+      - "package.json"
+      - "package-lock.json"
       - "scripts/build-linux-packages.sh"
       - ".github/workflows/build-linux-arm64.yml"
 
@@ -51,6 +54,17 @@ jobs:
 
       - name: Install JavaScript dependencies
         run: npm ci
+
+      - name: Validate desktop frontend and branded native icons
+        run: |
+          npm run build
+          npm run tauri icon -- src/assets/swarm-logo.png
+          test -s src-tauri/icons/icon.icns
+          test -s src-tauri/icons/icon.ico
+          test -s src-tauri/icons/32x32.png
+          test -s src-tauri/icons/128x128.png
+          test -s src-tauri/icons/128x128@2x.png
+          echo "BRAND_FRONTEND_AND_ICONS=PASS"
 
       - name: Validate packaging scripts
         run: |

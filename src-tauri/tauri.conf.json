@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Edge Swarm Provider Node",
+        "title": "Swarm",
         "width": 600,
         "height": 360,
         "visible": false

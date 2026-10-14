@@ -552,6 +552,7 @@ function App() {
     return (
       <main className="app auth-screen">
         <section className="auth-card">
+          <img className="swarm-auth-logo" src={swarmLogo} alt="Swarm" />
           <h1>Swarm</h1>
           <p className="muted">
             Restoring your Swarm session...
@@ -565,6 +566,7 @@ function App() {
     return (
       <main className="app auth-screen">
         <section className="auth-card">
+          <img className="swarm-auth-logo" src={swarmLogo} alt="Swarm" />
           <h1>Swarm Authentication</h1>
 
           <form onSubmit={handleLogin}>
@@ -612,6 +614,7 @@ function App() {
     return (
       <main className="app auth-screen">
         <section className="auth-card">
+          <img className="swarm-auth-logo" src={swarmLogo} alt="Swarm" />
           <h1>Two-Factor Authentication</h1>
 
           <p className="muted">
