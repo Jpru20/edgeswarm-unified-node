@@ -427,11 +427,22 @@ fn build_task_submit_payload(
             .map_err(|_| "result_payload_encode_failed".to_string())?;
 
             if let Some(payload) = envelope.get_mut("payload").and_then(Value::as_object_mut) {
-                payload.insert("input_tokens".into(), json!(result.input_tokens));
-                payload.insert("output_tokens".into(), json!(result.output_tokens));
-                payload.insert("tokens_generated".into(), json!(result.output_tokens));
-                payload.insert("tokens_per_second".into(), json!(result.tokens_per_second));
-                payload.insert("max_tokens".into(), json!(result.max_tokens));
+                // Missing token counters must not become fabricated zero usage.
+                // The backend has an existing char-estimate fallback.
+                if result.input_tokens > 0 {
+                    payload.insert("input_tokens".into(), json!(result.input_tokens));
+                }
+                if result.output_tokens > 0 {
+                    payload.insert("output_tokens".into(), json!(result.output_tokens));
+                    payload.insert("tokens_generated".into(), json!(result.output_tokens));
+                }
+                if result.tokens_per_second.is_finite() && result.tokens_per_second > 0.0 {
+                    payload.insert("tokens_per_second".into(), json!(result.tokens_per_second));
+                }
+                // Zero denotes the llama.cpp natural-stop path, not a zero-token budget.
+                if result.max_tokens > 0 {
+                    payload.insert("max_tokens".into(), json!(result.max_tokens));
+                }
                 payload.insert("token_count_method".into(), json!(result.token_count_method));
                 if let Some(reason) = result.finish_reason.as_ref() {
                     payload.insert("finish_reason".into(), json!(reason));
