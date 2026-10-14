@@ -552,7 +552,7 @@ function App() {
     return (
       <main className="app auth-screen">
         <section className="auth-card">
-          <h1>Swarm</h1>
+          <img className="swarm-auth-logo" src={swarmLogo} alt="Swarm" />\n          <h1>Swarm</h1>
           <p className="muted">
             Restoring your Swarm session...
           </p>
@@ -565,7 +565,7 @@ function App() {
     return (
       <main className="app auth-screen">
         <section className="auth-card">
-          <h1>Swarm Authentication</h1>
+          <img className="swarm-auth-logo" src={swarmLogo} alt="Swarm" />\n          <h1>Swarm Authentication</h1>
 
           <form onSubmit={handleLogin}>
             <input
@@ -612,7 +612,7 @@ function App() {
     return (
       <main className="app auth-screen">
         <section className="auth-card">
-          <h1>Two-Factor Authentication</h1>
+          <img className="swarm-auth-logo" src={swarmLogo} alt="Swarm" />\n          <h1>Two-Factor Authentication</h1>
 
           <p className="muted">
             Enter the 6-digit code from your authenticator app.
