@@ -23,3 +23,6 @@ jobs:
       - name: Test generation policy
         working-directory: src-tauri
         run: cargo test generation_policy --lib --locked
+      - name: Test node finish reason parsing
+        working-directory: src-tauri
+        run: cargo test finish_reason_tests --lib --locked
