@@ -137,19 +137,9 @@ impl ProductionLlamaClient {
         if prompt.is_empty() {
             return Err("production_task_prompt_empty".into());
         }
-        // ADAPTIVE_GENERATION_BUDGET_V1
-        const ADAPTIVE_DEFAULT_OUTPUT_TOKENS_V1: u64 = 4096;
-
-        let requested_u64 =
-            max_output_tokens
-                .unwrap_or(
-                    if adaptive_execution {
-                        ADAPTIVE_DEFAULT_OUTPUT_TOKENS_V1
-                    } else {
-                        512
-                    }
-                )
-                .max(1);
+        // No hidden task-length ceiling. A supplied budget remains authoritative;
+        // otherwise the llama.cpp runtime stops naturally at EOS or context limit.
+        let requested_u64 = max_output_tokens.unwrap_or(u32::MAX as u64).max(1);
 
         let requested =
             u32::try_from(requested_u64)
@@ -158,27 +148,20 @@ impl ProductionLlamaClient {
         let generation =
             if adaptive_execution {
                 production_generation_settings_adaptive_v1(
-                    prompt,
-                    None,
-                    None,
+                    prompt, None, max_output_tokens.map(|_| requested),
                 )
             } else {
                 production_generation_settings_v1(
-                    prompt,
-                    None,
-                    Some(requested.min(4096)),
+                    prompt, None, max_output_tokens.map(|_| requested),
                 )
             };
 
         let request_max_tokens: i64 =
-            if adaptive_execution &&
-                generation.max_tokens == u32::MAX
+            if generation.max_tokens == u32::MAX
             {
                 -1
             } else {
-                generation.max_tokens
-                    .max(1)
-                    .min(4096) as i64
+                generation.max_tokens.max(1) as i64
             };
 
         let max_tokens =
@@ -444,19 +427,9 @@ impl ProductionLlamaClient {
         if prompt.is_empty() {
             return Err("production_task_prompt_empty".into());
         }
-        // ADAPTIVE_GENERATION_BUDGET_V1
-        const ADAPTIVE_DEFAULT_OUTPUT_TOKENS_V1: u64 = 4096;
-
-        let requested_u64 =
-            max_output_tokens
-                .unwrap_or(
-                    if adaptive_execution {
-                        ADAPTIVE_DEFAULT_OUTPUT_TOKENS_V1
-                    } else {
-                        512
-                    }
-                )
-                .max(1);
+        // No hidden task-length ceiling. A supplied budget remains authoritative;
+        // otherwise the llama.cpp runtime stops naturally at EOS or context limit.
+        let requested_u64 = max_output_tokens.unwrap_or(u32::MAX as u64).max(1);
 
         let requested =
             u32::try_from(requested_u64)
@@ -465,27 +438,20 @@ impl ProductionLlamaClient {
         let generation =
             if adaptive_execution {
                 production_generation_settings_adaptive_v1(
-                    prompt,
-                    None,
-                    None,
+                    prompt, None, max_output_tokens.map(|_| requested),
                 )
             } else {
                 production_generation_settings_v1(
-                    prompt,
-                    None,
-                    Some(requested.min(4096)),
+                    prompt, None, max_output_tokens.map(|_| requested),
                 )
             };
 
         let request_max_tokens: i64 =
-            if adaptive_execution &&
-                generation.max_tokens == u32::MAX
+            if generation.max_tokens == u32::MAX
             {
                 -1
             } else {
-                generation.max_tokens
-                    .max(1)
-                    .min(4096) as i64
+                generation.max_tokens.max(1) as i64
             };
 
         let max_tokens =
