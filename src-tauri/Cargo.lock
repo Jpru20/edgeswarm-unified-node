@@ -1059,10 +1059,11 @@ dependencies = [
 
 [[package]]
 name = "edgeswarm-unified-node"
-version = "1.6.5"
+version = "1.7.0"
 dependencies = [
  "base64 0.22.1",
  "ctrlc",
+ "flate2",
  "fs2",
  "k256",
  "keyring",

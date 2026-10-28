@@ -926,6 +926,8 @@ mod tests {
             company_model: None,
             task_id: json!(1),
             client_name: None,
+            selected_context_v1: None,
+            swct_result_ready_v170: false,
             prompt: prompt.into(),
             required_model: Some(required.into()),
             selected_model: None,

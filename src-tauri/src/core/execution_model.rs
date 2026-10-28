@@ -246,6 +246,8 @@ mod tests {
             company_model: None,
             task_id: json!("routing-test"),
             client_name: None,
+            selected_context_v1: None,
+            swct_result_ready_v170: false,
             prompt: "test".into(),
             required_model: Some(required.into()),
             selected_model: selected.map(str::to_string),

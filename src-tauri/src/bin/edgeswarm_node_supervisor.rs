@@ -411,6 +411,89 @@ fn force_stop_worker_tree_v1(
 }
 
 #[cfg(target_os = "windows")]
+// SUPERVISOR_CRASH_BUDGET_V1
+const CRASH_WINDOW_V1: Duration = Duration::from_secs(600);
+#[cfg(target_os = "windows")]
+const CRASH_LIMIT_V1: usize = 4;
+
+#[cfg(target_os = "windows")]
+fn crash_budget_exhausted_v1(events: &mut Vec<Instant>, now: Instant) -> bool {
+    events.retain(|t| now.saturating_duration_since(*t) < CRASH_WINDOW_V1);
+    events.push(now);
+    events.len() >= CRASH_LIMIT_V1
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn supervisor_crash_budget_test_v1() {
+    let now = Instant::now();
+    let mut events = Vec::new();
+    assert!(!crash_budget_exhausted_v1(&mut events, now));
+    let later = now + CRASH_WINDOW_V1 + Duration::from_secs(1);
+    for _ in 0..2 {
+        assert!(!crash_budget_exhausted_v1(&mut events, later));
+    }
+    assert!(!crash_budget_exhausted_v1(&mut events, later));
+    assert!(crash_budget_exhausted_v1(&mut events, later));
+}
+
+#[cfg(target_os = "windows")]
+// SUPERVISOR_CRASH_LOOP_WIRED_V1
+#[derive(Default)]
+struct CrashGateV1 {
+    events: Vec<Instant>,
+    quarantined: bool,
+}
+
+#[cfg(target_os = "windows")]
+impl CrashGateV1 {
+    fn record(&mut self, now: Instant) -> bool {
+        if crash_budget_exhausted_v1(&mut self.events, now) {
+            self.quarantined = true;
+        }
+        self.quarantined
+    }
+
+    fn reset_on_stop(&mut self) {
+        self.events.clear();
+        self.quarantined = false;
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn crash_quarantine_path_v1() -> std::path::PathBuf {
+    desired_state_path_v1()
+        .with_file_name("runtime-crash-quarantine-v1.flag")
+}
+
+#[cfg(target_os = "windows")]
+fn record_supervisor_failure_v1(
+    gate: &mut CrashGateV1,
+) -> Result<bool, String> {
+    if !gate.record(Instant::now()) {
+        return Ok(false);
+    }
+    fs::write(crash_quarantine_path_v1(), b"quarantined")
+        .map_err(|e| format!("supervisor_quarantine_write_failed:{e}"))?;
+    println!("SUPERVISOR_CRASH_LOOP_QUARANTINED=true");
+    Ok(true)
+}
+
+#[cfg(all(test, target_os = "windows"))]
+#[test]
+fn supervisor_quarantine_reset_test_v1() {
+    let now = Instant::now();
+    let mut gate = CrashGateV1::default();
+    for _ in 0..3 {
+        assert!(!gate.record(now));
+    }
+    assert!(gate.record(now));
+    gate.reset_on_stop();
+    assert!(!gate.quarantined);
+    assert!(!gate.record(now));
+}
+
+#[cfg(target_os = "windows")]
 fn restart_delay_v1(
     failures: usize,
 ) -> Duration {
@@ -546,6 +629,9 @@ fn run_supervisor_v1(
     let mut failure_count:
         usize = 0;
 
+    let mut crash_gate_v1 = CrashGateV1::default();
+    crash_gate_v1.quarantined = crash_quarantine_path_v1().exists();
+
     let mut stop_observed:
         Option<Instant> = None;
 
@@ -555,6 +641,12 @@ fn run_supervisor_v1(
 
         if !running {
             failure_count = 0;
+            crash_gate_v1.reset_on_stop();
+            let marker = crash_quarantine_path_v1();
+            if marker.exists() {
+                fs::remove_file(&marker)
+                    .map_err(|_| "supervisor_quarantine_clear_failed".to_string())?;
+            }
 
             if let Some(worker) =
                 child.as_mut()
@@ -624,6 +716,11 @@ fn run_supervisor_v1(
 
         stop_observed = None;
 
+        if crash_gate_v1.quarantined {
+            thread::sleep(POLL_INTERVAL_V1);
+            continue;
+        }
+
         if let Some(worker) =
             child.as_mut()
         {
@@ -661,6 +758,10 @@ fn run_supervisor_v1(
                         failure_count
                             .saturating_add(1);
 
+                    if record_supervisor_failure_v1(&mut crash_gate_v1)? {
+                        continue;
+                    }
+
                     let delay =
                         restart_delay_v1(
                             failure_count
@@ -682,6 +783,10 @@ fn run_supervisor_v1(
                     failure_count =
                         failure_count
                             .saturating_add(1);
+
+                    if record_supervisor_failure_v1(&mut crash_gate_v1)? {
+                        continue;
+                    }
 
                     let delay =
                         restart_delay_v1(
@@ -718,6 +823,10 @@ fn run_supervisor_v1(
                 failure_count =
                     failure_count
                         .saturating_add(1);
+
+                if record_supervisor_failure_v1(&mut crash_gate_v1)? {
+                    continue;
+                }
 
                 let delay =
                     restart_delay_v1(

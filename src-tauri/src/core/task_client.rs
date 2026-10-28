@@ -183,6 +183,12 @@ pub struct TaskEnvelope {
     pub prompt: String,
 
     #[serde(default)]
+    pub selected_context_v1: Option<Value>,
+
+    #[serde(skip)]
+    pub swct_result_ready_v170: bool,
+
+    #[serde(default)]
     pub required_model: Option<String>,
 
     #[serde(default)]
@@ -419,6 +425,8 @@ mod tests {
             company_model: None,
             task_id: Value::from(2001),
             client_name: None,
+            selected_context_v1: None,
+            swct_result_ready_v170: false,
             prompt: "Say hello".into(),
             required_model: Some("Neural-Inference-3B".into()),
             selected_model: Some("qwen2.5:3b".into()),

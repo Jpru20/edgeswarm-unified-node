@@ -211,6 +211,12 @@ impl ManagedLlamaProcess {
         &self.acceleration
     }
 
+    // MANAGED_LLAMA_EXIT_OBSERVATION_V1
+    pub fn observed_exit_v1(&mut self) -> Result<Option<std::process::ExitStatus>, String> {
+        self.child.try_wait()
+            .map_err(|e| format!("managed_llama_exit_observation_failed:{e}"))
+    }
+
     pub fn stop(&mut self) {
         match self.child.try_wait() {
             Ok(Some(_)) => {}
@@ -507,6 +513,29 @@ fn validate_config(config: &LlamaProcessConfig) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn managed_exit_detection_test_v1() {
+        let child = Command::new("cmd.exe")
+            .args(["/D", "/C", "exit /B 37"])
+            .spawn().expect("spawn test process");
+        let mut runtime = ManagedLlamaProcess {
+            child,
+            base_url: String::new(),
+            executable: PathBuf::new(),
+            acceleration: "cpu".into(),
+        };
+        let start = Instant::now();
+        let observed = loop {
+            if let Some(status) = runtime.observed_exit_v1().unwrap() {
+                break status;
+            }
+            assert!(start.elapsed() < Duration::from_secs(5));
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(observed.code(), Some(37));
+    }
 
     #[test]
     fn base_url_is_local() {

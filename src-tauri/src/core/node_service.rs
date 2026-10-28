@@ -1301,15 +1301,42 @@ if node_web_retrieval_required_v1 {
     }
 }
 
+let mut selected_context_error_v1 = false;
+
+if let Some(packet_v1) = task.selected_context_v1.as_ref() {
+    let task_id_v1 = task.task_id_text();
+    let enabled_v1 =
+        std::env::var("SWARM_SELECTED_CONTEXT_CANARY_V1")
+            .ok().as_deref() == Some("1")
+        && std::env::var("SWARM_SELECTED_CONTEXT_TASK_ID_V1")
+            .ok().as_deref() == Some(task_id_v1.as_str());
+
+    match crate::core::swarm_selected_context_v1::prepare_inference_prompt_v1(
+        &execution_task_v1.prompt,
+        Some(&packet_v1.to_string()),
+        &task_id_v1,
+        enabled_v1,
+        node_web_retrieval_required_v1,
+    ) {
+        Ok(prompt_v1) => {
+            execution_task_v1.prompt = prompt_v1;
+            println!("SELECTED_CONTEXT_HANDOFF_V1=ACCEPTED");
+        }
+        Err(reason_v1) => {
+            selected_context_error_v1 = true;
+            println!("SELECTED_CONTEXT_HANDOFF_V1=REJECTED reason={reason_v1}");
+        }
+    }
+}
 let mut submit_payload =
-    if node_web_retrieval_error_v1.is_some() {
+    if node_web_retrieval_error_v1.is_some() || selected_context_error_v1 {
         failure_payload(
             &task,
             &provider_email_for_task_v1,
             &wallet_address,
             &hardware,
             private_key.as_str(),
-            "node_web_retrieval_failed",
+            if selected_context_error_v1 { "selected_context_invalid" } else { "node_web_retrieval_failed" },
         )?
     } else {
         build_task_submit_payload(
@@ -1546,7 +1573,8 @@ let outcome =
         &http,
         &auth_client,
         &mut auth,
-        &submit_payload
+        &submit_payload,
+        task.swct_result_ready_v170
     )?;
 
 println!("RESULT_SUBMIT_HTTP_STATUS={}", outcome.status);
@@ -2139,6 +2167,44 @@ pub fn run_node_service(
             println!("NODE_SERVICE_STOP_REQUESTED=true");
             println!("NODE_SERVICE_STOPPED=true");
             return Ok(());
+        }
+
+        // MANAGED_LLAMA_EXIT_GUARD_V1
+        if let Some(runtime_v1) = _managed_llama.as_mut() {
+            let failure_v1 = match runtime_v1.observed_exit_v1() {
+                Ok(None) => None,
+                Ok(Some(status_v1)) => Some(format!("managed_llama_exited:{status_v1}")),
+                Err(error_v1) => Some(error_v1),
+            };
+            if let Some(reason_v1) = failure_v1 {
+                println!("MANAGED_LLAMA_RUNTIME_UNAVAILABLE={reason_v1}");
+                // MANAGED_LLAMA_CAPACITY_WITHDRAW_V1
+                let mut unavailable_v1 = base_heartbeat.clone();
+                unavailable_v1.status = "offline".into();
+                unavailable_v1.model_status = "runtime_unavailable".into();
+                unavailable_v1.model_id = None;
+                unavailable_v1.model_capability = None;
+                unavailable_v1.model_size_gb = None;
+                unavailable_v1.capabilities.clear();
+                unavailable_v1.eligible_model_capabilities.clear();
+                unavailable_v1.current_task_ids.clear();
+
+                if let Ok(client_v1) = Client::builder()
+                    .timeout(Duration::from_secs(3))
+                    .build()
+                {
+                    match send_heartbeat(
+                        &client_v1,
+                        &auth_client,
+                        &mut auth,
+                        &unavailable_v1,
+                    ) {
+                        Ok(_) => println!("RUNTIME_WITHDRAW_HEARTBEAT=PASS"),
+                        Err(e) => println!("RUNTIME_WITHDRAW_HEARTBEAT_ERROR={e}"),
+                    }
+                }
+                return Err(reason_v1);
+            }
         }
 
         if crate::core::capacity_test_control::
