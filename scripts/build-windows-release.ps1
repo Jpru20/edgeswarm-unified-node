@@ -1,4 +1,8 @@
-param([string]$ConfigPath = '',[string]$TargetDir = '')
+param(
+    [string]$ConfigPath = '',
+    [string]$TargetDir = '',
+    [string]$ExpectedSourceRef = 'origin/main'
+)
 $ErrorActionPreference = 'Stop'
 $Repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $Repo
@@ -11,10 +15,27 @@ $Key = [string]$Config['EDGESWARM_DEFAULT_SUPABASE_ANON_KEY']
 if ([string]::IsNullOrWhiteSpace($Url) -or !$Url.StartsWith('https://')) { throw 'release_supabase_url_invalid' }
 if ([string]::IsNullOrWhiteSpace($Key) -or $Key.Length -lt 50) { throw 'release_supabase_anon_key_invalid' }
 $Head = (git rev-parse HEAD).Trim()
-$Origin = (git rev-parse origin/main).Trim()
-if ($Head -ne $Origin) { throw 'release_source_not_at_origin_main' }
+
+$ExpectedCommit = (
+    & git rev-parse $ExpectedSourceRef
+).Trim()
+
+if (
+    $LASTEXITCODE -ne 0 -or
+    [string]::IsNullOrWhiteSpace($ExpectedCommit)
+) {
+    throw "release_source_ref_invalid_$ExpectedSourceRef"
+}
+
+if ($Head -ne $ExpectedCommit) {
+    throw "release_source_not_at_expected_ref expected=$ExpectedSourceRef head=$Head resolved=$ExpectedCommit"
+}
+
 $Dirty = @(git status --porcelain --untracked-files=no)
-if ($Dirty.Count -gt 0) { throw 'release_worktree_not_clean' }
+
+if ($Dirty.Count -gt 0) {
+    throw 'release_worktree_not_clean'
+}
 $env:EDGESWARM_DEFAULT_SUPABASE_URL = $Url
 $env:EDGESWARM_DEFAULT_SUPABASE_ANON_KEY = $Key
 Remove-Item Env:SUPABASE_URL -ErrorAction SilentlyContinue
@@ -25,6 +46,7 @@ if ([string]::IsNullOrWhiteSpace($TargetDir)) { $Short = (git rev-parse --short=
 New-Item -ItemType Directory -Force -Path $TargetDir | Out-Null
 $env:CARGO_TARGET_DIR = $TargetDir
 Write-Host 'RELEASE_CONFIG_VALID=PASS'
+Write-Host "SOURCE_REF=$ExpectedSourceRef"
 Write-Host "SOURCE_COMMIT=$Head"
 Write-Host "TARGET_DIR=$TargetDir"
 $RuntimeSource = Join-Path $env:USERPROFILE "edgeswarm-runtime-build\release\windows-x64\current"
