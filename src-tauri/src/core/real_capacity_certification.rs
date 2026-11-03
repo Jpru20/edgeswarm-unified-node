@@ -7,7 +7,12 @@ use crate::{
         certification_runner::CertificationRunner,
         certification_workload::{bind_neural_realworld_pack_v1, built_in_neural_realworld_v1},
         model_discovery::discover_models,
-        model_registry::{model_spec, OUTPUT_LIMIT_POLICY_VERSION},
+        model_registry::{
+            effective_model_spec_v171,
+            OUTPUT_LIMIT_POLICY_VERSION,
+        },
+        signed_model_registry::
+            signed_model_definition_for_sha_v171,
         NodeState,
     },
     runtime::{
@@ -57,7 +62,32 @@ fn approved_model_from_sha(model_sha: &str) -> Option<(&'static str, &'static st
             "Meta-Llama-3.1-70B-Instruct-Q4_K_M",
             "Neural-Inference-70B-Plus",
         )),
+        "3793e1e6e2266919d6e015287221b41100175a98eddaba92e111aed3b05c93c4" => {
+            Some(("LFM3-1.7B-Q4_K_M", "Neural-Inference-3B"))
+        }
+        "27cd6c432c7672cb812a92f611cf3ba7bbc35928262bb1e1253ff4ee6ae35901" => {
+            Some(("gpt-oss-20b-MXFP4", "Neural-Inference-14B"))
+        }
+        "671e47e0ec53c665d048b98c3ecbfd5236b5ca9c3e02ed19fc8f81f7b85140c7" => {
+            Some(("Qwen3.6-35B-A3B-Q4_K_M", "Neural-Inference-30B"))
+        }
+        "91d63363e782c8a3d5f4be42816eba8e0d42dd2530bd07a7d0d2dc440599af75" => {
+            Some(("NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB", "Neural-Inference-30B"))
+        }
+        "0b941fd824295fb7f319032e592fbe87deaf72769544eb84032713560c7f50c4" => {
+            Some(("NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4", "Neural-Inference-70B-Plus"))
+        }
         _ => None,
+    }
+}
+
+fn approved_model_quantization_v171(
+    model_sha: &str,
+) -> &'static str {
+    match model_sha {
+        "27cd6c432c7672cb812a92f611cf3ba7bbc35928262bb1e1253ff4ee6ae35901" => "MXFP4",
+        "0b941fd824295fb7f319032e592fbe87deaf72769544eb84032713560c7f50c4" => "NVFP4",
+        _ => "Q4_K_M",
     }
 }
 
@@ -147,8 +177,52 @@ pub fn certify_model_path_v1(
 
     let model_sha = sha256_file(model_path)?;
 
-    let (model_id, model_capability) = approved_model_from_sha(&model_sha)
-        .ok_or_else(|| format!("model_not_approved_for_real_certification:{model_sha}"))?;
+    let signed_definition_v171 =
+        signed_model_definition_for_sha_v171(
+            &model_sha,
+        );
+
+    let (
+        model_id,
+        model_capability,
+        model_quantization,
+        expected_selected_model_v171,
+    ) =
+        if let Some(definition) =
+            signed_definition_v171
+        {
+            (
+                definition.artifact_id,
+                definition.capability,
+                definition.quantization,
+                Some(
+                    definition.selected_model
+                ),
+            )
+        } else {
+            let (
+                builtin_id,
+                builtin_capability,
+            ) =
+                approved_model_from_sha(
+                    &model_sha,
+                )
+                .ok_or_else(|| {
+                    format!(
+                        "model_not_approved_for_real_certification:{model_sha}"
+                    )
+                })?;
+
+            (
+                builtin_id.to_string(),
+                builtin_capability.to_string(),
+                approved_model_quantization_v171(
+                    &model_sha,
+                )
+                .to_string(),
+                None,
+            )
+        };
 
     let model_parent = model_path.parent()
         .ok_or_else(|| "certification_model_parent_missing".to_string())?;
@@ -165,17 +239,55 @@ pub fn certify_model_path_v1(
         .map(|candidate| candidate.selected_model)
         .ok_or_else(|| "certification_selected_model_not_resolved".to_string())?;
 
-    let selected_spec = model_spec(&selected_model)
-        .ok_or_else(|| format!("model_spec_missing:{selected_model}"))?;
+    if let Some(expected_selected_model) =
+        expected_selected_model_v171
+            .as_deref()
+    {
+        if selected_model
+            != expected_selected_model
+        {
+            return Err(
+                "certification_signed_registry_model_mismatch"
+                    .into()
+            );
+        }
+    }
 
-    if selected_spec.capability != model_capability {
-        return Err("certification_selected_model_capability_mismatch".into());
+    let selected_spec =
+        effective_model_spec_v171(
+            &selected_model,
+        )
+        .ok_or_else(|| {
+            format!(
+                "model_spec_missing:{selected_model}"
+            )
+        })?;
+
+    if selected_spec.capability
+        != model_capability
+    {
+        return Err(
+            "certification_selected_model_capability_mismatch"
+                .into()
+        );
+    }
+
+    if selected_spec.quantization
+        != model_quantization
+    {
+        return Err(
+            "certification_selected_model_quantization_mismatch"
+                .into()
+        );
     }
 
 
     let state = NodeState::detect();
     let mut pack = built_in_neural_realworld_v1()?;
-    bind_neural_realworld_pack_v1(&mut pack, model_capability)?;
+    bind_neural_realworld_pack_v1(
+        &mut pack,
+        &model_capability,
+    )?;
 
     let mut runtime_config = LlamaProcessConfig::for_model(model_path_string)?;
     runtime_config.executable = runtime_path.to_path_buf();
@@ -305,7 +417,7 @@ pub fn certify_model_path_v1(
         model_id: model_id.into(),
         model_sha256: model_sha,
         model_capability: model_capability.into(),
-        quantization: "Q4_K_M".into(),
+        quantization: model_quantization.into(),
         runtime: "llama.cpp".into(),
         runtime_version,
         acceleration: runtime_acceleration,

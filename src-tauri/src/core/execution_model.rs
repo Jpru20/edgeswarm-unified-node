@@ -1,5 +1,11 @@
 use crate::core::{
-    capacity::CapacityStatus, model_discovery::discover_models, task_client::TaskEnvelope,
+    capacity::CapacityStatus,
+    model_discovery::discover_models,
+    model_registry::{
+        model_rank_for_capability_v171,
+        primary_model_priority_v171,
+    },
+    task_client::TaskEnvelope,
     NodeState,
 };
 use std::{env, fs, path::Path};
@@ -28,7 +34,20 @@ pub fn primary_certified_model(state: &NodeState) -> Option<ActiveModelV1> {
         right
             .tier
             .cmp(&left.tier)
-            .then_with(|| left.selected_model.cmp(&right.selected_model))
+            .then_with(|| {
+                primary_model_priority_v171(
+                    &left.selected_model,
+                )
+                .cmp(
+                    &primary_model_priority_v171(
+                        &right.selected_model,
+                    ),
+                )
+            })
+            .then_with(|| {
+                left.selected_model
+                    .cmp(&right.selected_model)
+            })
     });
 
     ready.first().map(|model| ActiveModelV1 {
@@ -37,6 +56,22 @@ pub fn primary_certified_model(state: &NodeState) -> Option<ActiveModelV1> {
         runtime: model.runtime.clone(),
         tier: model.tier,
     })
+}
+
+// SWARM_VISION_TASK_MODE_V171
+pub fn task_requires_vision_v171(
+    task: &TaskEnvelope,
+) -> bool {
+    task.required_model
+        .as_deref()
+        .map(str::trim)
+        .map(|required| {
+            required.starts_with(
+                "Vision-Inference"
+            )
+        })
+        .unwrap_or(false)
+        && task.vision_input.is_some()
 }
 
 pub fn task_matches_active_model(task: &TaskEnvelope, active: &ActiveModelV1) -> bool {
@@ -99,29 +134,76 @@ fn certified_model_for_task_from_models(
         }));
     }
 
-    if let Some(active) = active {
-        if task_matches_active_model(task, active) {
-            return Ok(Some(active.clone()));
-        }
-    }
-
     let mut candidates = models
         .iter()
         .filter(ready)
         .filter(|model| {
-            required == "Neural-Inference" || model.capability == required
+            required == "Neural-Inference"
+                || model.capability == required
         })
         .collect::<Vec<_>>();
 
-    candidates.sort_by(|a, b| {
-        b.tier
-            .cmp(&a.tier)
-            .then_with(|| a.selected_model.cmp(&b.selected_model))
-    });
+    if required == "Neural-Inference" {
+        candidates.sort_by(|a, b| {
+            b.tier
+                .cmp(&a.tier)
+                .then_with(|| {
+                    primary_model_priority_v171(
+                        &a.selected_model,
+                    )
+                    .cmp(
+                        &primary_model_priority_v171(
+                            &b.selected_model,
+                        ),
+                    )
+                })
+                .then_with(|| {
+                    a.selected_model
+                        .cmp(&b.selected_model)
+                })
+        });
+    } else {
+        candidates.sort_by(|a, b| {
+            let a_rank =
+                model_rank_for_capability_v171(
+                    required,
+                    &a.selected_model,
+                );
+
+            let b_rank =
+                model_rank_for_capability_v171(
+                    required,
+                    &b.selected_model,
+                );
+
+            a_rank
+                .cmp(&b_rank)
+                .then_with(|| {
+                    a.selected_model
+                        .cmp(&b.selected_model)
+                })
+        });
+    }
 
     let model = candidates
         .first()
-        .ok_or_else(|| format!("certified_model_not_available:{required}"))?;
+        .ok_or_else(|| {
+            format!(
+                "certified_model_not_available:{required}"
+            )
+        })?;
+
+    if let Some(active) = active {
+        if active.selected_model ==
+            model.selected_model
+            && task_matches_active_model(
+                task,
+                active,
+            )
+        {
+            return Ok(Some(active.clone()));
+        }
+    }
 
     Ok(Some(ActiveModelV1 {
         selected_model: model.selected_model.clone(),
@@ -247,6 +329,7 @@ mod tests {
             task_id: json!("routing-test"),
             client_name: None,
             selected_context_v1: None,
+            vision_input: None,
             swct_result_ready_v170: false,
             prompt: "test".into(),
             required_model: Some(required.into()),
@@ -349,6 +432,95 @@ mod tests {
         assert!(
             resolved.selected_model == "qwen2.5:14b"
                 || resolved.selected_model == "qwen2.5-coder:14b"
+        );
+    }
+
+    #[test]
+    fn tier_auto_3b_prefers_lfm3_v171() {
+        let models = vec![
+            ready_model(
+                "qwen2.5:3b",
+                "Neural-Inference-3B",
+                2,
+            ),
+            ready_model(
+                "lfm3:1.7b",
+                "Neural-Inference-3B",
+                2,
+            ),
+        ];
+
+        let active = ActiveModelV1 {
+            selected_model:
+                "qwen2.5:3b".into(),
+            capability:
+                "Neural-Inference-3B".into(),
+            runtime: "llama.cpp".into(),
+            tier: 2,
+        };
+
+        let resolved =
+            certified_model_for_task_from_models(
+                &models,
+                &task(
+                    "Neural-Inference-3B",
+                    Some("tier:auto"),
+                ),
+                Some(&active),
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            resolved.selected_model,
+            "lfm3:1.7b"
+        );
+    }
+
+    #[test]
+    fn tier_auto_30b_prefers_qwen36_v171() {
+        let models = vec![
+            ready_model(
+                "qwen3:30b",
+                "Neural-Inference-30B",
+                5,
+            ),
+            ready_model(
+                "nemotron3.5-bolt:74b-a9b",
+                "Neural-Inference-30B",
+                5,
+            ),
+            ready_model(
+                "qwen3.6:35b-a3b",
+                "Neural-Inference-30B",
+                5,
+            ),
+        ];
+
+        let active = ActiveModelV1 {
+            selected_model:
+                "qwen3:30b".into(),
+            capability:
+                "Neural-Inference-30B".into(),
+            runtime: "llama.cpp".into(),
+            tier: 5,
+        };
+
+        let resolved =
+            certified_model_for_task_from_models(
+                &models,
+                &task(
+                    "Neural-Inference-30B",
+                    Some("tier:auto"),
+                ),
+                Some(&active),
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            resolved.selected_model,
+            "qwen3.6:35b-a3b"
         );
     }
 

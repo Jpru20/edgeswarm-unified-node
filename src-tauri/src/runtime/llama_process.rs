@@ -19,6 +19,7 @@ pub struct LlamaProcessConfig {
     pub executable: PathBuf,
     pub model_path: PathBuf,
     pub lora_adapter_path: Option<PathBuf>,
+    pub vision_projector_path: Option<PathBuf>,
     pub host: String,
     pub port: u16,
     pub context_tokens: u32,
@@ -102,6 +103,7 @@ impl LlamaProcessConfig {
             executable,
             model_path: model_path.into(),
             lora_adapter_path: None,
+            vision_projector_path: None,
             host: LLAMA_DEFAULT_HOST.into(),
             port: LLAMA_DEFAULT_PORT,
             context_tokens: 0,
@@ -150,6 +152,28 @@ impl ManagedLlamaProcess {
         )?;
 
         let mut command = Command::new(&config.executable);
+
+        // SWARM_VISION_PROJECTOR_RUNTIME_V171
+
+        if let Some(projector_path) = config.vision_projector_path.as_ref() {
+
+            if !projector_path.is_file() {
+
+                return Err(
+
+                    "vision_projector_file_missing".into()
+
+                );
+
+            }
+
+
+            command.arg("--mmproj");
+
+            command.arg(projector_path);
+
+        }
+
 
         if let Some(adapter) = config.lora_adapter_path.as_ref() {
             command.arg("--lora").arg(adapter);
@@ -543,6 +567,7 @@ mod tests {
             executable: PathBuf::from("server"),
             model_path: PathBuf::from("model.gguf"),
             lora_adapter_path: None,
+            vision_projector_path: None,
             host: "127.0.0.1".into(),
             port: 18081,
             context_tokens: 4096,

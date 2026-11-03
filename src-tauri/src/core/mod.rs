@@ -26,6 +26,7 @@ pub mod model_fingerprint;
 pub mod model_provisioning;
 pub mod training_runtime_provisioning_v1;
 pub mod model_registry;
+pub mod signed_model_registry;
 pub mod node_service;
 pub mod node_status_bridge;
 pub mod per_model_state;
@@ -51,6 +52,9 @@ pub mod wallet_identity;
 pub mod wallet_public_identity;
 pub mod wallet_vault;
 pub mod web_retrieval_tool_v1;
+pub mod vision_transport_v1;
+pub mod vision_asset_fetch_v1;
+pub mod vision_certification_v1;
 pub mod workload_validator;
 
 #[cfg(target_os = "macos")]

@@ -337,6 +337,222 @@ pub struct ProductionHeartbeatV1 {
     pub metadata: ProductionHeartbeatMetadataV1,
 }
 
+// SWARM_VERIFIED_VISION_ADVERTISEMENT_V1
+#[derive(Debug, Clone)]
+struct VisionProjectorVerificationCacheV171 {
+    expected_sha256: String,
+    file_len: u64,
+    modified_nanos: u128,
+    verified: bool,
+}
+
+fn vision_projector_verification_cache_v171(
+) -> &'static std::sync::Mutex<
+    std::collections::BTreeMap<
+        String,
+        VisionProjectorVerificationCacheV171
+    >
+> {
+    static CACHE:
+        std::sync::OnceLock<
+            std::sync::Mutex<
+                std::collections::BTreeMap<
+                    String,
+                    VisionProjectorVerificationCacheV171
+                >
+            >
+        > =
+        std::sync::OnceLock::new();
+
+    CACHE.get_or_init(|| {
+        std::sync::Mutex::new(
+            std::collections::BTreeMap::new()
+        )
+    })
+}
+
+fn verified_vision_capabilities_v171(
+    state: &NodeState,
+) -> Vec<String> {
+    let model_root =
+        match crate::runtime::llama_process::
+            resolve_model_root_v1()
+        {
+            Ok(root) => root,
+            Err(_) => return Vec::new(),
+        };
+
+    let mut capabilities =
+        std::collections::BTreeSet::new();
+
+    for model in state.models.iter() {
+        if model.status != "ready"
+            || model.capacity_status
+                != crate::core::capacity::
+                    CapacityStatus::Certified
+            || model
+                .certified_concurrency
+                .unwrap_or(0)
+                == 0
+        {
+            continue;
+        }
+
+        let Some(definition) =
+            crate::core::signed_model_registry::
+                signed_model_definition_v171(
+                    &model.selected_model
+                )
+        else {
+            continue;
+        };
+
+        let Some(vision_capability) =
+            definition
+                .vision_capability
+                .clone()
+        else {
+            continue;
+        };
+
+        let Some(projector) =
+            definition
+                .artifacts
+                .iter()
+                .find(|artifact| {
+                    artifact.artifact_role
+                        == "vision_projector"
+                })
+        else {
+            continue;
+        };
+
+        let path =
+            model_root.join(
+                &projector.filename
+            );
+
+        let Ok(metadata) =
+            std::fs::metadata(
+                &path
+            )
+        else {
+            continue;
+        };
+
+        if !metadata.is_file() {
+            continue;
+        }
+
+        let modified_nanos =
+            metadata
+                .modified()
+                .ok()
+                .and_then(|value| {
+                    value
+                        .duration_since(
+                            std::time::
+                                UNIX_EPOCH
+                        )
+                        .ok()
+                })
+                .map(|value| {
+                    value.as_nanos()
+                })
+                .unwrap_or(0);
+
+        let cache_key =
+            format!(
+                "{}|{}",
+                model.selected_model,
+                projector.filename
+            );
+
+        let cached_verified =
+            vision_projector_verification_cache_v171()
+                .lock()
+                .ok()
+                .and_then(|cache| {
+                    cache
+                        .get(
+                            &cache_key
+                        )
+                        .filter(|entry| {
+                            entry.expected_sha256
+                                .eq_ignore_ascii_case(
+                                    &projector.sha256
+                                )
+                                && entry.file_len
+                                    == metadata.len()
+                                && entry.modified_nanos
+                                    == modified_nanos
+                        })
+                        .map(|entry| {
+                            entry.verified
+                        })
+                });
+
+        let verified =
+            match cached_verified {
+                Some(value) => value,
+
+                None => {
+                    let value =
+                        crate::core::
+                            lora_training::
+                            sha256_file_v1(
+                                &path
+                            )
+                            .map(|actual| {
+                                actual
+                                    .eq_ignore_ascii_case(
+                                        &projector.sha256
+                                    )
+                            })
+                            .unwrap_or(false);
+
+                    if let Ok(mut cache) =
+                        vision_projector_verification_cache_v171()
+                            .lock()
+                    {
+                        cache.insert(
+                            cache_key,
+                            VisionProjectorVerificationCacheV171 {
+                                expected_sha256:
+                                    projector
+                                        .sha256
+                                        .clone(),
+                                file_len:
+                                    metadata.len(),
+                                modified_nanos,
+                                verified:
+                                    value,
+                            },
+                        );
+                    }
+
+                    value
+                }
+            };
+
+        if verified
+            && crate::core::vision_certification_v1::
+                vision_certificate_valid_v171(
+                    state,
+                    model,
+                )
+        {
+            capabilities.insert(
+                vision_capability
+            );
+        }
+    }
+
+    capabilities
+        .into_iter()
+        .collect()
+}
+
 impl ProductionHeartbeatV1 {
     // LIVE_UPDATE_LIFECYCLE_REFRESH_V1
     //
@@ -391,6 +607,19 @@ impl ProductionHeartbeatV1 {
                 .tier
                 .cmp(&left.tier)
                 .then_with(|| {
+                    crate::core::model_registry::
+                        primary_model_priority_v171(
+                            &left.selected_model,
+                        )
+                        .cmp(
+                            &crate::core::
+                                model_registry::
+                                primary_model_priority_v171(
+                                    &right.selected_model,
+                                ),
+                        )
+                })
+                .then_with(|| {
                     left.selected_model
                         .cmp(&right.selected_model)
                 })
@@ -435,10 +664,22 @@ impl ProductionHeartbeatV1 {
                 }),
             );
 
+        let verified_vision_capabilities_v171 =
+            verified_vision_capabilities_v171(
+                state
+            );
+
         let eligible_model_capabilities =
             ready_models
                 .iter()
-                .map(|model| model.capability.clone())
+                .map(|model| {
+                    model.capability.clone()
+                })
+                .chain(
+                    verified_vision_capabilities_v171
+                        .iter()
+                        .cloned()
+                )
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect::<Vec<_>>();

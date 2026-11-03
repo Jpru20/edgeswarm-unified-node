@@ -3,7 +3,11 @@ use crate::core::{
     certification_runner::{CertificationExecutor, ExecutionBatchResult},
     certification_workload::CertificationWorkload,
     generation_policy::{production_generation_settings_v1, GenerationSettings},
-    model_registry::{capability_priority, model_spec, ModelSpecV1},
+    model_registry::{
+        effective_capability_priority_v171,
+        effective_model_spec_v171,
+        EffectiveModelSpecV171,
+    },
     production_prompt::compile_certification_prompt,
     workload_validator::validate_output,
 };
@@ -41,37 +45,71 @@ pub struct LlamaCppHttpExecutor {
 fn model_spec_for_workload(
     workload: &CertificationWorkload,
     exact_selected_model: Option<&str>,
-) -> Result<&'static ModelSpecV1, String> {
-    if let Some(selected_model) = exact_selected_model {
-        let spec = model_spec(selected_model)
-            .ok_or_else(|| format!("model_spec_missing:{selected_model}"))?;
+) -> Result<
+    EffectiveModelSpecV171,
+    String,
+> {
+    if let Some(selected_model) =
+        exact_selected_model
+    {
+        let spec =
+            effective_model_spec_v171(
+                selected_model,
+            )
+            .ok_or_else(|| {
+                format!(
+                    "model_spec_missing:{selected_model}"
+                )
+            })?;
 
-        if spec.capability != workload.expected_required_model
-            && workload.expected_required_model != "Neural-Inference"
+        if spec.capability
+            != workload
+                .expected_required_model
+            && workload
+                .expected_required_model
+                != "Neural-Inference"
         {
             return Err(format!(
                 "certification_model_capability_mismatch:{selected_model}:{}",
-                workload.expected_required_model
+                workload
+                    .expected_required_model
             ));
         }
 
         return Ok(spec);
     }
-    let priority = capability_priority(&workload.expected_required_model).ok_or_else(|| {
-        format!(
+
+    let priority =
+        effective_capability_priority_v171(
+            &workload
+                .expected_required_model,
+        );
+
+    if priority.is_empty() {
+        return Err(format!(
             "unsupported_certification_capability:{}",
-            workload.expected_required_model
-        )
-    })?;
+            workload
+                .expected_required_model
+        ));
+    }
 
     if priority.len() != 1 {
         return Err(format!(
             "ambiguous_certification_model:{}",
-            workload.expected_required_model
+            workload
+                .expected_required_model
         ));
     }
 
-    model_spec(priority[0]).ok_or_else(|| format!("model_spec_missing:{}", priority[0]))
+    effective_model_spec_v171(
+        &priority[0],
+    )
+    .ok_or_else(|| {
+        format!(
+            "model_spec_missing:{}",
+            priority[0]
+        )
+    })
 }
 
 fn next_retry_budget(current: u32, allowed: u32) -> Option<u32> {
@@ -101,10 +139,21 @@ impl LlamaCppHttpExecutor {
     }
 
     pub fn new_for_model(base_url: impl Into<String>, selected_model: &str) -> Result<Self, String> {
-        let spec = model_spec(selected_model)
-            .ok_or_else(|| format!("model_spec_missing:{selected_model}"))?;
-        let mut executor = Self::new(base_url)?;
-        executor.certification_selected_model = Some(spec.selected_model.to_string());
+        let spec =
+            effective_model_spec_v171(
+                selected_model,
+            )
+            .ok_or_else(|| {
+                format!(
+                    "model_spec_missing:{selected_model}"
+                )
+            })?;
+
+        let mut executor =
+            Self::new(base_url)?;
+
+        executor.certification_selected_model =
+            Some(spec.selected_model);
         Ok(executor)
     }
 

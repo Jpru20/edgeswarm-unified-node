@@ -45,9 +45,11 @@ pub fn model_download_progress_v1() -> Option<ModelDownloadProgressV1> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelArtifactV1 {
+    pub model_id: Option<String>,
     pub filename: String,
     pub download_url: String,
     pub sha256: String,
+    pub artifact_role: String,
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +59,7 @@ pub struct ModelRecommendationV1 {
     pub runtime: String,
     pub level: u64,
     pub should_download: bool,
+    pub download_blocked: bool,
     pub files: Vec<ModelArtifactV1>,
 }
 
@@ -110,10 +113,37 @@ fn artifact_from_value(value: &Value) -> Result<ModelArtifactV1, String> {
         return Err("model_sha256_required".into());
     }
 
+    let model_id = value
+        .get("modelId")
+        .or_else(|| value.get("model_id"))
+        .or_else(|| value.get("id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    let artifact_role = value
+        .get("artifactRole")
+        .or_else(|| value.get("artifact_role"))
+        .and_then(Value::as_str)
+        .unwrap_or("model")
+        .trim()
+        .to_ascii_lowercase();
+
+    if artifact_role != "model"
+        && artifact_role != "vision_projector"
+    {
+        return Err(format!(
+            "unsupported_model_artifact_role:{artifact_role}"
+        ));
+    }
+
     Ok(ModelArtifactV1 {
+        model_id,
         filename,
         download_url,
         sha256,
+        artifact_role,
     })
 }
 
@@ -153,11 +183,28 @@ pub fn parse_model_recommendation_v1(value: &Value) -> Result<ModelRecommendatio
     let deterministic_only = model
         .get("capability")
         .and_then(Value::as_str)
-        .map(|v| v.eq_ignore_ascii_case("Deterministic-Only"))
+        .map(|v| {
+            v.eq_ignore_ascii_case(
+                "Deterministic-Only",
+            )
+        })
         .unwrap_or(false);
 
-    if files.is_empty() && !(deterministic_only && !should_download) {
-        return Err("recommended_model_files_missing".into());
+    let download_blocked = model
+        .get("downloadBlocked")
+        .or_else(|| {
+            model.get("download_blocked")
+        })
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    if files.is_empty()
+        && !(deterministic_only && !should_download)
+        && !download_blocked
+    {
+        return Err(
+            "recommended_model_files_missing".into()
+        );
     }
 
     Ok(ModelRecommendationV1 {
@@ -171,8 +218,13 @@ pub fn parse_model_recommendation_v1(value: &Value) -> Result<ModelRecommendatio
             .and_then(Value::as_str)
             .unwrap_or("llama.cpp")
             .to_string(),
-        level: model.get("level").and_then(Value::as_u64).unwrap_or(0),
+        level:
+            model
+                .get("level")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
         should_download,
+        download_blocked,
         files,
     })
 }
@@ -304,15 +356,10 @@ pub fn set_model_download_stage_v1(status: &str) {
     }
 }
 
-fn blocked_large_model_v1(recommendation: &ModelRecommendationV1) -> bool {
-    recommendation.level >= 6
-        || recommendation.model_id.to_ascii_lowercase().contains("70b")
-        || recommendation
-            .capability
-            .as_deref()
-            .unwrap_or("")
-            .to_ascii_lowercase()
-            .contains("70b")
+fn blocked_large_model_v1(
+    recommendation: &ModelRecommendationV1,
+) -> bool {
+    recommendation.download_blocked
 }
 
 fn validate_content_range_v1(
@@ -672,6 +719,86 @@ mod tests {
 
         assert_eq!(parsed.files.len(), 2);
         assert!(parsed.should_download);
+        assert_eq!(
+            parsed.files[0].artifact_role,
+            "model"
+        );
+    }
+
+    #[test]
+    fn parses_projector_artifact_role_v171() {
+        let value = json!({
+            "shouldDownload": true,
+            "recommendedModel": {
+                "id": "vision-test",
+                "capability":
+                    "Vision-Inference-27B",
+                "runtime": "llama.cpp",
+                "files": [
+                    {
+                        "modelId": "vision-test",
+                        "filename": "model.gguf",
+                        "downloadUrl":
+                            "https://api.edgeswarm.io/models/model.gguf",
+                        "sha256": "a".repeat(64),
+                        "artifactRole": "model"
+                    },
+                    {
+                        "modelId": "vision-test",
+                        "filename": "mmproj.gguf",
+                        "downloadUrl":
+                            "https://api.edgeswarm.io/models/mmproj.gguf",
+                        "sha256": "b".repeat(64),
+                        "artifactRole":
+                            "vision_projector"
+                    }
+                ]
+            }
+        });
+
+        let parsed =
+            parse_model_recommendation_v1(
+                &value,
+            )
+            .unwrap();
+
+        assert_eq!(parsed.files.len(), 2);
+
+        assert_eq!(
+            parsed.files[0].artifact_role,
+            "model"
+        );
+
+        assert_eq!(
+            parsed.files[1].artifact_role,
+            "vision_projector"
+        );
+    }
+
+    #[test]
+    fn accepts_backend_blocked_large_model_v171() {
+        let value = json!({
+            "shouldDownload": false,
+            "recommendedModel": {
+                "id":
+                    "nemotron3.5-super-vl:120b-a12b",
+                "capability":
+                    "Neural-Inference-70B-Plus",
+                "level": 6,
+                "downloadBlocked": true,
+                "files": []
+            }
+        });
+
+        let parsed =
+            parse_model_recommendation_v1(
+                &value,
+            )
+            .unwrap();
+
+        assert!(parsed.download_blocked);
+        assert!(parsed.files.is_empty());
+        assert!(!parsed.should_download);
     }
 
     #[test]

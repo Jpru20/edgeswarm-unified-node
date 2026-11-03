@@ -1,6 +1,7 @@
 use crate::core::model_registry::{
-    ModelSpecV1,
-    MODEL_REGISTRY_V1,
+    effective_model_specs_v171,
+    primary_model_priority_v171,
+    EffectiveModelSpecV171,
 };
 use std::{
     fs,
@@ -9,17 +10,17 @@ use std::{
 
 #[derive(Debug, Clone)]
 pub struct DiscoveredModelV1 {
-    pub selected_model: &'static str,
-    pub capability: &'static str,
+    pub selected_model: String,
+    pub capability: String,
     pub tier: u8,
-    pub runtime: &'static str,
+    pub runtime: String,
     pub min_ram_gb: u16,
     pub default_ctx: u32,
     pub default_max_tokens: u32,
     pub experimental: bool,
     pub path: PathBuf,
     pub file_name: String,
-    pub matched_pattern: &'static str,
+    pub matched_pattern: String,
 }
 
 fn wildcard_match_ci(pattern: &str, value: &str) -> bool {
@@ -56,32 +57,63 @@ fn pattern_specificity(pattern: &str) -> usize {
 
 fn best_registry_match(
     file_name: &str,
-) -> Option<(&'static ModelSpecV1, &'static str)> {
+) -> Option<(
+    EffectiveModelSpecV171,
+    String,
+)> {
     let mut best:
-        Option<(&'static ModelSpecV1, &'static str, usize)> = None;
+        Option<(
+            EffectiveModelSpecV171,
+            String,
+            usize,
+        )> =
+        None;
 
-    for spec in MODEL_REGISTRY_V1 {
-        for pattern in spec.patterns {
-            if !wildcard_match_ci(pattern, file_name) {
+    for spec in
+        effective_model_specs_v171()
+    {
+        for pattern in &spec.patterns {
+            if !wildcard_match_ci(
+                pattern,
+                file_name,
+            ) {
                 continue;
             }
 
-            let specificity = pattern_specificity(pattern);
+            let specificity =
+                pattern_specificity(
+                    pattern,
+                );
 
-            let replace = match best {
-                None => true,
-                Some((_, _, existing_specificity)) => {
-                    specificity > existing_specificity
-                }
-            };
+            let replace =
+                match &best {
+                    None =>
+                        true,
+
+                    Some((
+                        _,
+                        _,
+                        existing_specificity,
+                    )) =>
+                        specificity
+                            > *existing_specificity,
+                };
 
             if replace {
-                best = Some((spec, *pattern, specificity));
+                best = Some((
+                    spec.clone(),
+                    pattern.clone(),
+                    specificity,
+                ));
             }
         }
     }
 
-    best.map(|(spec, pattern, _)| (spec, pattern))
+    best.map(
+        |(spec, pattern, _)| {
+            (spec, pattern)
+        },
+    )
 }
 
 fn candidate_files(root: &Path) -> Vec<PathBuf> {
@@ -161,40 +193,48 @@ pub fn discover_models(
             continue;
         };
 
-        discovered.push(DiscoveredModelV1 {
-            selected_model: spec.selected_model,
-            capability: spec.capability,
-            tier: spec.tier,
-            runtime: spec.runtime,
-            min_ram_gb: spec.min_ram_gb,
-            default_ctx: spec.default_ctx,
-            default_max_tokens: spec.default_max_tokens,
-            experimental: spec.experimental,
-            path,
-            file_name,
-            matched_pattern,
-        });
+        discovered.push(
+            DiscoveredModelV1 {
+                selected_model:
+                    spec.selected_model,
+                capability:
+                    spec.capability,
+                tier:
+                    spec.tier,
+                runtime:
+                    spec.runtime,
+                min_ram_gb:
+                    spec.min_ram_gb,
+                default_ctx:
+                    spec.default_ctx,
+                default_max_tokens:
+                    spec.default_max_tokens,
+                experimental:
+                    spec.experimental,
+                path,
+                file_name,
+                matched_pattern,
+            },
+        );
     }
 
-    discovered.sort_by(|left, right| {
-        let left_index = MODEL_REGISTRY_V1
-            .iter()
-            .position(|spec| {
-                spec.selected_model == left.selected_model
+    discovered.sort_by(
+        |left, right| {
+            primary_model_priority_v171(
+                &left.selected_model,
+            )
+            .cmp(
+                &primary_model_priority_v171(
+                    &right.selected_model,
+                ),
+            )
+            .then_with(|| {
+                left.path
+                    .cmp(&right.path)
             })
-            .unwrap_or(usize::MAX);
+        },
+    );
 
-        let right_index = MODEL_REGISTRY_V1
-            .iter()
-            .position(|spec| {
-                spec.selected_model == right.selected_model
-            })
-            .unwrap_or(usize::MAX);
-
-        left_index
-            .cmp(&right_index)
-            .then_with(|| left.path.cmp(&right.path))
-    });
 
     discovered
 }

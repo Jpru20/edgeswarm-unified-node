@@ -22,6 +22,10 @@ use crate::core::{
     wallet_public_identity::WalletPublicIdentity,
     wallet_vault,
     web_retrieval_tool_v1::prepare_node_web_retrieval_v1,
+    vision_asset_fetch_v1::{
+        prepare_vision_assets_v1,
+        PreparedVisionAssetsV1,
+    },
     NodeState,
 };
 use crate::runtime::llama_process::{
@@ -96,6 +100,91 @@ fn tasks_from_poll_v1(
     }
 
     response.task.take().into_iter().collect()
+}
+
+// SWARM_VISION_TASK_ADMISSION_V1
+fn reject_invalid_task_admission_v171(
+    http: &Client,
+    auth_client: &SupabaseAuthClient,
+    auth: &mut crate::core::production_task_http::LocalAuth,
+    task: &TaskEnvelope,
+    worker: &str,
+    hardware: &str,
+    private_key: &str,
+) -> Result<bool, String> {
+    let now_unix_v171 =
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "vision_admission_clock_invalid".to_string())?
+            .as_secs();
+
+    let validation_v171 =
+        crate::core::vision_transport_v1::
+            validate_vision_task_contract_v1(
+                task.required_model.as_deref(),
+                task.company_model.is_some(),
+                task.vision_input.as_ref(),
+                now_unix_v171,
+            );
+
+    match validation_v171 {
+        Ok(()) => {
+            if crate::core::vision_transport_v1::
+                required_model_is_vision_v1(
+                    task.required_model.as_deref()
+                )
+            {
+                println!(
+                    "VISION_TASK_ADMISSION=PASS taskId={}",
+                    task.task_id_text()
+                );
+            }
+
+            Ok(false)
+        }
+
+        Err(error_v171) => {
+            println!(
+                "VISION_TASK_ADMISSION=REJECT taskId={} error={}",
+                task.task_id_text(),
+                error_v171
+            );
+
+            let provider_email_v171 =
+                auth.provider_email.clone();
+
+            let reason_v171 =
+                format!(
+                    "vision_task_contract_rejected:{error_v171}"
+                );
+
+            let payload_v171 =
+                failure_payload(
+                    task,
+                    &provider_email_v171,
+                    worker,
+                    hardware,
+                    private_key,
+                    &reason_v171,
+                )?;
+
+            let outcome_v171 =
+                submit_with_retry(
+                    http,
+                    auth_client,
+                    auth,
+                    &payload_v171,
+                    task.swct_result_ready_v170,
+                )?;
+
+            println!(
+                "VISION_TASK_REJECTION_HTTP_STATUS={}",
+                outcome_v171.status
+            );
+
+            Ok(true)
+        }
+    }
 }
 
 fn certified_concurrency_for_model_v1(
@@ -188,6 +277,54 @@ fn resolve_active_model_path_v1(selected_model: &str) -> Result<String, String> 
     Ok(model.path.to_string_lossy().to_string())
 }
 
+// SWARM_SIGNED_VISION_PROJECTOR_RESOLUTION_V1
+fn resolve_vision_projector_path_v171(
+    selected_model: &str,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let Some(artifact) =
+        crate::core::signed_model_registry::
+            signed_vision_projector_v171(
+                selected_model
+            )
+    else {
+        return Ok(None);
+    };
+
+    let root =
+        resolve_model_root_v1()?;
+
+    let path =
+        root.join(
+            &artifact.filename
+        );
+
+    if !path.is_file() {
+        return Err(format!(
+            "vision_projector_artifact_missing:{}",
+            selected_model
+        ));
+    }
+
+    let actual_sha =
+        crate::core::lora_training::
+            sha256_file_v1(
+                &path
+            )?;
+
+    if !actual_sha
+        .eq_ignore_ascii_case(
+            &artifact.sha256
+        )
+    {
+        return Err(format!(
+            "vision_projector_sha256_mismatch:{}",
+            selected_model
+        ));
+    }
+
+    Ok(Some(path))
+}
+
 fn execution_config_for_certified_model_v1(
     model_path: String,
     certified_acceleration: &str,
@@ -261,6 +398,8 @@ fn failure_payload(
 fn build_task_submit_payload(
     task: &TaskEnvelope,
     llama: Option<&ProductionLlamaClient>,
+    vision_assets:
+        Option<&PreparedVisionAssetsV1>,
     provider_email: &str,
     worker: &str,
     hardware: &str,
@@ -294,15 +433,65 @@ fn build_task_submit_payload(
     let required = task.required_model.as_deref().unwrap_or("");
     let selected = task.selected_model.as_deref().unwrap_or("");
 
-    let neural_supported = match (active_selected_model, active_capability) {
-        (Some(active_model), Some(active_capability)) => {
-            (required == active_capability || required == "Neural-Inference")
-                && (selected.is_empty() || selected == "tier:auto" || selected == active_model)
-        }
-        _ => false,
-    };
+    let vision_required_v171 =
+        required.starts_with(
+            "Vision-Inference"
+        );
 
-    if !neural_supported {
+    let runtime_supported =
+        match (
+            active_selected_model,
+            active_capability
+        ) {
+            (
+                Some(active_model),
+                Some(active_capability),
+            ) => {
+                let selected_matches =
+                    selected.is_empty()
+                        || selected
+                            == "tier:auto"
+                        || selected
+                            == active_model;
+
+                let required_matches =
+                    if vision_required_v171 {
+                        crate::core::
+                            model_registry::
+                            effective_model_spec_v171(
+                                active_model
+                            )
+                            .and_then(
+                                |spec| {
+                                    spec.vision_capability
+                                }
+                            )
+                            .map(
+                                |capability| {
+                                    required
+                                        == "Vision-Inference"
+                                        || capability
+                                            == required
+                                }
+                            )
+                            .unwrap_or(
+                                false
+                            )
+                    } else {
+                        required
+                            == active_capability
+                            || required
+                                == "Neural-Inference"
+                    };
+
+                required_matches
+                    && selected_matches
+            }
+
+            _ => false,
+        };
+
+    if !runtime_supported {
         println!("TASK_SUPPORTED=false");
         return failure_payload(
             task,
@@ -360,7 +549,28 @@ fn build_task_submit_payload(
     }
 
     let inference_result =
-        if stream_neural {
+        if vision_required_v171 {
+            let prepared =
+                vision_assets
+                    .ok_or_else(|| {
+                        "vision_assets_unavailable"
+                            .to_string()
+                    })?;
+
+            println!(
+                "VISION_LOCAL_INFERENCE=true"
+            );
+
+            println!(
+                "VISION_STREAMING=false"
+            );
+
+            llama.execute_vision(
+                &task.prompt,
+                effective_max_output_tokens_v1,
+                &prepared.assets,
+            )
+        } else if stream_neural {
             if let Some(callback) = on_chunk {
                 if adaptive_execution_v1 {
                     llama.execute_streaming_adaptive(
@@ -696,63 +906,205 @@ fn model_recommendation_payload_v1(state: &NodeState) -> Value {
         "gpuName": state.acceleration.device_name.clone()
             .unwrap_or_else(|| state.hardware.cpu_brand.clone()),
         "cudaAvailable": backend.contains("cuda"),
-        "metalAvailable": backend.contains("metal") || macos
+        "metalAvailable":
+            backend.contains("metal") || macos,
+        "gpuMemoryMb":
+            state
+                .acceleration
+                .vram_bytes
+                .map(|bytes| {
+                    bytes / 1024 / 1024
+                }),
+        "appVersion": env!("CARGO_PKG_VERSION"),
+        "supportsPreferredModelRegistryV20261102":
+            true
     })
 }
 
-fn provision_fresh_model_v1(state: &NodeState) -> Result<bool, String> {
-    let payload = model_recommendation_payload_v1(state);
-    let base_url = env::var("GCP_BASE_URL").unwrap_or_else(|_| DEFAULT_BACKEND_URL.to_string());
+fn sync_recommended_model_pack_v171(
+    state: &NodeState,
+) -> Result<bool, String> {
+    let payload =
+        model_recommendation_payload_v1(
+            state,
+        );
 
-    println!("MODEL_RECOMMENDATION_REQUESTED=true");
-    let recommendation = fetch_model_recommendation_v1(&base_url, &payload)?;
+    let base_url =
+        env::var("GCP_BASE_URL")
+            .unwrap_or_else(|_| {
+                DEFAULT_BACKEND_URL
+                    .to_string()
+            });
 
-    println!("MODEL_RECOMMENDATION={}", recommendation.model_id);
+    println!(
+        "MODEL_PACK_SYNC_VERSION=v1.7.1"
+    );
 
-    if recommendation.files.is_empty() {
-        println!("MODEL_PROVISIONING_REQUIRED=false");
+    println!(
+        "MODEL_RECOMMENDATION_REQUESTED=true"
+    );
+
+    let recommendation =
+        fetch_model_recommendation_v1(
+            &base_url,
+            &payload,
+        )?;
+
+    println!(
+        "MODEL_RECOMMENDATION={}",
+        recommendation.model_id
+    );
+
+    if recommendation.download_blocked {
+        println!(
+            "MODEL_PACK_SYNC_BLOCKED=true"
+        );
+
+        println!(
+            "MODEL_PROVISIONING_REQUIRED=false"
+        );
+
         return Ok(false);
     }
 
-    println!("MODEL_PROVISIONING_REQUIRED=true");
-    println!("MODEL_PROVISIONING_STARTED=true");
-    let paths = provision_recommendation_v1(&recommendation)?;
-    println!("MODEL_PROVISIONING_COMPLETE=true");
-
-    if paths.is_empty() {
-        return Err("provisioned_model_path_missing".to_string());
-    }
-
-    let runtime_path = resolve_llama_server_path_v1()?;
-
-    println!("MODEL_CERTIFICATION_STARTED=true");
-    println!("MODEL_CERTIFICATION_COUNT={}", paths.len());
-    set_model_download_stage_v1("certifying");
-
-    for (index, model_path) in paths.iter().enumerate() {
+    if recommendation.files.is_empty() {
         println!(
-            "MODEL_CERTIFICATION_ITEM={}/{}",
-            index + 1,
-            paths.len()
+            "MODEL_PACK_SYNC_REQUIRED=false"
         );
 
-        certify_model_path_v1(
-            model_path.to_string_lossy().to_string(),
-            runtime_path.to_string_lossy().to_string(),
+        println!(
+            "MODEL_PROVISIONING_REQUIRED=false"
+        );
+
+        return Ok(false);
+    }
+
+    let model_root =
+        crate::core::model_provisioning::
+            model_root_v1();
+
+    let mut pending =
+        recommendation.clone();
+
+    pending.files =
+        recommendation
+            .files
+            .iter()
+            .filter(|artifact| {
+                if artifact.artifact_role
+                    == "vision_projector"
+                {
+                    return
+                        !crate::core::
+                            model_provisioning::
+                            verify_model_artifact_v1(
+                                &model_root,
+                                artifact,
+                            );
+                }
+
+                let Some(model_id) =
+                    artifact.model_id.as_deref()
+                else {
+                    return true;
+                };
+
+                !state.models.iter().any(
+                    |model| {
+                        model.selected_model
+                            == model_id
+                            && model.status
+                                == "ready"
+                    },
+                )
+            })
+            .cloned()
+            .collect();
+
+    println!(
+        "MODEL_PACK_ARTIFACT_COUNT={}",
+        recommendation.files.len()
+    );
+
+    println!(
+        "MODEL_PACK_PENDING_ARTIFACT_COUNT={}",
+        pending.files.len()
+    );
+
+    if pending.files.is_empty() {
+        println!(
+            "MODEL_PACK_SYNC_REQUIRED=false"
+        );
+
+        println!(
+            "MODEL_PROVISIONING_REQUIRED=false"
+        );
+
+        return Ok(false);
+    }
+
+    println!(
+        "MODEL_PACK_SYNC_REQUIRED=true"
+    );
+
+    println!(
+        "MODEL_PROVISIONING_STARTED=true"
+    );
+
+    let paths =
+        provision_recommendation_v1(
+            &pending,
         )?;
 
-        println!(
-            "MODEL_CERTIFICATION_ITEM_COMPLETE={}/{}",
-            index + 1,
-            paths.len()
+    if paths.len() != pending.files.len() {
+        return Err(
+            "provisioned_artifact_count_mismatch"
+                .into()
         );
     }
 
-    println!("MODEL_CERTIFICATION_COMPLETE=true");
-    set_model_download_stage_v1("ready");
+    let model_count =
+        pending
+            .files
+            .iter()
+            .filter(|artifact| {
+                artifact.artifact_role
+                    == "model"
+            })
+            .count();
+
+    let projector_count =
+        pending
+            .files
+            .iter()
+            .filter(|artifact| {
+                artifact.artifact_role
+                    == "vision_projector"
+            })
+            .count();
+
+    println!(
+        "MODEL_PACK_MODEL_ARTIFACTS={model_count}"
+    );
+
+    println!(
+        "MODEL_PACK_PROJECTOR_ARTIFACTS={projector_count}"
+    );
+
+    println!(
+        "MODEL_PROVISIONING_COMPLETE=true"
+    );
+
+    // The existing automatic certification
+    // pass below remains the only authority
+    // that promotes a model to ready/certified.
+    println!(
+        "MODEL_PACK_CERTIFICATION_DEFERRED_TO_EXISTING_AUTO_CERT=true"
+    );
 
     Ok(true)
 }
+
 
 struct TaskWorkerOutcomeV1 {
     correction_requested: bool,
@@ -1108,6 +1460,24 @@ let use_streaming_execution_v1 =
     stream_enabled_v1 ||
     adaptive_internal_streaming_v1;
 
+let use_streaming_execution_v1 =
+    use_streaming_execution_v1
+        && !crate::core::execution_model::
+            task_requires_vision_v171(
+                &task
+            );
+
+if crate::core::execution_model::
+    task_requires_vision_v171(
+        &task
+    )
+{
+    println!(
+        "VISION_TOKEN_STREAMING_ENABLED=false"
+    );
+}
+
+
 println!(
     "INTERNAL_STREAMING_EXECUTION={}",
     use_streaming_execution_v1
@@ -1328,20 +1698,92 @@ if let Some(packet_v1) = task.selected_context_v1.as_ref() {
         }
     }
 }
+// SWARM_VISION_WORKER_FETCH_EXECUTION_V1
+let mut vision_asset_error_v1:
+    Option<String> = None;
+
+let prepared_vision_assets_v1 =
+    if crate::core::execution_model::
+        task_requires_vision_v171(
+            &task
+        )
+    {
+        let fetch_result_v1 =
+            (|| ->
+                Result<
+                    PreparedVisionAssetsV1,
+                    String
+                >
+            {
+                let vision_auth_client_v1 =
+                    SupabaseAuthClient::from_env()?;
+
+                prepare_vision_assets_v1(
+                    &task,
+                    &vision_auth_client_v1,
+                    &mut auth,
+                    &hardware,
+                )?
+                .ok_or_else(|| {
+                    "vision_assets_missing_after_admission"
+                        .to_string()
+                })
+            })();
+
+        match fetch_result_v1 {
+            Ok(prepared_v1) => {
+                println!(
+                    "VISION_ASSET_PREPARE=PASS"
+                );
+
+                println!(
+                    "VISION_ASSET_PREPARED_COUNT={}",
+                    prepared_v1.assets.len()
+                );
+
+                Some(prepared_v1)
+            }
+
+            Err(error_v1) => {
+                println!(
+                    "VISION_ASSET_PREPARE=FAIL error={}",
+                    error_v1
+                );
+
+                vision_asset_error_v1 =
+                    Some(error_v1);
+
+                None
+            }
+        }
+    } else {
+        None
+    };
+
 let mut submit_payload =
-    if node_web_retrieval_error_v1.is_some() || selected_context_error_v1 {
+    if node_web_retrieval_error_v1.is_some()
+        || selected_context_error_v1
+        || vision_asset_error_v1.is_some()
+    {
         failure_payload(
             &task,
             &provider_email_for_task_v1,
             &wallet_address,
             &hardware,
             private_key.as_str(),
-            if selected_context_error_v1 { "selected_context_invalid" } else { "node_web_retrieval_failed" },
+            if selected_context_error_v1 {
+                "selected_context_invalid"
+            } else if node_web_retrieval_error_v1.is_some() {
+                "node_web_retrieval_failed"
+            } else {
+                "vision_asset_fetch_failed"
+            },
         )?
     } else {
         build_task_submit_payload(
             &execution_task_v1,
             llama.as_ref(),
+            prepared_vision_assets_v1.as_ref(),
             &provider_email_for_task_v1,
             &wallet_address,
             &hardware,
@@ -1819,7 +2261,17 @@ pub fn run_node_service(
     auth_client.ensure_valid_session(true)?;
 
     let mut auth = read_auth()?;
-    let mut state = NodeState::detect();
+
+    let signed_registry_ready_v171 =
+        crate::core::signed_model_registry::
+            refresh_active_model_registry_v171();
+
+    println!(
+        "SIGNED_MODEL_REGISTRY_ACTIVE={signed_registry_ready_v171}"
+    );
+
+    let mut state =
+        NodeState::detect();
     let hardware = state.hardware_identity.hardware_id.clone();
 
     let public_wallet = WalletPublicIdentity::load_default()?;
@@ -1916,15 +2368,59 @@ pub fn run_node_service(
     let mut base_heartbeat =
         ProductionHeartbeatV1::from_node_state(&state, env!("CARGO_PKG_VERSION"), "laptop", &[]);
 
-    if base_heartbeat.model_id.is_none() && provision_fresh_model_v1(&state)? {
-        state = NodeState::detect();
-        base_heartbeat = ProductionHeartbeatV1::from_node_state(
+    // MODEL_PACK_STARTUP_SYNC_V171
+    // Existing certified execution remains
+    // available if optional pack migration
+    // cannot complete.
+    let existing_model_before_sync_v171 =
+        base_heartbeat.model_id.is_some();
+
+    let pack_sync_v171 =
+        sync_recommended_model_pack_v171(
             &state,
-            env!("CARGO_PKG_VERSION"),
-            "laptop",
-            &[],
         );
-        println!("MODEL_STATE_REFRESHED=true");
+
+    match pack_sync_v171 {
+        Ok(true) => {
+            state = NodeState::detect();
+
+            base_heartbeat =
+                ProductionHeartbeatV1::
+                    from_node_state(
+                        &state,
+                        env!(
+                            "CARGO_PKG_VERSION"
+                        ),
+                        "laptop",
+                        &[],
+                    );
+
+            println!(
+                "MODEL_STATE_REFRESHED=true"
+            );
+        }
+
+        Ok(false) => {}
+
+        Err(error)
+            if existing_model_before_sync_v171 =>
+        {
+            println!(
+                "MODEL_PACK_SYNC_DEFERRED=true"
+            );
+
+            println!(
+                "MODEL_PACK_SYNC_ERROR={error}"
+            );
+
+            println!(
+                "EXISTING_CERTIFIED_MODEL_PRESERVED=true"
+            );
+        }
+
+        Err(error) => {
+            return Err(error);
+        }
     }
 
     // AUTOMATIC_CAPACITY_CERTIFICATION_V1
@@ -2006,6 +2502,41 @@ pub fn run_node_service(
             auto_cert_error_v1.is_none()
         );
     }
+
+    // AUTOMATIC_VISION_CERTIFICATION_SUMMARY_V171
+    // Vision-capable models certify themselves after normal
+    // capacity certification and before any network advertisement.
+    let vision_cert_summary_v171 =
+        crate::core::vision_certification_v1::
+            auto_certify_pending_vision_models_v171(
+                &state
+            );
+
+    println!(
+        "AUTOMATIC_VISION_CERTIFICATION_ATTEMPTED={}",
+        vision_cert_summary_v171.attempted
+    );
+
+    println!(
+        "AUTOMATIC_VISION_CERTIFICATION_PASSED={}",
+        vision_cert_summary_v171.passed
+    );
+
+    println!(
+        "AUTOMATIC_VISION_CERTIFICATION_FAILED={}",
+        vision_cert_summary_v171.failed
+    );
+
+    // Rebuild the heartbeat after the certificate pass/fail.
+    // Failed vision certification does not remove a model's
+    // already-certified text capability.
+    base_heartbeat =
+        ProductionHeartbeatV1::from_node_state(
+            &state,
+            env!("CARGO_PKG_VERSION"),
+            "laptop",
+            &[],
+        );
 
     let mut active_selected_model = base_heartbeat.model_id.clone();
 
@@ -2571,6 +3102,18 @@ pub fn run_node_service(
         let mut executable_tasks_v1 = Vec::new();
 
         for task_v1 in tasks_v1 {
+            if reject_invalid_task_admission_v171(
+                &http,
+                &auth_client,
+                &mut auth,
+                &task_v1,
+                &public_wallet.wallet_address,
+                &hardware,
+                private_key.as_str(),
+            )? {
+                continue;
+            }
+
             let company_runtime_v1 =
                 match task_v1.company_model.as_ref() {
                     Some(contract_v1) => {
@@ -3065,6 +3608,18 @@ pub fn run_node_service(
                             for candidate_v1 in
                                 tasks_from_poll_v1(poll_v1)
                             {
+                                if reject_invalid_task_admission_v171(
+                                    &http,
+                                    &auth_client,
+                                    &mut auth,
+                                    &candidate_v1,
+                                    &public_wallet.wallet_address,
+                                    &hardware,
+                                    private_key.as_str(),
+                                )? {
+                                    continue;
+                                }
+
                                 if candidate_v1.task_id_text()
                                     == completed_task_id_v1
                                 {
@@ -3349,6 +3904,18 @@ pub fn run_node_service(
             for refill_task_v1 in
                 tasks_from_poll_v1(refill_poll_v1)
             {
+                if reject_invalid_task_admission_v171(
+                    &http,
+                    &auth_client,
+                    &mut auth,
+                    &refill_task_v1,
+                    &public_wallet.wallet_address,
+                    &hardware,
+                    private_key.as_str(),
+                )? {
+                    continue;
+                }
+
                 let refill_id_v1 =
                     refill_task_v1.task_id_text();
 

@@ -1,9 +1,17 @@
-use crate::core::generation_policy::{
-    production_generation_settings_adaptive_v1,
-    production_generation_settings_v1,
+use crate::core::{
+    generation_policy::{
+        production_generation_settings_adaptive_v1,
+        production_generation_settings_v1,
+    },
+    vision_asset_fetch_v1::PreparedVisionAssetV1,
+};
+use base64::{
+    engine::general_purpose::STANDARD as BASE64_STANDARD,
+    Engine as _,
 };
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
+use std::fs;
 use std::io::{BufRead, BufReader};
 use std::time::{Duration, Instant};
 
@@ -29,6 +37,117 @@ fn completion_finish_reason_v1(message: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|reason| !reason.is_empty() && reason.len() <= 64)
         .map(str::to_owned)
+}
+
+// SWARM_LOCAL_MULTIMODAL_INFERENCE_V1
+fn vision_chat_content_v171(
+    prompt: &str,
+    assets: &[PreparedVisionAssetV1],
+) -> Result<Value, String> {
+    if assets.is_empty() {
+        return Err(
+            "vision_inference_assets_empty"
+                .into()
+        );
+    }
+
+    if assets.len() > 4 {
+        return Err(
+            "vision_inference_asset_count_exceeded"
+                .into()
+        );
+    }
+
+    let total_bytes =
+        assets
+            .iter()
+            .try_fold(
+                0_u64,
+                |total, asset| {
+                    total
+                        .checked_add(
+                            asset.size_bytes
+                        )
+                        .ok_or_else(|| {
+                            "vision_inference_total_size_overflow"
+                                .to_string()
+                        })
+                },
+            )?;
+
+    if total_bytes >
+        40 * 1024 * 1024
+    {
+        return Err(
+            "vision_inference_total_size_exceeded"
+                .into()
+        );
+    }
+
+    let mut content =
+        Vec::with_capacity(
+            assets.len() + 1
+        );
+
+    content.push(json!({
+        "type": "text",
+        "text": prompt
+    }));
+
+    for asset in assets {
+        if !matches!(
+            asset.media_type.as_str(),
+            "image/jpeg"
+                | "image/png"
+                | "image/webp"
+        ) {
+            return Err(
+                "vision_inference_media_type_unsupported"
+                    .into()
+            );
+        }
+
+        let bytes =
+            fs::read(
+                &asset.path
+            )
+            .map_err(|_| {
+                "vision_inference_local_asset_read_failed"
+                    .to_string()
+            })?;
+
+        if bytes.len() as u64
+            != asset.size_bytes
+        {
+            return Err(
+                "vision_inference_local_asset_size_mismatch"
+                    .into()
+            );
+        }
+
+        let encoded =
+            BASE64_STANDARD.encode(
+                &bytes
+            );
+
+        let data_uri =
+            format!(
+                "data:{};base64,{}",
+                asset.media_type,
+                encoded
+            );
+
+        content.push(json!({
+            "type": "image_url",
+            "image_url": {
+                "url": data_uri
+            }
+        }));
+    }
+
+    Ok(
+        Value::Array(content)
+    )
 }
 
 #[derive(Clone)]
@@ -423,6 +542,22 @@ impl ProductionLlamaClient {
             max_output_tokens,
             false,
             None,
+            None,
+        )
+    }
+
+    pub fn execute_vision(
+        &self,
+        prompt: &str,
+        max_output_tokens: Option<u64>,
+        assets: &[PreparedVisionAssetV1],
+    ) -> Result<ProductionInferenceResult, String> {
+        self.execute_with_policy(
+            prompt,
+            max_output_tokens,
+            false,
+            None,
+            Some(assets),
         )
     }
 
@@ -437,6 +572,7 @@ impl ProductionLlamaClient {
             max_output_tokens,
             true,
             absolute_ceiling_ms,
+            None,
         )
     }
 
@@ -446,6 +582,8 @@ impl ProductionLlamaClient {
         max_output_tokens: Option<u64>,
         adaptive_execution: bool,
         absolute_ceiling_ms: Option<u64>,
+        vision_assets:
+            Option<&[PreparedVisionAssetV1]>,
     ) -> Result<ProductionInferenceResult, String> {
         let prompt = prompt.trim();
 
@@ -495,12 +633,32 @@ impl ProductionLlamaClient {
             }
         );
 
+        let user_content_v171 =
+            match vision_assets {
+                Some(assets) => {
+                    println!(
+                        "VISION_INFERENCE_ASSET_COUNT={}",
+                        assets.len()
+                    );
+
+                    vision_chat_content_v171(
+                        prompt,
+                        assets,
+                    )?
+                }
+
+                None =>
+                    Value::String(
+                        prompt.to_string()
+                    ),
+            };
+
         let mut body = json!({
             "model": "local-model",
             "messages": [
                 {
                     "role": "user",
-                    "content": prompt
+                    "content": user_content_v171
                 }
             ],
             "temperature": generation.temperature,
@@ -655,6 +813,90 @@ impl ProductionLlamaClient {
                 "node-unavailable"
             },
         })
+    }
+}
+
+#[cfg(test)]
+mod vision_payload_tests_v171 {
+    use super::*;
+
+    #[test]
+    fn vision_payload_v171_uses_data_uri_not_file_path() {
+        let root =
+            std::env::temp_dir()
+                .join(
+                    "swarm-vision-payload-v171"
+                );
+
+        let _ =
+            std::fs::remove_dir_all(
+                &root
+            );
+
+        std::fs::create_dir_all(
+            &root
+        )
+        .unwrap();
+
+        let path =
+            root.join(
+                "image.png"
+            );
+
+        std::fs::write(
+            &path,
+            b"png-test"
+        )
+        .unwrap();
+
+        let asset =
+            PreparedVisionAssetV1 {
+                asset_id:
+                    "img_test".into(),
+                media_type:
+                    "image/png".into(),
+                sha256:
+                    "a".repeat(64),
+                size_bytes:
+                    8,
+                path,
+            };
+
+        let content =
+            vision_chat_content_v171(
+                "Describe this image.",
+                &[asset],
+            )
+            .unwrap();
+
+        assert_eq!(
+            content[0]["type"],
+            "text"
+        );
+
+        let url =
+            content[1]
+                ["image_url"]
+                ["url"]
+                .as_str()
+                .unwrap();
+
+        assert!(
+            url.starts_with(
+                "data:image/png;base64,"
+            )
+        );
+
+        assert!(
+            !url.contains(
+                "swarm-vision-payload-v171"
+            )
+        );
+
+        let _ =
+            std::fs::remove_dir_all(
+                root
+            );
     }
 }
 

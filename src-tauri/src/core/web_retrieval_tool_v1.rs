@@ -677,6 +677,7 @@ mod tests {
             task_id: json!(42),
             client_name: None,
             selected_context_v1: None,
+            vision_input: None,
             swct_result_ready_v170: false,
             prompt: "Compare two current systems.".into(),
             required_model: Some("Neural-Inference-3B".into()),

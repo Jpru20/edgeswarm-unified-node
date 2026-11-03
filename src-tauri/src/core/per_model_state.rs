@@ -8,7 +8,10 @@ use crate::{
         model::ModelState,
         model_discovery::{discover_models, DiscoveredModelV1},
         model_fingerprint::resolve_model_fingerprint,
-        model_registry::OUTPUT_LIMIT_POLICY_VERSION,
+        model_registry::{
+            effective_model_spec_v171,
+            OUTPUT_LIMIT_POLICY_VERSION,
+        },
     },
 };
 use serde::Serialize;
@@ -40,18 +43,37 @@ pub struct PerModelStateV1 {
 struct CertificationPolicyV1 {
     pack_id: &'static str,
     capacity_policy_version: &'static str,
-    quantization: &'static str,
+    quantization: String,
 }
 
-fn certification_policy(capability: &str) -> Option<CertificationPolicyV1> {
-    if !capability.starts_with("Neural-Inference") {
+fn certification_policy(
+    selected_model: &str,
+    capability: &str,
+) -> Option<CertificationPolicyV1> {
+    if !capability.starts_with(
+        "Neural-Inference"
+    ) {
         return None;
     }
 
+    let quantization =
+        effective_model_spec_v171(
+            selected_model,
+        )
+        .map(|spec| {
+            spec.quantization
+        })
+        .unwrap_or_else(|| {
+            "Q4_K_M".to_string()
+        });
+
     Some(CertificationPolicyV1 {
-        pack_id: crate::core::certification_workload::NEURAL_REALWORLD_PACK_ID_V1,
-        capacity_policy_version: "realworld-capacity-policy-v1",
-        quantization: "Q4_K_M",
+        pack_id:
+            crate::core::certification_workload::
+                NEURAL_REALWORLD_PACK_ID_V1,
+        capacity_policy_version:
+            "realworld-capacity-policy-v1",
+        quantization,
     })
 }
 
@@ -175,12 +197,12 @@ pub fn resolve_per_model_states(
         let artifact_id = artifact_id(&model);
 
         let mut state = PerModelStateV1 {
-            selected_model: model.selected_model.into(),
+            selected_model: model.selected_model.clone(),
             artifact_id: artifact_id.clone(),
             artifact_path: model.path.to_string_lossy().to_string(),
-            capability: model.capability.into(),
+            capability: model.capability.clone(),
             tier: model.tier,
-            runtime: model.runtime.into(),
+            runtime: model.runtime.clone(),
             runtime_version: runtime_version.clone(),
             acceleration: acceleration.into(),
             status: "installed_uncertified".into(),
@@ -191,7 +213,10 @@ pub fn resolve_per_model_states(
             certificate_loaded: false,
         };
 
-        let Some(policy) = certification_policy(model.capability) else {
+        let Some(policy) = certification_policy(
+            &model.selected_model,
+            &model.capability,
+        ) else {
             states.push(state);
             continue;
         };
@@ -199,8 +224,8 @@ pub fn resolve_per_model_states(
         let candidates: Vec<&CapacityCertificateV1> = certificates
             .iter()
             .filter(|certificate| {
-                certificate.model_capability == model.capability
-                    && certificate.runtime == model.runtime
+                certificate.model_capability == model.capability.as_str()
+                    && certificate.runtime == model.runtime.as_str()
                     && (certificate.certification_pack_id == policy.pack_id
                         || (certificate.model_capability == "Neural-Inference-3B"
                             && certificate.certification_pack_id
@@ -213,7 +238,7 @@ pub fn resolve_per_model_states(
             continue;
         }
 
-        let fingerprint = match resolve_model_fingerprint(model.selected_model, &model.path, false)
+        let fingerprint = match resolve_model_fingerprint(&model.selected_model, &model.path, false)
         {
             Ok(value) => value,
             Err(_) => {
@@ -289,9 +314,10 @@ pub fn resolve_per_model_states(
                 installation_id,
                 model_id: &artifact_id,
                 model_sha256: &fingerprint.sha256,
-                model_capability: model.capability,
-                quantization: policy.quantization,
-                runtime: model.runtime,
+                model_capability: &model.capability,
+                quantization:
+                    policy.quantization.as_str(),
+                runtime: &model.runtime,
                 runtime_version: &certificate_runtime_version,
                 acceleration: certificate_acceleration,
                 certification_pack_id: certificate.certification_pack_id.as_str(),

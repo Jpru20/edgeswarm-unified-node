@@ -185,6 +185,15 @@ pub struct TaskEnvelope {
     #[serde(default)]
     pub selected_context_v1: Option<Value>,
 
+    // SWARM_VISION_INPUT_TRANSPORT_V1
+    #[serde(default)]
+    pub vision_input:
+        Option<
+            crate::core::
+                vision_transport_v1::
+                VisionInputContractV1
+        >,
+
     #[serde(skip)]
     pub swct_result_ready_v170: bool,
 
@@ -419,6 +428,151 @@ mod tests {
     }
 
     #[test]
+    fn parses_vision_transport_contract_v171() {
+        let parsed:
+            GetJobsResponse =
+            serde_json::from_str(
+                r#"{
+                    "task": {
+                        "taskId":
+                            "vision-171",
+                        "prompt":
+                            "Describe the image.",
+                        "requiredModel":
+                            "Vision-Inference-27B",
+                        "selectedModel":
+                            "qwen3-vl:30b-a3b",
+                        "visionInput": {
+                            "version":
+                                "swarm-vision-input-v1",
+                            "transport":
+                                "swarm-api-v1",
+                            "primaryAssetId":
+                                "img_171",
+                            "assets": [
+                                {
+                                    "assetId":
+                                        "img_171",
+                                    "mediaType":
+                                        "image/jpeg",
+                                    "sha256":
+                                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                    "sizeBytes":
+                                        1024,
+                                    "expiresAtUnix":
+                                        2000
+                                }
+                            ]
+                        }
+                    }
+                }"#,
+            )
+            .unwrap();
+
+        let task =
+            parsed.task.unwrap();
+
+        let vision =
+            task.vision_input
+                .unwrap();
+
+        assert_eq!(
+            vision.version,
+            "swarm-vision-input-v1"
+        );
+
+        assert_eq!(
+            vision.assets.len(),
+            1
+        );
+
+        assert_eq!(
+            vision.assets[0].asset_id,
+            "img_171"
+        );
+    }
+
+    #[test]
+    fn swct_preserves_vision_contract_v171() {
+        let raw =
+            br#"{
+                "task": {
+                    "taskId": "vision-swct",
+                    "prompt": "Inspect this.",
+                    "requiredModel":
+                        "Vision-Inference-27B",
+                    "selectedModel":
+                        "qwen3-vl:30b-a3b",
+                    "visionInput": {
+                        "version":
+                            "swarm-vision-input-v1",
+                        "transport":
+                            "swarm-api-v1",
+                        "assets": [
+                            {
+                                "assetId":
+                                    "img_swct_1",
+                                "mediaType":
+                                    "image/png",
+                                "sha256":
+                                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                                "sizeBytes":
+                                    4096,
+                                "expiresAtUnix":
+                                    2000
+                            }
+                        ]
+                    }
+                }
+            }"#;
+
+        let frame =
+            crate::core::
+                swarm_compact_transport_v1::
+                encode(
+                    crate::core::
+                        swarm_compact_transport_v1::
+                        Kind::Task,
+                    raw,
+                )
+                .unwrap();
+
+        let decoded =
+            crate::core::
+                swarm_compact_transport_v1::
+                decode(
+                    crate::core::
+                        swarm_compact_transport_v1::
+                        Kind::Task,
+                    &frame,
+                )
+                .unwrap();
+
+        assert_eq!(
+            decoded,
+            raw
+        );
+
+        let response:
+            GetJobsResponse =
+            serde_json::from_slice(
+                &decoded
+            )
+            .unwrap();
+
+        assert_eq!(
+            response
+                .task
+                .unwrap()
+                .vision_input
+                .unwrap()
+                .assets[0]
+                .asset_id,
+            "img_swct_1"
+        );
+    }
+
+    #[test]
     fn builds_signed_result_envelope() {
         let task = TaskEnvelope {
             attempt_id: None,
@@ -426,6 +580,7 @@ mod tests {
             task_id: Value::from(2001),
             client_name: None,
             selected_context_v1: None,
+            vision_input: None,
             swct_result_ready_v170: false,
             prompt: "Say hello".into(),
             required_model: Some("Neural-Inference-3B".into()),

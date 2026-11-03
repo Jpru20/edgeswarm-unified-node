@@ -42,6 +42,147 @@ fn ethereum_message_digest(message: &str) -> Keccak256 {
     digest
 }
 
+pub fn sign_eip191_message_v1(
+    message: &str,
+    private_key: &str,
+) -> Result<String, String> {
+    let key = signing_key(private_key)?;
+
+    let (signature, recovery_id) = key
+        .sign_digest_recoverable(
+            ethereum_message_digest(message)
+        )
+        .map_err(|_| {
+            "eip191_message_signing_failed"
+                .to_string()
+        })?;
+
+    let mut output = Vec::with_capacity(65);
+
+    output.extend_from_slice(
+        &signature.to_bytes()
+    );
+
+    output.push(
+        27 + recovery_id.to_byte()
+    );
+
+    Ok(format!(
+        "0x{}",
+        output
+            .iter()
+            .map(|byte| {
+                format!("{byte:02x}")
+            })
+            .collect::<String>()
+    ))
+}
+
+pub fn recover_eip191_signer_v1(
+    message: &str,
+    signature_hex: &str,
+) -> Result<String, String> {
+    let raw = signature_hex
+        .trim()
+        .strip_prefix("0x")
+        .unwrap_or(signature_hex.trim());
+
+    if raw.len() != 130 {
+        return Err(
+            "eip191_signature_invalid_length"
+                .into()
+        );
+    }
+
+    let mut bytes = [0u8; 65];
+
+    for index in 0..65 {
+        bytes[index] =
+            u8::from_str_radix(
+                &raw[
+                    index * 2
+                        ..index * 2 + 2
+                ],
+                16,
+            )
+            .map_err(|_| {
+                "eip191_signature_invalid_hex"
+                    .to_string()
+            })?;
+    }
+
+    let signature =
+        Signature::try_from(
+            &bytes[..64]
+        )
+        .map_err(|_| {
+            "eip191_signature_invalid"
+                .to_string()
+        })?;
+
+    let recovery_byte =
+        match bytes[64] {
+            27 | 28 =>
+                bytes[64] - 27,
+            0 | 1 =>
+                bytes[64],
+            _ =>
+                return Err(
+                    "eip191_signature_recovery_id_invalid"
+                        .into()
+                ),
+        };
+
+    let recovery_id =
+        RecoveryId::try_from(
+            recovery_byte
+        )
+        .map_err(|_| {
+            "eip191_signature_recovery_id_invalid"
+                .to_string()
+        })?;
+
+    let verifying_key =
+        VerifyingKey::recover_from_digest(
+            ethereum_message_digest(
+                message
+            ),
+            &signature,
+            recovery_id,
+        )
+        .map_err(|_| {
+            "eip191_signature_recovery_failed"
+                .to_string()
+        })?;
+
+    let encoded =
+        verifying_key
+            .to_encoded_point(false);
+
+    let public =
+        encoded.as_bytes();
+
+    let digest =
+        Keccak256::digest(
+            &public[1..]
+        );
+
+    let address =
+        &digest[
+            digest.len() - 20..
+        ];
+
+    Ok(format!(
+        "0x{}",
+        address
+            .iter()
+            .map(|byte| {
+                format!("{byte:02x}")
+            })
+            .collect::<String>()
+    ))
+}
+
 pub fn result_message(
     task_id: &str,
     score: u16,
@@ -252,6 +393,42 @@ pub fn recover_result_signer(
 mod tests {
     use super::*;
     use crate::core::wallet_account::DeviceWallet;
+
+    #[test]
+    fn generic_eip191_message_signature_round_trip_v171() {
+        let private_key =
+            "0000000000000000000000000000000000000000000000000000000000000001";
+
+        let wallet =
+            DeviceWallet::from_private_key(
+                private_key
+            )
+            .unwrap();
+
+        let message =
+            "swarm-model-registry-test";
+
+        let signature =
+            sign_eip191_message_v1(
+                message,
+                private_key,
+            )
+            .unwrap();
+
+        let recovered =
+            recover_eip191_signer_v1(
+                message,
+                &signature,
+            )
+            .unwrap();
+
+        assert_eq!(
+            recovered.to_lowercase(),
+            wallet
+                .wallet_address()
+                .to_lowercase()
+        );
+    }
 
     #[test]
     fn eip191_result_signature_recovers_wallet() {
