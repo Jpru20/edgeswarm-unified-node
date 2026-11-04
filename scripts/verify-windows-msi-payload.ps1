@@ -18,7 +18,25 @@ $Hash = (Get-FileHash $Payload.FullName -Algorithm SHA256).Hash
 Write-Host 'MSI_PAYLOAD_CONFIG_VERIFIED=PASS'
 Write-Host "CANONICAL_RUNTIME_PATH=$($Payload.FullName)"
 Write-Host "CANONICAL_RUNTIME_SHA256=$Hash"
-$ExpectedLlama = "973ff5fd98d0ffe335761c304ac9faa365e57877054f764ac0c40a98a70cf717"
+$RuntimeManifestPath =
+    Join-Path $PSScriptRoot '..\packaging\runtime\llama-runtime-v1.json'
+
+if (!(Test-Path $RuntimeManifestPath)) {
+    throw "msi_payload_runtime_manifest_missing"
+}
+
+$RuntimeManifest =
+    Get-Content $RuntimeManifestPath -Raw |
+    ConvertFrom-Json
+
+$ExpectedLlama =
+    [string]$RuntimeManifest.targets.'windows-x64'.validatedRuntimeSha256
+
+if ([string]::IsNullOrWhiteSpace($ExpectedLlama)) {
+    throw "msi_payload_expected_llama_sha_missing"
+}
+
+$ExpectedLlama = $ExpectedLlama.ToLower()
 $Llama =
     Get-ChildItem $Audit -Recurse -Filter "llama-server.exe" -File |
     Where-Object {
