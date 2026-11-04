@@ -49,12 +49,12 @@ Write-Host 'RELEASE_CONFIG_VALID=PASS'
 Write-Host "SOURCE_REF=$ExpectedSourceRef"
 Write-Host "SOURCE_COMMIT=$Head"
 Write-Host "TARGET_DIR=$TargetDir"
-$RuntimeSource = Join-Path $env:USERPROFILE "edgeswarm-runtime-build\release\windows-x64\current"
+$RuntimeSource = Join-Path $env:USERPROFILE "edgeswarm-runtime-build\release\windows-x64-v172\current"
 $RuntimeExe = Join-Path $RuntimeSource "llama-server.exe"
 
 # WINDOWS_ACCELERATED_RUNTIME_PAYLOAD_V2
-$CudaRuntimeSource = Join-Path $env:USERPROFILE "edgeswarm-runtime-build\release\windows-x64\cuda\current"
-$VulkanRuntimeSource = Join-Path $env:USERPROFILE "edgeswarm-runtime-build\release\windows-x64\vulkan\current"
+$CudaRuntimeSource = Join-Path $env:USERPROFILE "edgeswarm-runtime-build\release\windows-x64-v172\cuda\current"
+$VulkanRuntimeSource = Join-Path $env:USERPROFILE "edgeswarm-runtime-build\release\windows-x64-v172\vulkan\current"
 
 $CudaRuntimeExe = Join-Path $CudaRuntimeSource "llama-server.exe"
 $CudaBackendDll = Join-Path $CudaRuntimeSource "ggml-cuda.dll"

@@ -13,7 +13,10 @@
     "windows-x64": {
       "executable": "llama-server.exe",
       "acceleration": "platform-certified",
-      "validatedRuntimeSha256": "973ff5fd98d0ffe335761c304ac9faa365e57877054f764ac0c40a98a70cf717"
+      "validatedRuntimeSha256": "9332c4e0c917a0c1fb30e3c3224c1a6b3ea7db1900f3cf30b2dc1d7f8510252e",
+      "sourceTag": "b12102",
+      "sourceBuild": 12102,
+      "sourceCommit": "bbb02c93e9b83255b70ac1a755bb02b0a251f9a7"
     },
     "linux-x64": {
       "executable": "llama-server",

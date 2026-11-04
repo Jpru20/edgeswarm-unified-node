@@ -917,7 +917,13 @@ fn model_recommendation_payload_v1(state: &NodeState) -> Value {
                 }),
         "appVersion": env!("CARGO_PKG_VERSION"),
         "supportsPreferredModelRegistryV20261102":
-            true
+            true,
+        "llamaRuntimeBuild":
+            if cfg!(target_os = "windows") {
+                12102
+            } else {
+                0
+            }
     })
 }
 
@@ -937,7 +943,7 @@ fn sync_recommended_model_pack_v171(
             });
 
     println!(
-        "MODEL_PACK_SYNC_VERSION=v1.7.1"
+        "MODEL_PACK_SYNC_VERSION=v1.7.2"
     );
 
     println!(
