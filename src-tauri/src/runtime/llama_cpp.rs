@@ -278,9 +278,12 @@ impl LlamaCppHttpExecutor {
             Some(workload.max_output_tokens),
         );
 
-        let allowed_max_tokens = spec.allowed_max_tokens.max(1);
+        // Certification is bounded independently of customer generation.
+        // This is not a model output ceiling.
+        let certification_token_ceiling =
+            (spec.default_ctx / 2).max(generation.max_tokens).max(1);
 
-        let mut max_tokens = generation.max_tokens.min(allowed_max_tokens).max(1);
+        let mut max_tokens = generation.max_tokens.max(1);
 
         let total_started = Instant::now();
 
@@ -293,10 +296,12 @@ impl LlamaCppHttpExecutor {
             max_tokens,
         )?;
 
-        if attempt.truncated {
-            if let Some(retry_budget) = next_retry_budget(max_tokens, allowed_max_tokens) {
+        while attempt.truncated {
+            if let Some(retry_budget) =
+                next_retry_budget(max_tokens, certification_token_ceiling)
+            {
                 max_tokens = retry_budget;
-                attempts = 2;
+                attempts = attempts.saturating_add(1);
 
                 attempt = self.execute_attempt(
                     &compiled.system_text,
@@ -304,6 +309,8 @@ impl LlamaCppHttpExecutor {
                     &generation,
                     max_tokens,
                 )?;
+            } else {
+                break;
             }
         }
 

@@ -17,7 +17,7 @@ pub struct ModelSpecV1 {
 
 pub const MODEL_REGISTRY_VERSION: &str = "edgeswarm-canonical-model-registry-v2";
 
-pub const OUTPUT_LIMIT_POLICY_VERSION: &str = "edgeswarm-output-limit-policy-v1";
+pub const OUTPUT_LIMIT_POLICY_VERSION: &str = "edgeswarm-output-limit-policy-v2";
 
 pub const MODEL_REGISTRY_V1: &[ModelSpecV1] = &[
     ModelSpecV1 {
@@ -29,7 +29,7 @@ pub const MODEL_REGISTRY_V1: &[ModelSpecV1] = &[
         min_ram_gb: 8,
         default_ctx: 2048,
         default_max_tokens: 256,
-        allowed_max_tokens: 512,
+        allowed_max_tokens: u32::MAX,
         experimental: false,
         patterns: &[
             "*LFM3-1.7B*Q4_K_M*.gguf",
@@ -45,7 +45,7 @@ pub const MODEL_REGISTRY_V1: &[ModelSpecV1] = &[
         min_ram_gb: 8,
         default_ctx: 2048,
         default_max_tokens: 256,
-        allowed_max_tokens: 512,
+        allowed_max_tokens: u32::MAX,
         experimental: false,
         patterns: &["*Qwen2.5-3B*Q4_K_M*.gguf", "*qwen2.5*3b*q4_k_m*.gguf"],
     },
@@ -58,7 +58,7 @@ pub const MODEL_REGISTRY_V1: &[ModelSpecV1] = &[
         min_ram_gb: 16,
         default_ctx: 4096,
         default_max_tokens: 384,
-        allowed_max_tokens: 1024,
+        allowed_max_tokens: u32::MAX,
         experimental: false,
         patterns: &["*Qwen2.5-7B*Q4_K_M*.gguf", "*qwen2.5*7b*q4_k_m*.gguf"],
     },
@@ -71,7 +71,7 @@ pub const MODEL_REGISTRY_V1: &[ModelSpecV1] = &[
         min_ram_gb: 16,
         default_ctx: 4096,
         default_max_tokens: 384,
-        allowed_max_tokens: 1024,
+        allowed_max_tokens: u32::MAX,
         experimental: false,
         patterns: &[
             "*Llama-3.1-8B*Q4_K_M*.gguf",
@@ -88,7 +88,7 @@ pub const MODEL_REGISTRY_V1: &[ModelSpecV1] = &[
         min_ram_gb: 32,
         default_ctx: 4096,
         default_max_tokens: 512,
-        allowed_max_tokens: 1536,
+        allowed_max_tokens: u32::MAX,
         experimental: false,
         patterns: &["*Qwen2.5-14B*Q4_K_M*.gguf", "*qwen2.5*14b*q4_k_m*.gguf"],
     },
@@ -101,7 +101,7 @@ pub const MODEL_REGISTRY_V1: &[ModelSpecV1] = &[
         min_ram_gb: 32,
         default_ctx: 4096,
         default_max_tokens: 1024,
-        allowed_max_tokens: 2048,
+        allowed_max_tokens: u32::MAX,
         experimental: false,
         patterns: &[
             "*Qwen2.5-Coder-14B*Q4_K_M*.gguf",
@@ -117,7 +117,7 @@ pub const MODEL_REGISTRY_V1: &[ModelSpecV1] = &[
         min_ram_gb: 32,
         default_ctx: 4096,
         default_max_tokens: 512,
-        allowed_max_tokens: 1536,
+        allowed_max_tokens: u32::MAX,
         experimental: false,
         patterns: &[
             "*gpt-oss-20b*MXFP4*.gguf",
@@ -133,7 +133,7 @@ pub const MODEL_REGISTRY_V1: &[ModelSpecV1] = &[
         min_ram_gb: 48,
         default_ctx: 4096,
         default_max_tokens: 512,
-        allowed_max_tokens: 2048,
+        allowed_max_tokens: u32::MAX,
         experimental: false,
         patterns: &["*gemma*3*27b*Q4_K_M*.gguf", "*gemma*27b*q4_k_m*.gguf"],
     },
@@ -146,7 +146,7 @@ pub const MODEL_REGISTRY_V1: &[ModelSpecV1] = &[
         min_ram_gb: 48,
         default_ctx: 4096,
         default_max_tokens: 512,
-        allowed_max_tokens: 2048,
+        allowed_max_tokens: u32::MAX,
         experimental: false,
         patterns: &[
             "*Mistral-Small-24B*Q4_K_M*.gguf",
@@ -162,7 +162,7 @@ pub const MODEL_REGISTRY_V1: &[ModelSpecV1] = &[
         min_ram_gb: 64,
         default_ctx: 4096,
         default_max_tokens: 512,
-        allowed_max_tokens: 2048,
+        allowed_max_tokens: u32::MAX,
         experimental: false,
         patterns: &[
             "*Qwen3.6-35B-A3B*Q4_K_M*.gguf",
@@ -178,7 +178,7 @@ pub const MODEL_REGISTRY_V1: &[ModelSpecV1] = &[
         min_ram_gb: 64,
         default_ctx: 4096,
         default_max_tokens: 512,
-        allowed_max_tokens: 2048,
+        allowed_max_tokens: u32::MAX,
         experimental: false,
         patterns: &[
             "*NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB*.gguf",
@@ -194,7 +194,7 @@ pub const MODEL_REGISTRY_V1: &[ModelSpecV1] = &[
         min_ram_gb: 48,
         default_ctx: 4096,
         default_max_tokens: 512,
-        allowed_max_tokens: 2048,
+        allowed_max_tokens: u32::MAX,
         experimental: false,
         patterns: &[
             "*Muse-Glimmer-30B*Q4_K_M*.gguf",
@@ -210,7 +210,7 @@ pub const MODEL_REGISTRY_V1: &[ModelSpecV1] = &[
         min_ram_gb: 128,
         default_ctx: 4096,
         default_max_tokens: 512,
-        allowed_max_tokens: 2048,
+        allowed_max_tokens: u32::MAX,
         experimental: false,
         patterns: &[
             "*NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4*.gguf",
@@ -226,7 +226,7 @@ pub const MODEL_REGISTRY_V1: &[ModelSpecV1] = &[
         min_ram_gb: 64,
         default_ctx: 4096,
         default_max_tokens: 512,
-        allowed_max_tokens: 2048,
+        allowed_max_tokens: u32::MAX,
         experimental: false,
         patterns: &[
             "*Llama-3.1-70B*Q4_K_M*.gguf",
@@ -242,7 +242,7 @@ pub const MODEL_REGISTRY_V1: &[ModelSpecV1] = &[
         min_ram_gb: 64,
         default_ctx: 4096,
         default_max_tokens: 512,
-        allowed_max_tokens: 2048,
+        allowed_max_tokens: u32::MAX,
         experimental: true,
         patterns: &["*Qwen*3*30B*Q4_K_M*.gguf", "*qwen3*30b*q4_k_m*.gguf"],
     },
@@ -376,7 +376,7 @@ pub fn effective_model_specs_v171()
                     default_max_tokens:
                         model.default_max_tokens,
                     allowed_max_tokens:
-                        model.allowed_max_tokens,
+                        u32::MAX,
                     experimental:
                         model.experimental,
                     priority:
@@ -416,7 +416,7 @@ pub fn effective_model_specs_v171()
                 default_max_tokens:
                     spec.default_max_tokens,
                 allowed_max_tokens:
-                    spec.allowed_max_tokens,
+                    u32::MAX,
                 experimental:
                     spec.experimental,
                 priority:
@@ -642,7 +642,7 @@ mod tests {
         let spec = model_spec("qwen2.5:3b").unwrap();
 
         assert_eq!(spec.default_max_tokens, 256);
-        assert_eq!(spec.allowed_max_tokens, 512);
+        assert_eq!(spec.allowed_max_tokens, u32::MAX);
     }
 
     #[test]
