@@ -45,6 +45,14 @@ Remove-Item Env:EDGESWARM_SUPABASE_ANON_KEY -ErrorAction SilentlyContinue
 if ([string]::IsNullOrWhiteSpace($TargetDir)) { $Short = (git rev-parse --short=7 HEAD).Trim(); $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'; $TargetDir = Join-Path $env:USERPROFILE "edgeswarm-release-build-$Short-$Stamp" }
 New-Item -ItemType Directory -Force -Path $TargetDir | Out-Null
 $env:CARGO_TARGET_DIR = $TargetDir
+# WINDOWS_FRONTEND_DEPENDENCY_BOOTSTRAP_V1
+Write-Host 'WINDOWS_FRONTEND_DEPENDENCY_BOOTSTRAP=START'
+npm.cmd ci --no-audit --no-fund
+if ($LASTEXITCODE -ne 0) { throw "windows_frontend_dependency_install_failed_$LASTEXITCODE" }
+$TauriCli = Join-Path $Repo 'node_modules\.bin\tauri.cmd'
+if (!(Test-Path $TauriCli)) { throw 'windows_tauri_cli_missing_after_npm_ci' }
+Write-Host 'WINDOWS_FRONTEND_DEPENDENCIES=PASS'
+
 Write-Host 'RELEASE_CONFIG_VALID=PASS'
 Write-Host "SOURCE_REF=$ExpectedSourceRef"
 Write-Host "SOURCE_COMMIT=$Head"
