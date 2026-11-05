@@ -915,6 +915,36 @@ fn model_disk_free_gb_v1() -> u64 {
         .unwrap_or(0)
 }
 
+// LINUX_V174_RUNTIME_BUILD_REPORTING
+// Report the actual packaged llama-server version, not a build
+// number inferred from the Swarm application version.
+#[cfg(target_os = "linux")]
+fn linux_llama_runtime_build_v174() -> u64 {
+    let Ok(runtime) = resolve_llama_server_path_v1() else {
+        return 0;
+    };
+    let Ok(output) = std::process::Command::new(runtime)
+        .arg("--version")
+        .output()
+    else {
+        return 0;
+    };
+    if !output.status.success() {
+        return 0;
+    }
+    let version = format!(
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    version
+        .split("build ")
+        .nth(1)
+        .and_then(|tail| tail.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|number| number.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
 fn model_recommendation_payload_v1(state: &NodeState) -> Value {
     let ram_gb = state.hardware.total_memory_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
     let backend = state.acceleration.backend.to_ascii_lowercase();
@@ -947,7 +977,14 @@ fn model_recommendation_payload_v1(state: &NodeState) -> Value {
             if cfg!(target_os = "windows") {
                 12102
             } else {
-                0
+                #[cfg(target_os = "linux")]
+                {
+                    linux_llama_runtime_build_v174()
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    0
+                }
             }
     })
 }
