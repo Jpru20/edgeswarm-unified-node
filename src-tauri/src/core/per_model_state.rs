@@ -36,6 +36,7 @@ pub struct PerModelStateV1 {
     pub status: String,
     pub capacity_status: CapacityStatus,
     pub certified_concurrency: Option<u16>,
+    pub capacity_policy_version: Option<String>,
     pub fingerprint_resolved: bool,
     pub fingerprint_cache_hit: Option<bool>,
     pub certificate_loaded: bool,
@@ -209,6 +210,7 @@ pub fn resolve_per_model_states(
             status: "installed_uncertified".into(),
             capacity_status: CapacityStatus::Uncertified,
             certified_concurrency: None,
+            capacity_policy_version: None,
             fingerprint_resolved: false,
             fingerprint_cache_hit: None,
             certificate_loaded: false,
@@ -335,6 +337,9 @@ pub fn resolve_per_model_states(
                 state.status = "ready".into();
                 state.capacity_status = CapacityStatus::Certified;
                 state.certified_concurrency = Some(certificate.certified_concurrency);
+                state.capacity_policy_version = Some(
+                    certificate.capacity_policy_version.clone()
+                );
 
                 break;
             }
@@ -383,6 +388,7 @@ impl From<&PerModelStateV1> for ModelState {
             status: state.status.clone(),
             capacity_status: state.capacity_status.clone(),
             certified_concurrency: state.certified_concurrency,
+            capacity_policy_version: state.capacity_policy_version.clone(),
         }
     }
 }
