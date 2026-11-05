@@ -293,6 +293,12 @@ BuildArch: $RPM_ARCH
 Source0: edgeswarm-node-payload.tar.gz
 
 %global __strip /bin/true
+# LINUX_V174_OPTIONAL_GPU_RUNTIME_DEPENDENCY_ISOLATION
+# CUDA and Vulkan runtimes are bundled but loaded only when selected.
+# Their ELF dependencies must not prevent CPU-only RPM installation.
+# Retain dependency generation for the headless node, setup, and CPU runtime.
+%global __requires_exclude_from ^/usr/lib/edgeswarm-node/runtime/(cuda|vulkan)/current/.*$
+%global __provides_exclude_from ^/usr/lib/edgeswarm-node/runtime/(cuda|vulkan)/current/.*$
 
 %description
 Headless EdgeSwarm provider node for Linux servers, desktops and laptops.
