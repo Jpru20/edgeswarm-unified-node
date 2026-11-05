@@ -5,6 +5,7 @@ pub mod auth_session;
 pub mod backend_client;
 pub mod capacity;
 pub mod capacity_policy;
+pub mod capacity_policy_migration_v175;
 pub mod capacity_store;
 pub mod capacity_test_control;
 pub mod certificate_match;
