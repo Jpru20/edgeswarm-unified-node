@@ -4,6 +4,7 @@ use crate::{
     core::{
         capacity::{CapacityCertificateV1, CapacityStatus},
         capacity_store::load_certificate,
+        capacity_policy::CAPACITY_POLICY_VERSION_V2,
         certificate_match::{certificate_match_failures, CertificateMatchContext},
         model::ModelState,
         model_discovery::{discover_models, DiscoveredModelV1},
@@ -72,7 +73,7 @@ fn certification_policy(
             crate::core::certification_workload::
                 NEURAL_REALWORLD_PACK_ID_V1,
         capacity_policy_version:
-            "realworld-capacity-policy-v1",
+            CAPACITY_POLICY_VERSION_V2,
         quantization,
     })
 }
