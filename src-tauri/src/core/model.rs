@@ -13,4 +13,5 @@ pub struct ModelState {
     pub status: String,
     pub capacity_status: CapacityStatus,
     pub certified_concurrency: Option<u16>,
+    pub capacity_policy_version: Option<String>,
 }
