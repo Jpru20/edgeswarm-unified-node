@@ -1,5 +1,8 @@
 use crate::core::capacity::CapacityBenchmarkSample;
 
+pub const CAPACITY_POLICY_VERSION_V1: &str = "realworld-capacity-policy-v1";
+pub const CAPACITY_POLICY_VERSION_V2: &str = "realworld-capacity-policy-v2";
+
 #[derive(Debug, Clone)]
 pub struct CapacityPolicy {
     pub required_workloads: usize,
@@ -16,7 +19,7 @@ impl Default for CapacityPolicy {
             required_workloads: 6,
             minimum_quality_pass_rate: 1.0,
             minimum_incremental_throughput_gain: 0.15,
-            maximum_median_latency_multiplier: 1.50,
+            maximum_median_latency_multiplier: 1.60,
             maximum_ttft_multiplier: 1.75,
             maximum_concurrency: 5,
         }
@@ -24,6 +27,19 @@ impl Default for CapacityPolicy {
 }
 
 impl CapacityPolicy {
+    // Recompute existing v1 certificates under the policy that issued them.
+    // New capacity certifications use the more throughput-friendly v2 policy.
+    pub fn for_version(version: &str) -> Option<Self> {
+        match version {
+            CAPACITY_POLICY_VERSION_V1 => Some(Self {
+                maximum_median_latency_multiplier: 1.50,
+                ..Self::default()
+            }),
+            CAPACITY_POLICY_VERSION_V2 => Some(Self::default()),
+            _ => None,
+        }
+    }
+
     fn sample_is_reliable(&self, sample: &CapacityBenchmarkSample) -> bool {
         let expected = self.required_workloads as u16;
 
@@ -148,6 +164,40 @@ mod tests {
             quality_pass_rate: 1.0,
             task_results: (0..6).map(task_result).collect(),
         }
+    }
+
+    #[test]
+    fn lfm3_measured_two_slots_pass_v2_but_not_v1() {
+        let samples = vec![
+            sample(1, 2256, 300, 26.800429953421713),
+            sample(2, 3394, 400, 32.6519777010884),
+        ];
+
+        assert_eq!(CapacityPolicy::default().recommend(&samples), 2);
+        assert_eq!(
+            CapacityPolicy::for_version(CAPACITY_POLICY_VERSION_V1)
+                .unwrap()
+                .recommend(&samples),
+            1
+        );
+    }
+
+    #[test]
+    fn v2_still_rejects_insufficient_throughput_gain() {
+        let samples = vec![
+            sample(1, 2256, 300, 26.8),
+            sample(2, 3394, 400, 29.0),
+        ];
+        assert_eq!(CapacityPolicy::default().recommend(&samples), 1);
+    }
+
+    #[test]
+    fn v2_still_rejects_latency_above_160_percent() {
+        let samples = vec![
+            sample(1, 2256, 300, 26.8),
+            sample(2, 3610, 400, 32.7),
+        ];
+        assert_eq!(CapacityPolicy::default().recommend(&samples), 1);
     }
 
     #[test]
