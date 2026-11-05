@@ -328,6 +328,7 @@ fn resolve_vision_projector_path_v171(
 fn execution_config_for_certified_model_v1(
     model_path: String,
     certified_acceleration: &str,
+    selected_model: &str,
 ) -> Result<LlamaProcessConfig, String> {
     let mut config = LlamaProcessConfig::for_model(model_path)?;
 
@@ -350,6 +351,30 @@ fn execution_config_for_certified_model_v1(
             _ => {}
         }
     }
+
+    // LINUX_V174_SIGNED_VISION_PROJECTOR_RUNTIME
+    // Text models remain unchanged. Certified Linux vision models
+    // require their signed, checksum-verified projector on every
+    // managed runtime start and model switch (including restoration).
+    #[cfg(target_os = "linux")]
+    if crate::core::model_registry::effective_model_spec_v171(
+        selected_model
+    )
+    .and_then(|spec| spec.vision_capability)
+    .is_some()
+    {
+        config.vision_projector_path = Some(
+            resolve_vision_projector_path_v171(selected_model)?
+                .ok_or_else(|| {
+                    format!(
+                        "vision_projector_signed_definition_missing:{selected_model}"
+                    )
+                })?,
+        );
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    let _ = selected_model;
 
     Ok(config)
 }
@@ -2162,6 +2187,7 @@ fn run_capacity_test_at_idle_v1(
         execution_config_for_certified_model_v1(
             restart_model_path_v1,
             runtime_acceleration.as_str(),
+            &selected_model_v1,
         )
         .map_err(|error| {
             format!(
@@ -2599,6 +2625,7 @@ pub fn run_node_service(
                     execution_config_for_certified_model_v1(
                         model_path,
                         &runtime_acceleration,
+                        selected_model,
                     )?;
 
                 let runtime =
@@ -3276,6 +3303,7 @@ pub fn run_node_service(
                     execution_config_for_certified_model_v1(
                         model_path_v1,
                         &desired_acceleration_v1,
+                        batch_model_id_v1,
                     )?;
 
                 if let Some(company_v1) = batch_company_runtime_v1.as_ref() {
