@@ -92,7 +92,85 @@ pub fn certified_model_for_task(
     task: &TaskEnvelope,
     active: Option<&ActiveModelV1>,
 ) -> Result<Option<ActiveModelV1>, String> {
+    // Linux vision tasks must select a vision-certified model, never
+    // fall through to the text-only neural model selector.
+    #[cfg(target_os = "linux")]
+    if task_requires_vision_v171(task) {
+        return certified_vision_model_for_task_linux_v174(state, task, active);
+    }
+
     certified_model_for_task_from_models(&state.models, task, active)
+}
+
+// LINUX_V174_CERTIFIED_VISION_ROUTING
+#[cfg(target_os = "linux")]
+fn certified_vision_model_for_task_linux_v174(
+    state: &NodeState,
+    task: &TaskEnvelope,
+    active: Option<&ActiveModelV1>,
+) -> Result<Option<ActiveModelV1>, String> {
+    use crate::core::{
+        model_registry::effective_model_spec_v171,
+        vision_certification_v1::vision_certificate_valid_v171,
+    };
+
+    let required = task.required_model.as_deref().unwrap_or("").trim();
+    let selected = task.selected_model.as_deref().unwrap_or("").trim();
+
+    let mut candidates = state.models.iter()
+        .filter(|model| {
+            model.status == "ready"
+                && model.capacity_status == CapacityStatus::Certified
+                && model.certified_concurrency.unwrap_or(0) > 0
+        })
+        .filter_map(|model| {
+            let spec = effective_model_spec_v171(&model.selected_model)?;
+            let vision_capability = spec.vision_capability.as_deref()?;
+
+            if required != "Vision-Inference" && vision_capability != required {
+                return None;
+            }
+            if !selected.is_empty()
+                && selected != "tier:auto"
+                && model.selected_model != selected
+            {
+                return None;
+            }
+            if !vision_certificate_valid_v171(state, model) {
+                return None;
+            }
+
+            Some((model, spec.priority, spec.tier))
+        })
+        .collect::<Vec<_>>();
+
+    candidates.sort_by(|a, b| {
+        b.2.cmp(&a.2)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.0.selected_model.cmp(&b.0.selected_model))
+    });
+
+    let (model, _, _) = candidates.first()
+        .ok_or_else(|| {
+            if !selected.is_empty() && selected != "tier:auto" {
+                format!("selected_vision_model_not_certified:{selected}")
+            } else {
+                format!("certified_vision_model_not_available:{required}")
+            }
+        })?;
+
+    if let Some(active) = active {
+        if active.selected_model == model.selected_model {
+            return Ok(Some(active.clone()));
+        }
+    }
+
+    Ok(Some(ActiveModelV1 {
+        selected_model: model.selected_model.clone(),
+        capability: model.capability.clone(),
+        runtime: model.runtime.clone(),
+        tier: model.tier,
+    }))
 }
 
 fn certified_model_for_task_from_models(
