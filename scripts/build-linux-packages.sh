@@ -33,6 +33,14 @@ EXPECTED_SHA="${EDGESWARM_EXPECTED_RUNTIME_SHA256:-}"
 LLAMA_RUNTIME_DIR="${EDGESWARM_LLAMA_RUNTIME_DIR:-$HOME/edgeswarm-runtime-build/release/linux-${ARCH}/current}"
 EXPECTED_LLAMA_SHA="${EDGESWARM_EXPECTED_LLAMA_SHA256:-}"
 
+# LINUX_V174_PACKAGED_ACCELERATED_RUNTIME_VARIANTS
+# CPU stays at runtime/current. Optional GPU runtimes are isolated
+# under runtime/{cuda,vulkan}/current and must be explicitly verified.
+CUDA_RUNTIME_DIR="${EDGESWARM_LLAMA_RUNTIME_CUDA_DIR:-}"
+VULKAN_RUNTIME_DIR="${EDGESWARM_LLAMA_RUNTIME_VULKAN_DIR:-}"
+EXPECTED_CUDA_SHA="${EDGESWARM_EXPECTED_LLAMA_CUDA_SHA256:-}"
+EXPECTED_VULKAN_SHA="${EDGESWARM_EXPECTED_LLAMA_VULKAN_SHA256:-}"
+
 rm -rf "$OUT"
 mkdir -p "$OUT"
 
@@ -88,6 +96,24 @@ echo "LLAMA_RUNTIME_SHA256=$LLAMA_SHA"
 [[ -n "$EXPECTED_LLAMA_SHA" ]] || { echo "ERROR=expected_llama_sha_required"; exit 1; }
 [[ "$LLAMA_SHA" == "$EXPECTED_LLAMA_SHA" ]] || { echo "ERROR=llama_runtime_sha_mismatch"; exit 1; }
 
+if [[ -n "$CUDA_RUNTIME_DIR" ]]; then
+    [[ -n "$EXPECTED_CUDA_SHA" ]] || { echo "ERROR=cuda_runtime_sha_required"; exit 1; }
+    test -x "$CUDA_RUNTIME_DIR/llama-server" || { echo "ERROR=cuda_runtime_missing"; exit 1; }
+    test -f "$CUDA_RUNTIME_DIR/libggml-cuda.so" || { echo "ERROR=cuda_backend_missing"; exit 1; }
+    ACTUAL_CUDA_SHA="$(sha256sum "$CUDA_RUNTIME_DIR/llama-server" | awk '{print $1}')"
+    [[ "$ACTUAL_CUDA_SHA" == "$EXPECTED_CUDA_SHA" ]] || { echo "ERROR=cuda_runtime_sha_mismatch"; exit 1; }
+    echo "LLAMA_CUDA_RUNTIME_SHA256=$ACTUAL_CUDA_SHA"
+fi
+
+if [[ -n "$VULKAN_RUNTIME_DIR" ]]; then
+    [[ -n "$EXPECTED_VULKAN_SHA" ]] || { echo "ERROR=vulkan_runtime_sha_required"; exit 1; }
+    test -x "$VULKAN_RUNTIME_DIR/llama-server" || { echo "ERROR=vulkan_runtime_missing"; exit 1; }
+    test -f "$VULKAN_RUNTIME_DIR/libggml-vulkan.so" || { echo "ERROR=vulkan_backend_missing"; exit 1; }
+    ACTUAL_VULKAN_SHA="$(sha256sum "$VULKAN_RUNTIME_DIR/llama-server" | awk '{print $1}')"
+    [[ "$ACTUAL_VULKAN_SHA" == "$EXPECTED_VULKAN_SHA" ]] || { echo "ERROR=vulkan_runtime_sha_mismatch"; exit 1; }
+    echo "LLAMA_VULKAN_RUNTIME_SHA256=$ACTUAL_VULKAN_SHA"
+fi
+
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -101,6 +127,15 @@ install -m 0755 "$SETUP" \
 
 install -d "$PAYLOAD/usr/lib/edgeswarm-node/runtime/current"
 cp -a "$LLAMA_RUNTIME_DIR/." "$PAYLOAD/usr/lib/edgeswarm-node/runtime/current/"
+
+if [[ -n "$CUDA_RUNTIME_DIR" ]]; then
+    mkdir -p "$PAYLOAD/usr/lib/edgeswarm-node/runtime/cuda/current"
+    cp -a "$CUDA_RUNTIME_DIR/." "$PAYLOAD/usr/lib/edgeswarm-node/runtime/cuda/current/"
+fi
+if [[ -n "$VULKAN_RUNTIME_DIR" ]]; then
+    mkdir -p "$PAYLOAD/usr/lib/edgeswarm-node/runtime/vulkan/current"
+    cp -a "$VULKAN_RUNTIME_DIR/." "$PAYLOAD/usr/lib/edgeswarm-node/runtime/vulkan/current/"
+fi
 
 install -d "$PAYLOAD/usr/bin"
 ln -s ../lib/edgeswarm-node/edgeswarm-node-headless \
@@ -136,6 +171,14 @@ install -m 0755 "$HEADLESS" \
 install -m 0755 "$SETUP" \
     "$TARROOT/bin/edgeswarm-node-setup"
 cp -a "$LLAMA_RUNTIME_DIR/." "$TARROOT/runtime/current/"
+if [[ -n "$CUDA_RUNTIME_DIR" ]]; then
+    mkdir -p "$TARROOT/runtime/cuda/current"
+    cp -a "$CUDA_RUNTIME_DIR/." "$TARROOT/runtime/cuda/current/"
+fi
+if [[ -n "$VULKAN_RUNTIME_DIR" ]]; then
+    mkdir -p "$TARROOT/runtime/vulkan/current"
+    cp -a "$VULKAN_RUNTIME_DIR/." "$TARROOT/runtime/vulkan/current/"
+fi
 install -m 0755 packaging/linux/install-tar.sh \
     "$TARROOT/install.sh"
 install -m 0644 packaging/linux/edgeswarm-node-headless@.service \
