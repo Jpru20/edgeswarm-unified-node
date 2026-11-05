@@ -163,6 +163,9 @@ pub struct ProductionModelCapacityV1 {
     pub status: String,
     pub capacity_status: CapacityStatus,
     pub certified_concurrency: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacity_policy_version: Option<String>,
+    pub capacity_migration_status: String,
 }
 
 // WINDOWS_UPDATE_LIFECYCLE_HEARTBEAT_V1
@@ -754,6 +757,12 @@ impl ProductionHeartbeatV1 {
                     model.capacity_status.clone(),
                 certified_concurrency:
                     model.certified_concurrency,
+                capacity_policy_version: model.capacity_policy_version.clone(),
+                capacity_migration_status:
+                    crate::core::capacity_policy_migration_v175::migration_status(
+                        &model.selected_model,
+                        model.capacity_policy_version.as_deref(),
+                    ).into(),
             })
             .collect();
 
