@@ -192,6 +192,15 @@ impl LlamaCppHttpExecutor {
             });
         }
 
+        // LFM3_CERTIFICATION_NON_THINKING_V1
+        // These bounded structured certification workloads measure delivered
+        // answers, not reasoning-token use. Customer inference is unchanged.
+        if self.certification_selected_model.as_deref() == Some("lfm3:1.7b") {
+            body["chat_template_kwargs"] = json!({
+                "enable_thinking": false
+            });
+        }
+
         let started = Instant::now();
 
         let response = self
