@@ -66,13 +66,21 @@ pub fn runtime_acceleration_for_config_v1(
         }
     }
 
-    let detected = adapters::detect_acceleration().backend;
+    // Linux must not claim CUDA merely because an NVIDIA device
+    // exists: the selected executable must carry the GPU backend.
+    #[cfg(target_os = "linux")]
+    return "cpu".into();
 
-    if matches!(detected.as_str(), "cuda" | "vulkan" | "metal") {
-        return detected;
+    #[cfg(not(target_os = "linux"))]
+    {
+        let detected = adapters::detect_acceleration().backend;
+
+        if matches!(detected.as_str(), "cuda" | "vulkan" | "metal") {
+            return detected;
+        }
+
+        "cpu".into()
     }
-
-    "cpu".into()
 }
 impl LlamaProcessConfig {
     pub fn for_model(model_path: impl Into<PathBuf>) -> Result<Self, String> {
@@ -90,6 +98,16 @@ impl LlamaProcessConfig {
                         .map(|directory| {
                             directory.join("ggml-cuda.dll").is_file()
                                 || directory.join("ggml-vulkan.dll").is_file()
+                        })
+                        .unwrap_or(false)
+                {
+                    -1
+                } else if cfg!(target_os = "linux")
+                    && executable
+                        .parent()
+                        .map(|directory| {
+                            directory.join("libggml-cuda.so").is_file()
+                                || directory.join("libggml-vulkan.so").is_file()
                         })
                         .unwrap_or(false)
                 {
@@ -452,6 +470,75 @@ pub fn resolve_llama_server_path_v1() -> Result<PathBuf, String> {
             );
         }
     }
+    // LINUX_V174_ARCH_AWARE_GPU_RUNTIME_SELECTION
+    // An NVIDIA device may use a verified bundled CUDA runtime.
+    // Vulkan is an explicit opt-in after host GPU qualification.
+    // Missing backends always fall back to the packaged CPU runtime.
+    #[cfg(target_os = "linux")]
+    {
+        let variant_override = env::var("EDGESWARM_LLAMA_RUNTIME_VARIANT")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        let device_backend = adapters::detect_acceleration().backend;
+
+        let variant = match variant_override.as_str() {
+            "cpu" => None,
+            "cuda" if device_backend == "cuda" => Some("cuda"),
+            "vulkan" => Some("vulkan"),
+            "" if device_backend == "cuda" => Some("cuda"),
+            "" => None,
+            _ => {
+                println!("LLAMA_RUNTIME_VARIANT_UNSUPPORTED_OR_UNAVAILABLE={variant_override}");
+                None
+            }
+        };
+
+        if let Some(variant) = variant {
+            if let Ok(executable) = env::current_exe() {
+                if let Some(directory) = executable.parent() {
+                    let backend_lib = if variant == "cuda" {
+                        "libggml-cuda.so"
+                    } else {
+                        "libggml-vulkan.so"
+                    };
+                    let path = directory.join("runtime")
+                        .join(variant)
+                        .join("current")
+                        .join(filename);
+                    if path.is_file()
+                        && path.parent()
+                            .map(|parent| parent.join(backend_lib).is_file())
+                            .unwrap_or(false)
+                    {
+                        // Runtime shared-library availability must be checked
+                        // on the actual deployment host. A CUDA package on a
+                        // non-CUDA server must not claim GPU acceleration.
+                        let backend_path = path.parent().unwrap().join(backend_lib);
+                        let dependencies_available = Command::new("ldd")
+                            .arg(&backend_path)
+                            .output()
+                            .map(|out| {
+                                out.status.success()
+                                    && !String::from_utf8_lossy(&out.stdout)
+                                        .contains("not found")
+                                    && !String::from_utf8_lossy(&out.stderr)
+                                        .contains("not found")
+                            })
+                            .unwrap_or(false);
+                        if dependencies_available {
+                            println!("LLAMA_RUNTIME_VARIANT={variant}");
+                            return Ok(path);
+                        }
+                        println!("LLAMA_RUNTIME_VARIANT_DEPENDENCIES_MISSING={variant}");
+                    } else {
+                        println!("LLAMA_RUNTIME_VARIANT_MISSING={variant}");
+                    }
+                }
+            }
+        }
+    }
+
     // UNIFIED_BUNDLED_LLAMA_RUNTIME_V1
     // Each supported release ships its native llama runtime under
     // runtime/current beside the EdgeSwarm executable.
