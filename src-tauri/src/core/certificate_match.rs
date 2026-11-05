@@ -1,6 +1,6 @@
 use crate::core::{
     capacity::CapacityCertificateV1,
-    capacity_policy::CapacityPolicy,
+    capacity_policy::{CapacityPolicy, CAPACITY_POLICY_VERSION_V1, CAPACITY_POLICY_VERSION_V2},
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -135,11 +135,19 @@ pub fn certificate_match_failures(
         "benchmark_mode_mismatch"
     );
 
-    check!(
-        certificate.capacity_policy_version.as_str(),
-        context.capacity_policy_version,
-        "capacity_policy_version_mismatch"
-    );
+    // Old certificates remain valid at their original tested capacity.
+    // A stricter version match would unnecessarily force all existing nodes
+    // to recertify when we introduce a throughput-friendly policy revision.
+    let allowed_policy = certificate.capacity_policy_version == context.capacity_policy_version
+        || (context.capacity_policy_version == CAPACITY_POLICY_VERSION_V2
+            && certificate.capacity_policy_version == CAPACITY_POLICY_VERSION_V1);
+    if !allowed_policy {
+        failures.push(format!(
+            "capacity_policy_version_mismatch:expected={}:actual={}",
+            context.capacity_policy_version,
+            certificate.capacity_policy_version
+        ));
+    }
 
     check!(
         certificate.output_limit_policy_version.as_str(),
@@ -161,15 +169,19 @@ pub fn certificate_match_failures(
     if certificate.samples.is_empty() {
         failures.push("certificate_samples_missing".into());
     } else {
-        let recomputed =
-            CapacityPolicy::default().recommend(&certificate.samples);
-
-        if recomputed != certificate.certified_concurrency {
-            failures.push(format!(
-                "capacity_policy_recompute_mismatch:stored={}:recomputed={}",
-                certificate.certified_concurrency,
-                recomputed
-            ));
+        if let Some(policy) = CapacityPolicy::for_version(
+            &certificate.capacity_policy_version
+        ) {
+            let recomputed = policy.recommend(&certificate.samples);
+            if recomputed != certificate.certified_concurrency {
+                failures.push(format!(
+                    "capacity_policy_recompute_mismatch:stored={}:recomputed={}",
+                    certificate.certified_concurrency,
+                    recomputed
+                ));
+            }
+        } else {
+            failures.push("capacity_policy_version_unknown".into());
         }
     }
 
