@@ -1,7 +1,7 @@
 use crate::{
     core::{
         capacity::CapacityCertificateV1,
-        capacity_policy::CapacityPolicy,
+        capacity_policy::{CapacityPolicy, CAPACITY_POLICY_VERSION_V2},
         capacity_store::{load_certificate, save_certificate},
         certificate_match::sha256_file,
         certification_runner::CertificationRunner,
@@ -422,7 +422,7 @@ pub fn certify_model_path_v1(
         runtime_version,
         acceleration: runtime_acceleration,
         benchmark_mode: "no_cache_prompt".into(),
-        capacity_policy_version: "realworld-capacity-policy-v1".into(),
+        capacity_policy_version: CAPACITY_POLICY_VERSION_V2.into(),
         output_limit_policy_version: OUTPUT_LIMIT_POLICY_VERSION.into(),
         tested_concurrency_levels: report.tested_concurrency_levels.clone(),
         rejected_concurrency: report.rejected_concurrency,
