@@ -482,19 +482,20 @@ pub fn resolve_llama_server_path_v1() -> Result<PathBuf, String> {
             .to_ascii_lowercase();
         let device_backend = adapters::detect_acceleration().backend;
 
-        let variant = match variant_override.as_str() {
-            "cpu" => None,
-            "cuda" if device_backend == "cuda" => Some("cuda"),
-            "vulkan" => Some("vulkan"),
-            "" if device_backend == "cuda" => Some("cuda"),
-            "" => None,
+        // LINUX_AUTO_RUNTIME_COMPAT_V1
+        let variants: &[&str] = match variant_override.as_str() {
+            "cpu" => &[],
+            "cuda" if device_backend == "cuda" => &["cuda", "vulkan"],
+            "vulkan" => &["vulkan"],
+            "" if device_backend == "cuda" => &["cuda", "vulkan"],
+            "" => &["vulkan"],
             _ => {
                 println!("LLAMA_RUNTIME_VARIANT_UNSUPPORTED_OR_UNAVAILABLE={variant_override}");
-                None
+                &[]
             }
         };
 
-        if let Some(variant) = variant {
+        for &variant in variants {
             if let Ok(executable) = env::current_exe() {
                 if let Some(directory) = executable.parent() {
                     let backend_lib = if variant == "cuda" {
@@ -514,23 +515,29 @@ pub fn resolve_llama_server_path_v1() -> Result<PathBuf, String> {
                         // Runtime shared-library availability must be checked
                         // on the actual deployment host. A CUDA package on a
                         // non-CUDA server must not claim GPU acceleration.
-                        let backend_path = path.parent().unwrap().join(backend_lib);
-                        let dependencies_available = Command::new("ldd")
-                            .arg(&backend_path)
+                        let usable = Command::new(&path)
+                            .arg("--list-devices")
                             .output()
                             .map(|out| {
-                                out.status.success()
-                                    && !String::from_utf8_lossy(&out.stdout)
-                                        .contains("not found")
-                                    && !String::from_utf8_lossy(&out.stderr)
-                                        .contains("not found")
+                                let listing = format!(
+                                    "{}\n{}",
+                                    String::from_utf8_lossy(&out.stdout),
+                                    String::from_utf8_lossy(&out.stderr)
+                                ).to_ascii_lowercase();
+                                out.status.success() && listing.lines().any(|line| {
+                                    let label = line.trim().split(":").next().unwrap_or("");
+                                    label.strip_prefix(variant)
+                                        .map(|index| !index.is_empty()
+                                            && index.bytes().all(|b| b.is_ascii_digit()))
+                                        .unwrap_or(false)
+                                })
                             })
                             .unwrap_or(false);
-                        if dependencies_available {
+                        if usable {
                             println!("LLAMA_RUNTIME_VARIANT={variant}");
                             return Ok(path);
                         }
-                        println!("LLAMA_RUNTIME_VARIANT_DEPENDENCIES_MISSING={variant}");
+                        println!("LLAMA_RUNTIME_VARIANT_UNUSABLE={variant}");
                     } else {
                         println!("LLAMA_RUNTIME_VARIANT_MISSING={variant}");
                     }

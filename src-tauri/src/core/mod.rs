@@ -103,11 +103,29 @@ impl NodeState {
             crate::runtime::llama_process::resolve_llama_server_path_v1(),
         ) {
             (Ok(model_root), Ok(runtime_path)) => {
+                // LINUX_V174_RUNTIME_CERTIFICATE_ACCELERATION_FIX
+                // Match capacity certificates to the selected runtime,
+                // while retaining physical GPU detection for hardware reporting.
+                #[cfg(target_os = "linux")]
+                let certificate_acceleration =
+                    crate::runtime::llama_process::LlamaProcessConfig::for_model(
+                        model_root.as_path()
+                    )
+                    .map(|mut config| {
+                        config.executable = runtime_path.clone();
+                        crate::runtime::llama_process::
+                            runtime_acceleration_for_config_v1(&config)
+                    })
+                    .unwrap_or_else(|_| "unavailable".to_string());
+
+                #[cfg(not(target_os = "linux"))]
+                let certificate_acceleration = acceleration.backend.clone();
+
                 match per_model_state::resolve_per_model_states(
                     &model_root,
                     &runtime_path,
                     &identity.installation_id,
-                    &acceleration.backend,
+                    &certificate_acceleration,
                 ) {
                     Ok(states) => {
                         let models: Vec<ModelState> = states.iter().map(ModelState::from).collect();
