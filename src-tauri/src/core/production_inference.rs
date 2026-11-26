@@ -412,7 +412,7 @@ impl ProductionLlamaClient {
             "temperature": generation.temperature,
             "top_p": generation.top_p,
             "max_tokens": request_max_tokens,
-            "cache_prompt": !cfg!(target_os = "macos"),
+            "cache_prompt": !cfg!(any(target_os = "macos", target_os = "windows")),
             "stop": generation.stop,
             "stream": true,
             "stream_options": {
@@ -825,7 +825,7 @@ impl ProductionLlamaClient {
             "temperature": generation.temperature,
             "top_p": generation.top_p,
             "max_tokens": request_max_tokens,
-            "cache_prompt": !cfg!(target_os = "macos"),
+            "cache_prompt": !cfg!(any(target_os = "macos", target_os = "windows")),
             "stop": generation.stop,
             "stream": false
         });
