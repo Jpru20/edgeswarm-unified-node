@@ -41,6 +41,8 @@ pub mod swarm_token_context_v1;
 pub mod production_prompt;
 pub mod production_task_http;
 pub(crate) mod dynamic_funding_v176;
+#[cfg(target_os = "windows")]
+pub(crate) mod windows_model_retirement_v177;
 pub mod real_capacity_certification;
 pub mod result_signing;
 pub mod start_credential_policy;
