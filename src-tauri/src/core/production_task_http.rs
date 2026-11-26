@@ -171,6 +171,60 @@ pub fn send_heartbeat(
     Err("heartbeat_auth_failed_after_refresh".into())
 }
 
+// Idle model migration must be authorized by the same device admission
+// fence as W10. A timeout or unknown response never authorizes a switch.
+pub(crate) fn begin_idle_model_migration_v1(
+    http: &Client,
+    auth_client: &SupabaseAuthClient,
+    auth: &mut LocalAuth,
+    hardware: &str,
+    worker: &str,
+    from_model: &str,
+    to_model: &str,
+) -> Result<bool, String> {
+    let body = serde_json::json!({
+        "hardwareId": hardware,
+        "worker": worker,
+        "appVersion": env!("CARGO_PKG_VERSION"),
+        "fromModel": from_model,
+        "toModel": to_model,
+    });
+    for auth_try in 0..2 {
+        let response = http
+            .post(format!("{}/node/model-migration/begin", api_base()))
+            .header(AUTHORIZATION, bearer(&auth.access_token)?)
+            .json(&body)
+            .send()
+            .map_err(|_| "model_migration_request_failed".to_string())?;
+        let status = response.status().as_u16();
+        if status == 401 && auth_try == 0 {
+            let stale = auth.access_token.clone();
+            *auth = refresh_auth(auth_client, &stale)?;
+            continue;
+        }
+        if status != 200 {
+            return Err(format!("model_migration_http_{status}"));
+        }
+        let result: serde_json::Value = response.json()
+            .map_err(|_| "model_migration_response_invalid".to_string())?;
+        if result["ok"].as_bool() != Some(true) {
+            println!("MODEL_MIGRATION_DEFERRED={}",
+                result["reason"].as_str().unwrap_or("not_authorized"));
+            return Ok(false);
+        }
+        if result["version"].as_str() != Some("idle-model-migration-v1")
+            || result["hardwareId"].as_str() != Some(hardware)
+            || result["fromModel"].as_str() != Some(from_model)
+            || result["toModel"].as_str() != Some(to_model)
+            || result["assignmentWithdrawn"].as_bool() != Some(true)
+        {
+            return Err("model_migration_permit_identity_mismatch".into());
+        }
+        return Ok(true);
+    }
+    Err("model_migration_auth_failed".into())
+}
+
 pub fn poll_once(
     http: &Client,
     auth_client: &SupabaseAuthClient,
