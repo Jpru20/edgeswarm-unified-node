@@ -2320,6 +2320,125 @@ fn run_capacity_test_at_idle_v1(
     Ok(())
 }
 
+// MODEL_MIGRATION_INSTALLED_CERTIFIED_V177
+// Only priority changes may reuse existing capacity certificates. New artifact
+// identities or changed execution definitions require normal provisioning and
+// certification; never reinterpret a running certificate under a new artifact.
+fn compatible_registry_refresh_v177(
+    previous: &[crate::core::signed_model_registry::SignedModelDefinitionV1],
+    fresh: &[crate::core::signed_model_registry::SignedModelDefinitionV1],
+    models: &[crate::core::model::ModelState],
+) -> bool {
+    models.iter().filter(|m| m.status == "ready"
+        && m.capacity_status == crate::core::capacity::CapacityStatus::Certified
+        && m.certified_concurrency.unwrap_or(0) > 0)
+        .all(|m| {
+            let Some(old) = previous.iter().find(|d| d.selected_model == m.selected_model) else {
+                return false;
+            };
+            let Some(new) = fresh.iter().find(|d| d.selected_model == m.selected_model) else {
+                return false;
+            };
+            let mut old = old.clone();
+            old.priority = new.priority;
+            &old == new && new.artifact_id == m.model_id
+                && new.capability == m.capability && new.runtime == m.runtime
+                && new.tier == m.tier
+        })
+}
+
+struct IdleModelMigrationV177 {
+    target: String,
+    target_config: LlamaProcessConfig,
+    target_acceleration: String,
+    fallback_config: LlamaProcessConfig,
+    fallback_acceleration: String,
+}
+
+fn prepare_idle_model_migration_v177(
+    state: &NodeState,
+    current: &str,
+) -> Result<Option<IdleModelMigrationV177>, String> {
+    use crate::core::signed_model_registry as registry;
+    let previous = registry::active_or_cached_model_registry_v171()
+        .ok_or_else(|| "model_migration_current_registry_missing".to_string())?;
+    // Network only: an expired or unreachable registry must not authorize
+    // a new model selection from the fallback built-in table.
+    let fresh = registry::fetch_signed_model_registry_v171()?;
+    if fresh.payload.issued_at_unix < previous.payload.issued_at_unix {
+        return Err("model_migration_stale_registry".into());
+    }
+    if !compatible_registry_refresh_v177(&previous.payload.models,
+        &fresh.payload.models, &state.models) {
+        return Err("model_migration_definition_requires_recertification".into());
+    }
+    registry::install_verified_model_registry_v171(fresh);
+    let Some(target) = crate::core::execution_model::primary_certified_model(state) else {
+        return Ok(None);
+    };
+    if target.selected_model == current {
+        return Ok(None);
+    }
+    let verified_config = |id: &str| -> Result<(LlamaProcessConfig, String), String> {
+        let model = state.models.iter().find(|m| m.selected_model == id
+            && m.status == "ready"
+            && m.capacity_status == crate::core::capacity::CapacityStatus::Certified
+            && m.certified_concurrency.unwrap_or(0) > 0)
+            .ok_or_else(|| "model_migration_target_not_certified".to_string())?;
+        let definition = registry::signed_model_definition_v171(id)
+            .ok_or_else(|| "model_migration_definition_missing".to_string())?;
+        let model_path = resolve_active_model_path_v1(id)?;
+        let path = std::path::Path::new(&model_path);
+        let filename = path.file_name().and_then(|s| s.to_str())
+            .ok_or_else(|| "model_migration_filename_missing".to_string())?;
+        let artifact = definition.artifacts.iter().find(|a|
+            a.artifact_role == "model" && a.filename == filename)
+            .ok_or_else(|| "model_migration_artifact_missing".to_string())?;
+        if !crate::core::certificate_match::sha256_file(path)?
+            .eq_ignore_ascii_case(&artifact.sha256) {
+            return Err("model_migration_artifact_hash_mismatch".into());
+        }
+        Ok((execution_config_for_certified_model_v1(model_path, &model.acceleration)?,
+            model.acceleration.clone()))
+    };
+    let (target_config, target_acceleration) = verified_config(&target.selected_model)?;
+    let (fallback_config, fallback_acceleration) = verified_config(current)?;
+    Ok(Some(IdleModelMigrationV177 {
+        target: target.selected_model, target_config, target_acceleration,
+        fallback_config, fallback_acceleration,
+    }))
+}
+
+fn start_checked_idle_runtime_v177(
+    config: &LlamaProcessConfig,
+    acceleration: &str,
+    expected_slots: u16,
+) -> Result<(ManagedLlamaProcess, ProductionLlamaClient), String> {
+    let runtime = ManagedLlamaProcess::start(config)?;
+    if runtime.acceleration() != acceleration {
+        return Err("model_migration_acceleration_mismatch".into());
+    }
+    let base = runtime.base_url().to_string();
+    let llama = ProductionLlamaClient::new(base.clone())?;
+    llama.health_check()?;
+    let http = Client::builder().no_proxy().timeout(Duration::from_secs(5))
+        .build().map_err(|_| "model_migration_health_client_failed".to_string())?;
+    let props: Value = http.get(format!("{base}/props")).send()
+        .and_then(|r| r.error_for_status()).and_then(|r| r.json())
+        .map_err(|_| "model_migration_props_unavailable".to_string())?;
+    let actual = props["model_path"].as_str()
+        .ok_or_else(|| "model_migration_runtime_model_missing".to_string())?;
+    if std::fs::canonicalize(actual).ok() != Some(std::fs::canonicalize(&config.model_path)
+        .map_err(|_| "model_migration_expected_path_invalid".to_string())?) {
+        return Err("model_migration_runtime_model_mismatch".into());
+    }
+    if crate::core::real_capacity_certification::reported_runtime_slot_count_v1(&base)?
+        < expected_slots {
+        return Err("model_migration_runtime_slots_insufficient".into());
+    }
+    Ok((runtime, llama))
+}
+
 pub fn run_node_service(
     stop: Arc<AtomicBool>,
     mut wallet_password: Zeroizing<String>,
@@ -2741,6 +2860,12 @@ pub fn run_node_service(
     }
 
     let mut last_idle_heartbeat = Instant::now();
+    // Spread periodic network reads across devices, and do not restart a
+    // runtime merely to refresh timestamps in its signed registry.
+    let registry_jitter_v177 = hardware.as_bytes().iter()
+        .fold(0_u64, |n, b| n + u64::from(*b)) % 60;
+    let registry_interval_v177 = Duration::from_secs(300 + registry_jitter_v177);
+    let mut next_registry_refresh_v177 = Instant::now() + registry_interval_v177;
     let mut last_block_reason: Option<String> = None;
 
     // Claimed tasks discovered during correction redelivery are never
@@ -3102,6 +3227,95 @@ pub fn run_node_service(
         };
 
         if tasks_v1.is_empty() {
+            // A successful empty dispatch response and an empty local queue
+            // establish local quiescence. W10's device lock separately checks
+            // reserved work that has not yet reached this worker.
+            if Instant::now() >= next_registry_refresh_v177
+                && queued_claimed_tasks_v1.is_empty()
+                && !stop.load(Ordering::Acquire)
+                && !single_task_mode_v1
+                && _managed_llama.is_some()
+                && active_company_runtime_v1.is_none()
+                && !training_runtime_download_in_flight_v1.load(Ordering::Acquire)
+            {
+                next_registry_refresh_v177 = Instant::now() + registry_interval_v177;
+                if let Some(previous) = active_selected_model.clone() {
+                    match prepare_idle_model_migration_v177(&state, &previous) {
+                        Ok(Some(plan)) => {
+                            base_heartbeat.refresh_update_lifecycle_v1();
+                            if base_heartbeat.status == "online" && !stop.load(Ordering::Acquire) {
+                                // Refresh readiness immediately before asking for the
+                                // atomic withdrawal. A denied grant leaves the old model live.
+                                let permit = send_heartbeat(&http, &auth_client, &mut auth, &base_heartbeat)
+                                    .and_then(|_| crate::core::production_task_http::
+                                        begin_idle_model_migration_v1(&http, &auth_client, &mut auth,
+                                            &hardware, &public_wallet.wallet_address, &previous, &plan.target));
+                                match permit {
+                                    Ok(true) => {
+                                        println!("MODEL_MIGRATION_ASSIGNMENT_WITHDRAWN=true");
+                                        if stop.load(Ordering::Acquire) {
+                                            return Ok(());
+                                        }
+                                        // Drop only the managed local runtime, not provider
+                                        // credentials, desired state, or installed artifacts.
+                                        llama = None;
+                                        _managed_llama = None;
+                                        let target_limit = certified_concurrency_for_model_v1(&state, &plan.target);
+                                        let (runtime, client, actual_model) = match start_checked_idle_runtime_v177(
+                                            &plan.target_config, &plan.target_acceleration, target_limit) {
+                                            Ok((runtime, client)) => {
+                                                println!("MODEL_MIGRATION_ACTIVATED={}", plan.target);
+                                                (runtime, client, plan.target)
+                                            }
+                                            Err(error) => {
+                                                println!("MODEL_MIGRATION_TARGET_FAILED={error}");
+                                                next_registry_refresh_v177 = Instant::now() + Duration::from_secs(1800);
+                                                let fallback_limit = certified_concurrency_for_model_v1(&state, &previous);
+                                                let (runtime, client) = start_checked_idle_runtime_v177(
+                                                    &plan.fallback_config, &plan.fallback_acceleration, fallback_limit)?;
+                                                println!("MODEL_MIGRATION_ROLLBACK={previous}");
+                                                (runtime, client, previous)
+                                            }
+                                        };
+                                        runtime_acceleration = runtime.acceleration().to_string();
+                                        _managed_llama = Some(runtime);
+                                        llama = Some(client);
+                                        active_selected_model = Some(actual_model.clone());
+                                        base_heartbeat = ProductionHeartbeatV1::from_node_state(
+                                            &state, env!("CARGO_PKG_VERSION"), "laptop", &[]);
+                                        operational_limit_v1 = apply_active_model_heartbeat_v1(
+                                            &mut base_heartbeat, &state, &actual_model)?;
+                                        active_capability = base_heartbeat.model_capability.clone();
+                                        active_runtime = base_heartbeat.runtime.clone();
+                                        base_heartbeat.runtime_acceleration = runtime_acceleration.clone();
+                                        base_heartbeat.concurrency_limit = operational_limit_v1;
+                                        poll_capabilities = base_heartbeat.capabilities.clone();
+                                        if stop.load(Ordering::Acquire) {
+                                            return Ok(());
+                                        }
+                                        // Never resume polling until the healthy active
+                                        // model's readiness has been acknowledged.
+                                        send_heartbeat(&http, &auth_client, &mut auth, &base_heartbeat)?;
+                                        last_idle_heartbeat = Instant::now();
+                                        println!("MODEL_MIGRATION_READY_MODEL={actual_model}");
+                                        continue;
+                                    }
+                                    Ok(false) => {}
+                                    Err(error) => {
+                                        // A lost response may have withdrawn assignment.
+                                        // Reassert only the unchanged, healthy old runtime.
+                                        println!("MODEL_MIGRATION_PERMIT_ERROR={error}");
+                                        send_heartbeat(&http, &auth_client, &mut auth, &base_heartbeat)?;
+                                        last_idle_heartbeat = Instant::now();
+                                    }
+                                }
+                            }
+                        }
+                        Ok(None) => println!("MODEL_REGISTRY_REFRESHED_NO_SWITCH=true"),
+                        Err(error) => println!("MODEL_REGISTRY_REFRESH_DEFERRED={error}"),
+                    }
+                }
+            }
             if last_idle_heartbeat.elapsed()
                 >= Duration::from_secs(15)
             {
@@ -4371,5 +4585,51 @@ mod output_budget_tests_v176 {
                 task_max
             );
         }
+    }
+}
+
+
+#[cfg(test)]
+mod idle_model_migration_tests_v177 {
+    use super::*;
+    use crate::core::{model::ModelState, capacity::CapacityStatus,
+        signed_model_registry::SignedModelDefinitionV1};
+
+    fn definition() -> SignedModelDefinitionV1 {
+        serde_json::from_value(json!({
+            "selectedModel":"fixture:7b","artifactId":"fixture-artifact",
+            "capability":"Neural-Inference-7B","tier":3,"runtime":"llama.cpp",
+            "minRamGb":16,"defaultCtx":null,"defaultMaxTokens":384,
+            "allowedMaxTokens":4294967295_u64,"experimental":false,
+            "priority":130,"quantization":"Q4_K_M","patterns":["fixture.gguf"],
+            "artifacts":[{"artifactRole":"model","filename":"fixture.gguf",
+              "downloadUrl":"https://example.invalid/fixture.gguf","sha256":"a".repeat(64)}]
+        })).unwrap()
+    }
+
+    fn certified() -> ModelState {
+        ModelState { selected_model:"fixture:7b".into(), model_id:"fixture-artifact".into(),
+            capability:"Neural-Inference-7B".into(), tier:3, runtime:"llama.cpp".into(),
+            acceleration:"metal".into(), status:"ready".into(),
+            capacity_status:CapacityStatus::Certified, certified_concurrency:Some(1) }
+    }
+
+    #[test]
+    fn registry_priority_changes_preserve_existing_certificate_v177() {
+        let old = definition();
+        let mut new = old.clone();
+        new.priority = 110;
+        assert!(compatible_registry_refresh_v177(&[old.clone()], &[new.clone()], &[certified()]));
+        new.artifacts[0].sha256 = "b".repeat(64);
+        assert!(!compatible_registry_refresh_v177(&[old.clone()], &[new], &[certified()]));
+        assert!(!compatible_registry_refresh_v177(&[old], &[], &[certified()]));
+    }
+
+    #[test]
+    fn runtime_definition_changes_require_recertification_v177() {
+        let old = definition();
+        let mut new = old.clone();
+        new.allowed_max_tokens = 2048;
+        assert!(!compatible_registry_refresh_v177(&[old], &[new], &[certified()]));
     }
 }
