@@ -155,6 +155,19 @@ pub fn certificate_match_failures(
         "output_limit_policy_version_mismatch"
     );
 
+    // The Windows LFM3 production profile changed to a single slot with
+    // the model-native context. An older multi-slot or pre-profile
+    // certificate cannot advertise capacity under the new runtime.
+    if cfg!(target_os = "windows") && context.model_id == "LFM3-1.7B-Q4_K_M" {
+        let version = certificate.app_version.trim_start_matches('v').split('.')
+            .map(str::parse::<u32>).collect::<Result<Vec<_>, _>>();
+        let profile_certified = version.as_ref().map(|v|
+            v.len() == 3 && v.as_slice() >= &[1, 7, 7]).unwrap_or(false);
+        if !profile_certified || certificate.certified_concurrency != 1 {
+            failures.push("lfm3_native_context_profile_revalidation_required".into());
+        }
+    }
+
     if certificate.certified_concurrency == 0 {
         failures.push("certified_concurrency_zero".into());
     }
