@@ -12,7 +12,7 @@ CREATE OR REPLACE FUNCTION public.begin_idle_model_migration_v1(
     p_to_model text
 ) RETURNS jsonb
 LANGUAGE plpgsql
-SECURITY DEFINER
+SECURITY INVOKER
 SET search_path TO pg_catalog, public
 AS $function$
 DECLARE
@@ -33,7 +33,7 @@ BEGIN
     IF NOT FOUND OR lower(h.provider_email) IS DISTINCT FROM lower(p_provider_email)
        OR lower(h.worker) IS DISTINCT FROM lower(p_worker)
        OR h.app_version IS DISTINCT FROM p_app_version
-       OR h.platform NOT IN ('macos','windows','linux')
+       OR coalesce(lower(h.platform),'') NOT IN ('macos','windows','linux')
        OR h.metadata->>'unifiedProtocolVersion' IS DISTINCT FROM 'edgeswarm-unified-heartbeat-v1'
        OR h.status IS DISTINCT FROM 'online'
        OR h.model_status IS DISTINCT FROM 'ready'
