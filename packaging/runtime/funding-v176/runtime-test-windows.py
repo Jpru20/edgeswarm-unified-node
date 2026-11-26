@@ -7,7 +7,8 @@ parser=argparse.ArgumentParser()
 parser.add_argument('runtime', type=Path)
 parser.add_argument('model', type=Path)
 parser.add_argument('--gpu-layers', type=int, default=0)
-parser.add_argument('--context', type=int, choices=[512,1024], default=512)
+parser.add_argument('--context', type=int, choices=[512,1024,2048,4096], default=512)
+parser.add_argument('--diagnose-output', action='store_true', help='Also test an ordinary natural completion and report stream field counts')
 args=parser.parse_args()
 runtime=args.runtime.resolve()
 model=args.model.resolve()
@@ -52,12 +53,13 @@ def status(id,grant=None):
     return s
 
 class Stream:
-    def __init__(self,grant=None):
+    def __init__(self,grant=None,prompt=None,ignore_eos=True,label='funding'):
         self.id=uuid.uuid4().hex
         self.done=threading.Event();self.parts=[];self.finish=None;self.usage=None;self.error=None
+        self.label=label;self.delta_fields=set();self.reasoning_chars=0;self.delta_frames=0;self.saw_done=False
         body={'model':'local-model','messages':[{'role':'user','content':
-            'Write a continuous numbered list of integers, starting at 1. Do not stop early.'}],
-            'max_tokens':-1,'temperature':0,'seed':123,'ignore_eos':True,'stream':True,
+            prompt if prompt is not None else 'Write a continuous numbered list of integers, starting at 1. Do not stop early.'}],
+            'max_tokens':-1,'temperature':0,'seed':123,'ignore_eos':ignore_eos,'stream':True,
             'stream_options':{'include_usage':True},'cache_prompt':False}
         if grant is not None:body['swarmFundingV176']={'id':self.id,'authorizedOutputBillingTokens':grant}
         def worker():
@@ -67,12 +69,20 @@ class Stream:
                         line=line.decode('utf-8').strip()
                         if not line.startswith('data:'):continue
                         data=line[5:].strip()
-                        if data=='[DONE]':break
+                        if data=='[DONE]':
+                            self.saw_done=True
+                            break
                         r=json.loads(data)
                         if r.get('error'):raise RuntimeError(str(r['error']))
                         for c in r.get('choices',[]):
-                            v=c.get('delta',{}).get('content')
-                            if v:self.parts.append(v)
+                            delta=c.get('delta') or {}
+                            self.delta_fields.update(delta.keys())
+                            self.delta_frames+=1
+                            v=delta.get('content')
+                            if isinstance(v,str) and v:self.parts.append(v)
+                            for key in ('reasoning_content','reasoning'):
+                                reasoning=delta.get(key)
+                                if isinstance(reasoning,str):self.reasoning_chars+=len(reasoning)
                             if c.get('finish_reason'):self.finish=c['finish_reason']
                         if r.get('usage'):self.usage=r['usage']
             except BaseException as e:self.error=e
@@ -80,9 +90,12 @@ class Stream:
         self.thread=threading.Thread(target=worker,daemon=True);self.thread.start()
     def check(self):
         if self.error:raise RuntimeError('TEST_STREAM_ERROR') from self.error
+    def report(self):
+        print('STREAM_DIAGNOSTIC='+json.dumps({'label':self.label,'finish':self.finish,'usage':self.usage,'visible_chars':sum(map(len,self.parts)),'reasoning_chars':self.reasoning_chars,'delta_fields':sorted(self.delta_fields),'delta_frames':self.delta_frames,'saw_done':self.saw_done},ensure_ascii=True),flush=True)
     def wait(self,seconds=300):
         assert self.done.wait(seconds),'STREAM_DID_NOT_FINISH'
         self.check()
+        if args.diagnose_output or not self.parts:self.report()
         assert self.finish=='length',f'UNEXPECTED_FINISH={self.finish}'
         assert self.parts,'EMPTY_STREAM'
         assert self.usage and self.usage['completion_tokens']>0,'RUNTIME_USAGE_MISSING'
@@ -129,9 +142,19 @@ try:
             'authorizedOutputBillingTokens':grant})
     print('INVALID_FUNDING_GRANTS_REJECTED=PASS',flush=True)
 
+    # Diagnostic only: distinguish a normal answer from forced continuation.
+    baseline_ok=True
+    if args.diagnose_output:
+        normal=Stream(prompt='What is 2 plus 2? Answer in one short sentence.',ignore_eos=False,label='natural_completion_unfunded')
+        assert normal.done.wait(300),'NATURAL_STREAM_DID_NOT_FINISH'
+        normal.check()
+        normal.report()
+        baseline_ok=(normal.saw_done and normal.finish=='stop' and bool(''.join(normal.parts).strip()) and '4' in ''.join(normal.parts) and bool(normal.usage and normal.usage.get('completion_tokens',0)>0))
+        print('NATURAL_COMPLETION_BASELINE='+('PASS' if baseline_ok else 'FAIL'),flush=True)
+
     # Early grant update: initial allowance is large enough to enter active generation.
     # No inference output limit is used; ignore_eos is diagnostic only.
-    early=Stream(128)
+    early=Stream(128,label='funded_proactive_extension')
     before=wait_status(early,lambda s:s['generatedTokens']>=2)
     assert not before['fundingPaused'] and before['pauseCount']==0,before
     extended=status(early.id,8192)
@@ -144,7 +167,7 @@ try:
     print('STALE_LOCAL_GRANT_CANNOT_REVOKE=PASS',flush=True)
 
     # Exhaust actual authorization. The held token must not lead to more sampling.
-    blocked=Stream(8)
+    blocked=Stream(8,label='funded_exhaustion_resume')
     first=wait_status(blocked,lambda s:s['fundingPaused'])
     assert first['pendingToken'] and first['pauseCount']==1,first
     assert first['outputBillingChars']>first['authorizedOutputBillingTokens']*4,first
@@ -183,6 +206,7 @@ try:
     assert lines.count('SWARM_FUNDING_BOUNDARY_WAIT_V176')==1,'UNEXPECTED_ROUTINE_FUNDING_PAUSE'
     assert lines.count('SWARM_FUNDING_RESUMED_V176')==1,'UNEXPECTED_RESUME_COUNT'
     print('NO_ROUTINE_PAUSES_WHILE_AUTHORIZED=PASS',flush=True)
+    assert baseline_ok,'NATURAL_COMPLETION_BASELINE_FAILED'
 finally:
     if p.poll() is None:
         p.terminate()
