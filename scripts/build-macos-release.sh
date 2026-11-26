@@ -6,6 +6,7 @@ cd "$ROOT"
 
 CONFIG="${1:-$ROOT/.env.release.local}"
 TARGET="${2:-}"
+EXPECTED_SOURCE_REF="${3:-origin/main}"
 
 if [ ! -f "$CONFIG" ]; then
   echo "ERROR=release_config_missing" >&2
@@ -35,10 +36,10 @@ unset EDGESWARM_SUPABASE_URL
 unset EDGESWARM_SUPABASE_ANON_KEY
 
 HEAD="$(git rev-parse HEAD)"
-ORIGIN="$(git rev-parse origin/main)"
+ORIGIN="$(git rev-parse --verify "$EXPECTED_SOURCE_REF^{commit}")"
 
 if [ "$HEAD" != "$ORIGIN" ]; then
-  echo "ERROR=release_source_not_at_origin_main" >&2
+  echo "ERROR=release_source_not_at_expected_ref expected=$EXPECTED_SOURCE_REF actual=$HEAD" >&2
   exit 1
 fi
 
@@ -133,7 +134,7 @@ echo "CANONICAL_RUNTIME_PATH=$APP_EXE"
 
 # UNIFIED_BUNDLED_LLAMA_RUNTIME_V1
 LLAMA_RUNTIME_SOURCE="${EDGESWARM_MACOS_LLAMA_RUNTIME_DIR:-$HOME/edgeswarm-runtime-build/release/macos-arm64/current}"
-LLAMA_RUNTIME_EXPECTED_SHA="8a4c0a23355af2ba40c56c2d7b60a441c289fc8b33e2baeda1cc5ff2af126cce"
+LLAMA_RUNTIME_EXPECTED_SHA="5b60f606c7dd72e9d1dcbc35a8871268ac507fc5f59d856609604ad080450942"
 LLAMA_RUNTIME_DEST="$APP/Contents/MacOS/runtime/current"
 
 test -x "$LLAMA_RUNTIME_SOURCE/llama-server" || {
