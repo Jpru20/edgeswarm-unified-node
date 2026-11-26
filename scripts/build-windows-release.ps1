@@ -138,8 +138,7 @@ if ($ActualRuntimeSha -ne $ExpectedRuntimeSha.ToLower()) {
 }
 
 # WINDOWS_V176_RUNTIME_PAYLOAD_INTEGRITY
-# Each runtime is a launcher plus shared libraries. Verify all staged files
-# against the pinned release inventory, not only the launcher executable.
+# Pin the launcher and every shared library, not only the launcher.
 $PayloadRoots = [ordered]@{
     cpu = $RuntimeSource
     vulkan = $VulkanRuntimeSource
@@ -153,186 +152,11 @@ foreach ($Backend in $PayloadRoots.Keys) {
         'vulkan' { [string]$WindowsRuntime.vulkanRuntimeSha256 }
         'cuda' { [string]$WindowsRuntime.cudaRuntimeSha256 }
     }
-    if ($ExpectedLauncher -notmatch '^[a-fA-F0-9]{64}
-$TargetTriple = (& rustc --print host-tuple).Trim()
-
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($TargetTriple)) {
-    throw "windows_target_triple_detection_failed"
-}
-
-if ($TargetTriple -ne "x86_64-pc-windows-msvc") {
-    throw "windows_release_target_unsupported_$TargetTriple"
-}
-
-& cargo build `
-    --manifest-path (Join-Path $Repo "src-tauri\Cargo.toml") `
-    --release `
-    --no-default-features `
-    --features "release-helper-common,release-helper-windows" `
-    --bin edgeswarm-node-headless `
-    --bin edgeswarm-node-supervisor `
-    --bin edgeswarm-updater-runner
-
-if ($LASTEXITCODE -ne 0) {
-    throw "windows_helper_build_failed_$LASTEXITCODE"
-}
-
-$ReleaseDir = Join-Path $TargetDir "release"
-$SidecarDir = Join-Path $TargetDir "windows-sidecars"
-New-Item -ItemType Directory -Force -Path $SidecarDir | Out-Null
-
-$ExternalBin = @()
-
-foreach ($Name in @(
-    "edgeswarm-node-headless",
-    "edgeswarm-node-supervisor",
-    "edgeswarm-updater-runner"
-)) {
-    $Source = Join-Path $ReleaseDir "$Name.exe"
-
-    if (!(Test-Path $Source)) {
-        throw "windows_helper_missing_$Name"
-    }
-
-    $Base = Join-Path $SidecarDir $Name
-    $Staged = "$Base-$TargetTriple.exe"
-
-    Copy-Item $Source $Staged -Force
-
-    $ExternalBin += ($Base -replace '\\','/')
-
-    Write-Host "WINDOWS_HELPER_STAGED=$Name"
-}
-
-$TaskScriptSource =
-    Join-Path $Repo "src-tauri\windows\supervisor-task.ps1"
-
-if (!(Test-Path $TaskScriptSource)) {
-    throw "windows_supervisor_task_script_missing"
-}
-
-$RuntimeConfig =
-    Join-Path $TargetDir "tauri.runtime.config.json"
-
-$SourceJson =
-    ($RuntimeSource -replace '\\','/') + '/*'
-
-$CudaSourceJson =
-    ($CudaRuntimeSource -replace '\\','/') + '/*'
-
-$VulkanSourceJson =
-    ($VulkanRuntimeSource -replace '\\','/') + '/*'
-
-$TaskScriptJson =
-    ($TaskScriptSource -replace '\\','/')
-
-$Resources = @{}
-$Resources[$SourceJson] = "runtime/current/"
-
-$Resources[$CudaSourceJson] =
-    "resources/runtime/cuda/current/"
-
-$Resources[$VulkanSourceJson] =
-    "resources/runtime/vulkan/current/"
-
-if ($EnableLoraTraining) {
-    $TrainingSourceJson =
-        ($TrainingRuntimeSource -replace '\','/') +
-        '/*'
-
-    $Resources[$TrainingSourceJson] =
-        "resources/training/current/"
-}
-
-$Resources[$TaskScriptJson] =
-    "resources/windows/supervisor-task.ps1"
-
-@{
-    bundle = @{
-        externalBin = $ExternalBin
-        resources = $Resources
-    }
-} |
-    ConvertTo-Json -Depth 8 |
-    Set-Content $RuntimeConfig
-
-Write-Host "WINDOWS_EXTERNAL_BIN_COUNT=$($ExternalBin.Count)"
-Write-Host "WINDOWS_SUPERVISOR_TASK_STAGED=PASS"
-
-Write-Host "WINDOWS_LLAMA_RUNTIME_SHA256=$ActualRuntimeSha"
-Write-Host "WINDOWS_LLAMA_RUNTIME_STAGED=PASS"
-
-$CudaBytes =
-    (
-        Get-ChildItem $CudaRuntimeSource -File -Recurse |
-        Measure-Object Length -Sum
-    ).Sum
-
-$VulkanBytes =
-    (
-        Get-ChildItem $VulkanRuntimeSource -File -Recurse |
-        Measure-Object Length -Sum
-    ).Sum
-
-Write-Host "WINDOWS_CUDA_RUNTIME_SOURCE=$CudaRuntimeSource"
-Write-Host "WINDOWS_CUDA_RUNTIME_BYTES=$CudaBytes"
-Write-Host "WINDOWS_CUDA_RUNTIME_STAGED=PASS"
-
-Write-Host "WINDOWS_VULKAN_RUNTIME_SOURCE=$VulkanRuntimeSource"
-Write-Host "WINDOWS_VULKAN_RUNTIME_BYTES=$VulkanBytes"
-Write-Host "WINDOWS_VULKAN_RUNTIME_STAGED=PASS"
-
-# Generate Windows icon.ico and PNG sizes from the same branded dashboard mark
-# after the clean-source gate, before the existing Tauri packaging step.
-npm.cmd run tauri icon -- src/assets/swarm-logo.png
-if ($LASTEXITCODE -ne 0) { throw "swarm_brand_icon_generation_failed_$LASTEXITCODE" }
-npm.cmd run tauri build -- --config $RuntimeConfig
-if ($LASTEXITCODE -ne 0) { throw "tauri_build_failed_$LASTEXITCODE" }
-$Exe = Join-Path $TargetDir 'release\edgeswarm-unified-node.exe'
-$Msi = Get-ChildItem (Join-Path $TargetDir 'release\bundle\msi') -Filter '*.msi' | Select-Object -First 1
-$Nsis = Get-ChildItem (Join-Path $TargetDir 'release\bundle\nsis') -Filter '*.exe' | Select-Object -First 1
-if (!(Test-Path $Exe) -or !$Msi -or !$Nsis) { throw 'release_artifact_missing' }
-
-# WINDOWS_PUBLIC_INSTALLER_POLICY_V16
-#
-# v1.6 publishes NSIS only. MSI remains an internal validation
-# artifact until MSI uninstall cleanup for the supervisor task
-# has been independently certified.
-$PublicReleaseManifest =
-    Join-Path $TargetDir "windows-public-release.json"
-
-@{
-    platform = "windows-x64"
-    publicInstallerKind = "nsis"
-    publicInstallerPath = $Nsis.FullName
-    msiPublicRelease = $false
-    msiValidationPath = $Msi.FullName
-    policy = "v1.6_nsis_public_msi_internal"
-} |
-    ConvertTo-Json -Depth 6 |
-    Set-Content $PublicReleaseManifest
-
-Write-Host "PUBLIC_WINDOWS_INSTALLER_KIND=NSIS"
-Write-Host "PUBLIC_WINDOWS_INSTALLER=$($Nsis.FullName)"
-Write-Host "MSI_PUBLIC_RELEASE=false"
-Write-Host "WINDOWS_RELEASE_POLICY_MANIFEST=$PublicReleaseManifest"
-$BinaryText = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($Exe))
-if (!$BinaryText.Contains($Url)) { throw 'compiled_supabase_url_not_found' }
-if (!$BinaryText.Contains($Key)) { throw 'compiled_supabase_anon_key_not_found' }
-Write-Host 'COMPILED_CONFIG_VERIFIED=PASS'
-& (Join-Path $PSScriptRoot 'verify-windows-msi-payload.ps1') -Msi $Msi.FullName -TargetDir $TargetDir
-foreach ($File in @($Exe,$Msi.FullName,$Nsis.FullName)) { $Item = Get-Item $File; $Hash = (Get-FileHash $File -Algorithm SHA256).Hash; $Sig = (Get-AuthenticodeSignature $File).Status; Write-Host "ARTIFACT=$($Item.FullName)"; Write-Host "BYTES=$($Item.Length)"; Write-Host "SHA256=$Hash"; Write-Host "SIGNATURE=$Sig" }
-Write-Host 'RELEASE_BUILD_COMPLETE=PASS'
-) {
+    if ($ExpectedLauncher -notmatch '^[a-fA-F0-9]{64}$') {
         throw "windows_runtime_launcher_not_pinned_$Backend"
     }
     $LauncherHash = (Get-FileHash (Join-Path $Directory 'llama-server.exe') -Algorithm SHA256).Hash
     if ($LauncherHash -ne $ExpectedLauncher) { throw "windows_runtime_launcher_hash_mismatch_$Backend" }
-    foreach ($Library in @('llama-server-impl.dll','llama-common.dll','llama.dll','ggml.dll','ggml-base.dll','mtmd.dll','ggml-cpu-x64.dll')) {
-        if (!(Test-Path -LiteralPath (Join-Path $Directory $Library) -PathType Leaf)) {
-            throw "windows_runtime_library_missing_${Backend}_$Library"
-        }
-    }
     $Children = @(Get-ChildItem -LiteralPath $Directory -Force)
     if (@($Children | Where-Object { $_.PSIsContainer -or $_.Extension -notin @('.exe','.dll') -or ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) }).Count -ne 0) {
         throw "windows_runtime_unexpected_payload_$Backend"
