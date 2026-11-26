@@ -146,6 +146,15 @@ pub(crate) struct FundingSessionV176 {
     deadline: Instant,
 }
 
+// Windows v1.7.7 uses the pinned funded b12102 runtime. LFM3's native
+// funding lifecycle was certified on CPU and Vulkan; other platform builds
+// retain their previous LFM3 exclusion until their runtimes are certified.
+fn funding_model_supported_v177(model: Option<&str>) -> bool {
+    model.map(|m| !m.trim().is_empty() &&
+        (m != "lfm3:1.7b" || cfg!(target_os = "windows")))
+        .unwrap_or(false)
+}
+
 fn retrieval_delivery_compatible_v176(
     stage: Option<&str>, model: Option<&str>, delivery: &Value
 ) -> bool {
@@ -153,8 +162,7 @@ fn retrieval_delivery_compatible_v176(
     let attached = stage == Some("evidence_attached");
     let enabled = delivery["retrievalFundingControl"].as_bool() == Some(true);
     if enabled {
-        model.map(|m| !m.trim().is_empty() && m!="lfm3:1.7b")
-            .unwrap_or(false) && (required || attached)
+        funding_model_supported_v177(model) && (required || attached)
     } else {
         !required
     }
@@ -167,7 +175,7 @@ impl FundingSessionV176 {
         if !node_enabled(task.selected_model.as_deref()) ||
             d["protocol"].as_str()!=Some(PROTOCOL) || d["status"].as_str()!=Some("funded") ||
             task.max_output_tokens.is_some() || task.execution_contract.as_ref().map(|c|c.output_token_budget.is_some() || c.progress_reporting!=Some(true)).unwrap_or(true) ||
-            task.selected_model.as_deref().map(|s|s=="lfm3:1.7b").unwrap_or(true) || task.company_model.is_some() ||
+            !funding_model_supported_v177(task.selected_model.as_deref()) || task.company_model.is_some() ||
             task.vision_input.is_some() || !retrieval_delivery_compatible_v176(
                 task.tool_contract.as_ref().and_then(|c|c.stage.as_deref()),
                 task.selected_model.as_deref(), d) {
@@ -300,13 +308,7 @@ impl Drop for FundingSessionV176 {
 }
 
 fn funding_opt_in_v176(model: Option<&str>, setting: Option<&str>) -> bool {
-    match setting {
-        Some("1") => true,
-        None => model.map(|m|
-            !m.trim().is_empty() && m != "lfm3:1.7b"
-        ).unwrap_or(false),
-        _ => false,
-    }
+    funding_model_supported_v177(model) && matches!(setting, None | Some("1"))
 }
 
 fn node_enabled(model: Option<&str>) -> bool {
@@ -322,7 +324,7 @@ pub(crate) fn runtime_context_metadata_v176(
     h: &crate::core::production_heartbeat::ProductionHeartbeatV1
 ) -> Option<Value> {
     if !cfg!(any(target_os="macos",target_os="windows",target_os="linux"))
-        || h.app_version!="1.7.6"
+        || !matches!(h.app_version.as_str(),"1.7.6" | "1.7.7")
         || h.status!="online" || h.model_status!="ready"
         || h.runtime.as_deref()!=Some("llama.cpp")
         || h.metadata.company_model_v1.ready
@@ -372,6 +374,13 @@ pub(crate) fn runtime_context_metadata_v176(
         return None;
     }
     let context=*contexts.iter().min()?;
+    if cfg!(target_os="windows") && model=="lfm3:1.7b" {
+        // Validate the model-native allocation, not an imposed context ceiling.
+        let models:Value=http.get(format!("{base}/v1/models")).send().ok()?
+            .error_for_status().ok()?.json().ok()?;
+        let trained=models.pointer("/data/0/meta/n_ctx_train")?.as_u64()?;
+        if slots.len()!=1 || context!=trained { return None; }
+    }
 
     Some(json!({
         "version":"managed-runtime-context-v176",
@@ -387,8 +396,10 @@ pub(crate) fn runtime_context_metadata_v176(
 
 pub(crate) fn heartbeat_metadata_v176(heartbeat: &crate::core::production_heartbeat::ProductionHeartbeatV1) -> Option<Value> {
     // Explicit local opt-in + actual runtime probe. Disabled by default, including release builds.
-    if !node_enabled(heartbeat.model_id.as_deref()) || heartbeat.app_version!="1.7.6" || heartbeat.status!="online" || heartbeat.model_status!="ready" ||
-        heartbeat.model_id.as_deref().map(|s|s=="lfm3:1.7b").unwrap_or(true) ||
+    if !node_enabled(heartbeat.model_id.as_deref()) || !matches!(heartbeat.app_version.as_str(),"1.7.6" | "1.7.7") || heartbeat.status!="online" || heartbeat.model_status!="ready" ||
+        !funding_model_supported_v177(heartbeat.model_id.as_deref()) ||
+        (heartbeat.model_id.as_deref()==Some("lfm3:1.7b") &&
+            heartbeat.metadata.runtime_context_v176.is_none()) ||
         heartbeat.metadata.company_model_v1.ready {return None;}
     let base=format!("http://{}:{}",crate::runtime::llama_process::LLAMA_DEFAULT_HOST,crate::runtime::llama_process::LLAMA_DEFAULT_PORT);
     let http=local_client().ok()?;probe(&http,&base).ok()?;
@@ -399,6 +410,15 @@ pub(crate) fn heartbeat_metadata_v176(heartbeat: &crate::core::production_heartb
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn v177_lfm3_funding_remains_platform_and_runtime_gated() {
+        assert_eq!(funding_opt_in_v176(Some("lfm3:1.7b"),None), cfg!(target_os="windows"));
+        assert!(!funding_opt_in_v176(Some("lfm3:1.7b"),Some("0")));
+        assert!(!funding_opt_in_v176(None,Some("1")));
+        assert!(funding_opt_in_v176(Some("qwen2.5:7b"),None));
+        let delivery=json!({"retrievalFundingControl":true});
+        assert_eq!(retrieval_delivery_compatible_v176(Some("required"),Some("lfm3:1.7b"),&delivery), cfg!(target_os="windows"));
+    }
     fn reply(f:&Frame,e:&str,status:&str,grant:Option<u64>,reload:bool)->Value {
         json!({"ok":true,"sequence":f.sequence,"executionId":e,"event":f.event(),"dynamicFundingV176":{
             "protocol":PROTOCOL,"status":status,"sequence":f.sequence,"executionId":e,"authorizedOutputBillingTokens":grant,"reloadRequired":reload}})
