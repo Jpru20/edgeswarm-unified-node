@@ -2465,27 +2465,44 @@ fn retire_idle_model_v177(
     stop: &AtomicBool,
 ) -> Result<bool, String> {
     use crate::core::windows_model_retirement_v177 as retirement;
-    let active_path = if registry.payload.windows_model_retirements_v177.is_empty() {
-        // A fresh cancellation clears any old grace state without probing.
-        std::path::PathBuf::new()
-    } else {
-        llama.health_check()?;
-        let client = Client::builder().no_proxy().timeout(Duration::from_secs(5))
-            .build().map_err(|_| "retirement_health_client_failed".to_string())?;
-        let props: Value = client.get(format!("{}/props", runtime.base_url())).send()
-            .and_then(|r| r.error_for_status()).and_then(|r| r.json())
-            .map_err(|_| "retirement_runtime_props_unavailable".to_string())?;
-        std::path::PathBuf::from(props["model_path"].as_str()
-            .ok_or("retirement_active_model_path_missing")?)
+    let preflight = (|| -> Result<_, String> {
+        let active_path = if registry.payload.windows_model_retirements_v177.is_empty() {
+            // A fresh cancellation clears any old grace state without probing.
+            std::path::PathBuf::new()
+        } else {
+            llama.health_check()?;
+            let client = Client::builder().no_proxy().timeout(Duration::from_secs(5))
+                .build().map_err(|_| "retirement_health_client_failed".to_string())?;
+            let props: Value = client.get(format!("{}/props", runtime.base_url())).send()
+                .and_then(|r| r.error_for_status()).and_then(|r| r.json())
+                .map_err(|_| "retirement_runtime_props_unavailable".to_string())?;
+            std::path::PathBuf::from(props["model_path"].as_str()
+                .ok_or("retirement_active_model_path_missing")?)
+        };
+        retirement::observe(registry, state, active, &active_path)
+    })();
+    let candidate = match preflight {
+        Ok(Some(candidate)) => candidate,
+        Ok(None) => return Ok(false),
+        Err(error) => {
+            println!("MODEL_RETIREMENT_PREFLIGHT_DEFERRED={error}");
+            // No assignment withdrawal occurred. Invalidate grace and keep
+            // normal customer inference independent of retirement bookkeeping.
+            if let Err(reset_error) = retirement::note_activation("") {
+                println!("MODEL_RETIREMENT_GRACE_RESET_FAILED={reset_error}");
+            }
+            return Ok(false);
+        }
     };
-    let Some(candidate) = retirement::observe(registry, state, active, &active_path)?
-        else { return Ok(false); };
     heartbeat.refresh_update_lifecycle_v1();
     if heartbeat.status != "online" || stop.load(Ordering::Acquire)
         || heartbeat.model_id.as_deref() != Some(active) {
         return Ok(false);
     }
-    send_heartbeat(http, auth_client, auth, heartbeat)?;
+    if let Err(error) = send_heartbeat(http, auth_client, auth, heartbeat) {
+        println!("MODEL_RETIREMENT_HEARTBEAT_DEFERRED={error}");
+        return Ok(false);
+    }
     let grant = crate::core::production_task_http::begin_idle_model_migration_v1(
         http, auth_client, auth, hardware, worker, active, &candidate.retired_model);
     match grant {
@@ -2500,7 +2517,7 @@ fn retire_idle_model_v177(
     }
     if stop.load(Ordering::Acquire) { return Ok(false); }
     let retired = candidate.retired_model.clone();
-    let result = llama.health_check().and_then(|_| candidate.delete_after_withdrawal());
+    let result = llama.health_check().and_then(|_| candidate.delete_after_withdrawal(stop));
     match result {
         Ok(bytes) => {
             println!("MODEL_RETIRED={retired} BYTES_FREED={bytes}");
