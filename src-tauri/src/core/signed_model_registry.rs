@@ -33,7 +33,7 @@ pub const MODEL_REGISTRY_PAYLOAD_VERSION_V1:
     &str =
     "swarm-model-registry-v1";
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SignedModelArtifactV1 {
     pub artifact_role: String,
@@ -42,7 +42,7 @@ pub struct SignedModelArtifactV1 {
     pub sha256: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SignedModelDefinitionV1 {
     pub selected_model: String,
