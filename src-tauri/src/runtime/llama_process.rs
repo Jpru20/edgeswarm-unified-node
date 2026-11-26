@@ -152,6 +152,17 @@ impl ManagedLlamaProcess {
         )?;
 
         let mut command = Command::new(&config.executable);
+        command.args(gemma4_thinking_args_v176(&config.model_path));
+
+        // Disable cross-request prompt reuse on the certified macOS runtime.
+        #[cfg(target_os = "macos")]
+        command.args([
+            "--cache-ram", "0",
+            "--no-cache-idle-slots",
+            "--no-cache-prompt",
+            "--slot-prompt-similarity", "0",
+        ]);
+
 
         // SWARM_VISION_PROJECTOR_RUNTIME_V171
 
@@ -615,5 +626,35 @@ mod tests {
             .unwrap_err(),
             "llama_server_managed_port_in_use"
         );
+    }
+}
+
+fn gemma4_thinking_args_v176(path: &std::path::Path) -> &'static [&'static str] {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64"))
+        && path.file_name().and_then(|v| v.to_str()) == Some("gemma-4-E4B_q4_0-it.gguf")
+    {
+        &["--jinja", "--reasoning", "on", "--reasoning-budget", "-1",
+          "--reasoning-format", "deepseek"]
+    } else {
+        &[]
+    }
+}
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+mod gemma4_thinking_v176 {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn gemma_thinking_is_unrestricted() {
+        assert_eq!(gemma4_thinking_args_v176(Path::new("gemma-4-E4B_q4_0-it.gguf")),
+            &["--jinja", "--reasoning", "on", "--reasoning-budget", "-1",
+              "--reasoning-format", "deepseek"]);
+    }
+
+    #[test]
+    fn existing_models_are_unchanged() {
+        assert!(gemma4_thinking_args_v176(Path::new("Qwen2.5-7B-Instruct-Q4_K_M.gguf")).is_empty());
+        assert!(gemma4_thinking_args_v176(Path::new("LFM3-1.7B-Q4_K_M.gguf")).is_empty());
     }
 }

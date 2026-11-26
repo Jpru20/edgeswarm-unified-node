@@ -519,7 +519,7 @@ fn compute(task: &TaskEnvelope) -> String {
     }
 }
 
-const SCRAPE_MAX_BODY_BYTES_V1: u64 = 2 * 1024 * 1024;
+pub(crate) const SCRAPE_MAX_BODY_BYTES_V1: u64 = 2 * 1024 * 1024;
 const SCRAPE_MAX_REDIRECTS_V1: usize = 5;
 
 fn scrape_ipv4_public_v1(address: Ipv4Addr) -> bool {
@@ -724,6 +724,26 @@ fn scrape_content_type_allowed_v1(value: &str) -> bool {
 pub(crate) fn fetch_public_scrape_text_v1(
     raw_url: &str,
 ) -> Result<(String, String), String> {
+
+    fetch_public_scrape_with_policy_v176(
+        raw_url, SCRAPE_MAX_BODY_BYTES_V1, false
+    ).map(|(url, text, _)| (url, text))
+}
+
+pub(crate) fn fetch_native_web_text_v176(
+    raw_url: &str, max_bytes: u64,
+) -> Result<(String, String, Option<String>), String> {
+    fetch_public_scrape_with_policy_v176(
+        raw_url, max_bytes.min(SCRAPE_MAX_BODY_BYTES_V1), true
+    )
+}
+
+fn fetch_public_scrape_with_policy_v176(
+    raw_url: &str, max_body_bytes: u64, native_web: bool,
+) -> Result<(String, String, Option<String>), String> {
+    if max_body_bytes == 0 {
+        return Err("scrape_empty_byte_budget".into());
+    }
     let mut current = Url::parse(raw_url)
         .map_err(|_| "scrape_url_invalid".to_string())?;
 
@@ -749,9 +769,13 @@ pub(crate) fn fetch_public_scrape_text_v1(
             .build()
             .map_err(|_| "scrape_http_client_failed".to_string())?;
 
-        let response = client
-            .get(validated_url.clone())
-            .send()
+        let request = client.get(validated_url.clone());
+        let request = if native_web {
+            request.header(reqwest::header::ACCEPT_ENCODING, "identity")
+        } else {
+            request
+        };
+        let response = request.send()
             .map_err(|error| format!("scrape_network_failed:{error}"))?;
 
         if response.status().is_redirection() {
@@ -779,11 +803,12 @@ pub(crate) fn fetch_public_scrape_text_v1(
             ));
         }
 
-        if let Some(content_type) = response
-            .headers()
+        let content_type = response.headers()
             .get(CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
-        {
+            .map(str::to_owned);
+
+        if let Some(content_type) = content_type.as_deref() {
             if !scrape_content_type_allowed_v1(content_type) {
                 return Err("scrape_response_content_type_not_allowed".into());
             }
@@ -795,32 +820,126 @@ pub(crate) fn fetch_public_scrape_text_v1(
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<u64>().ok())
         {
-            if content_length > SCRAPE_MAX_BODY_BYTES_V1 {
+            if content_length > max_body_bytes {
                 return Err("scrape_response_too_large".into());
             }
         }
 
+
+        let encoding = if native_web {
+            if response.headers().get_all("content-encoding").iter().count() > 1 {
+                return Err("scrape_ambiguous_encoding".into());
+            }
+            response.headers().get("content-encoding")
+                .map(|v| v.to_str().map_err(|_| "scrape_invalid_encoding".to_string()))
+                .transpose()?.unwrap_or("identity")
+                .trim().to_ascii_lowercase()
+        } else {
+            String::new()
+        };
+
         let mut bytes = Vec::new();
         let mut limited_reader =
-            response.take(SCRAPE_MAX_BODY_BYTES_V1 + 1);
+            response.take(max_body_bytes + 1);
 
         limited_reader
             .read_to_end(&mut bytes)
             .map_err(|_| "scrape_response_read_failed".to_string())?;
 
-        if bytes.len() as u64 > SCRAPE_MAX_BODY_BYTES_V1 {
+        if bytes.len() as u64 > max_body_bytes {
             return Err("scrape_response_too_large".into());
         }
 
-        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let text = if native_web {
+            decode_native_web_body_v176(bytes, &encoding, max_body_bytes)?
+        } else {
+            String::from_utf8_lossy(&bytes).into_owned()
+        };
 
         return Ok((
             validated_url.to_string(),
             text,
+            content_type,
         ));
     }
 
     Err("scrape_redirect_limit_exceeded".into())
+}
+
+fn decode_native_web_body_v176(
+    bytes: Vec<u8>, encoding: &str, limit: u64,
+) -> Result<String, String> {
+    if bytes.len() as u64 > limit {
+        return Err("scrape_response_too_large".into());
+    }
+
+    let bytes = match encoding {
+        "" | "identity" => bytes,
+        "gzip" => {
+            let mut decoded = Vec::new();
+            flate2::read::MultiGzDecoder::new(bytes.as_slice())
+                .take(limit + 1)
+                .read_to_end(&mut decoded)
+                .map_err(|_| "scrape_gzip_decode_failed".to_string())?;
+            if decoded.len() as u64 > limit {
+                return Err("scrape_decoded_body_too_large".into());
+            }
+            decoded
+        }
+        _ => return Err("scrape_unsupported_encoding".into()),
+    };
+
+    let text = String::from_utf8(bytes)
+        .map_err(|_| "scrape_invalid_utf8".to_string())?;
+
+    if text.chars().any(|c| c.is_control()
+        && !matches!(c, '\n' | '\r' | '\t' | '\u{000c}')) {
+        return Err("scrape_binary_content".into());
+    }
+
+    let bad = text.chars().filter(|c| *c == '\u{fffd}').count();
+    if bad >= 8 && bad.saturating_mul(100) > text.chars().count() {
+        return Err("scrape_corrupted_content".into());
+    }
+
+    Ok(text)
+}
+
+#[cfg(test)]
+mod native_web_integrity_v176_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn validates_utf8_and_rejects_corruption() {
+        let text = "Stockholm: café, musik, konst och teater.";
+        assert_eq!(
+            decode_native_web_body_v176(text.as_bytes().to_vec(), "identity", 512),
+            Ok(text.into())
+        );
+        assert!(decode_native_web_body_v176(vec![0xff, 0xfe], "identity", 512).is_err());
+        assert!(decode_native_web_body_v176(vec![0, 1, 2], "identity", 512).is_err());
+        assert!(decode_native_web_body_v176(
+            "\u{fffd}".repeat(100).into_bytes(), "identity", 512
+        ).is_err());
+    }
+
+    #[test]
+    fn gzip_decoding_obeys_body_limit() {
+        let original = vec![b'a'; 1024];
+        let mut encoder = flate2::write::GzEncoder::new(
+            Vec::new(), flate2::Compression::default()
+        );
+        encoder.write_all(&original).unwrap();
+        let compressed = encoder.finish().unwrap();
+        assert!(compressed.len() < 128);
+        assert_eq!(
+            decode_native_web_body_v176(compressed.clone(), "gzip", 2048)
+                .unwrap().len(), 1024
+        );
+        assert!(decode_native_web_body_v176(compressed, "gzip", 128).is_err());
+        assert!(decode_native_web_body_v176(vec![1,2,3], "br", 128).is_err());
+    }
 }
 
 fn scrape(prompt: &str) -> String {
@@ -922,6 +1041,7 @@ mod tests {
 
     fn task(required: &str, prompt: &str) -> TaskEnvelope {
         TaskEnvelope {
+            dynamic_funding_v176: None,
             attempt_id: None,
             company_model: None,
             task_id: json!(1),

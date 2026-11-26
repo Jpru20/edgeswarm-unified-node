@@ -133,6 +133,11 @@ pub fn send_heartbeat(
 
         live_heartbeat
             .refresh_update_lifecycle_v1();
+        live_heartbeat.metadata.runtime_context_v176 =
+            crate::core::dynamic_funding_v176::runtime_context_metadata_v176(&live_heartbeat);
+
+        live_heartbeat.metadata.dynamic_funding_v176 =
+            crate::core::dynamic_funding_v176::heartbeat_metadata_v176(&live_heartbeat);
 
         let response = http
             .post(format!("{}/admin/node-heartbeat", api_base()))

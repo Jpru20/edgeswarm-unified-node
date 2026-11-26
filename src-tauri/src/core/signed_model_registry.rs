@@ -56,7 +56,8 @@ pub struct SignedModelDefinitionV1 {
     pub tier: u8,
     pub runtime: String,
     pub min_ram_gb: u16,
-    pub default_ctx: u32,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub default_ctx: Option<u32>,
     pub default_max_tokens: u32,
     pub allowed_max_tokens: u32,
     pub experimental: bool,
@@ -393,7 +394,7 @@ fn validate_registry_payload_v171(
             );
         }
 
-        if model.default_ctx == 0
+        if model.default_ctx == Some(0)
             || model.default_max_tokens == 0
             || model.allowed_max_tokens
                 < model.default_max_tokens
@@ -839,7 +840,7 @@ mod tests {
                     runtime:
                         "llama.cpp".into(),
                     min_ram_gb: 64,
-                    default_ctx: 4096,
+                    default_ctx: Some(4096),
                     default_max_tokens: 512,
                     allowed_max_tokens: 2048,
                     experimental: false,
@@ -867,6 +868,20 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn dynamic_context_is_valid_v176() {
+        let mut payload = valid_payload_v171();
+        payload.models[0].default_ctx = None;
+        validate_registry_payload_v171(&payload).unwrap();
+    }
+
+    #[test]
+    fn explicit_zero_context_is_invalid_v176() {
+        let mut payload = valid_payload_v171();
+        payload.models[0].default_ctx = Some(0);
+        assert!(validate_registry_payload_v171(&payload).is_err());
     }
 
     #[test]

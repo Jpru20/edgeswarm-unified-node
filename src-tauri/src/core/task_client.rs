@@ -223,6 +223,8 @@ pub struct TaskEnvelope {
 
     #[serde(default)]
     pub max_output_tokens: Option<u64>,
+    #[serde(default)]
+    pub dynamic_funding_v176: Option<Value>,
     // ADAPTIVE_EXECUTION_CONTRACT_V1
     #[serde(default)]
     pub execution_contract: Option<AdaptiveExecutionContract>,
@@ -575,6 +577,7 @@ mod tests {
     #[test]
     fn builds_signed_result_envelope() {
         let task = TaskEnvelope {
+            dynamic_funding_v176: None,
             attempt_id: None,
             company_model: None,
             task_id: Value::from(2001),

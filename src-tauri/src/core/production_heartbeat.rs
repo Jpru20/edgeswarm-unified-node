@@ -285,6 +285,11 @@ pub struct ProductionHeartbeatMetadataV1 {
     pub runtime_sha256: Option<String>,
     pub public_release_safe: bool,
     pub data_scraper_ssrf_guard_v1: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dynamic_funding_v176: Option<serde_json::Value>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_context_v176: Option<serde_json::Value>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub update_lifecycle: Option<ProductionUpdateLifecycleV1>,
@@ -915,6 +920,8 @@ impl ProductionHeartbeatV1 {
 
                 data_scraper_ssrf_guard_v1:
                     true,
+                dynamic_funding_v176: None,
+                runtime_context_v176: None,
 
                 update_lifecycle,
 

@@ -324,6 +324,7 @@ mod tests {
 
     fn task(required: &str, selected: Option<&str>) -> TaskEnvelope {
         TaskEnvelope {
+            dynamic_funding_v176: None,
             attempt_id: None,
             company_model: None,
             task_id: json!("routing-test"),

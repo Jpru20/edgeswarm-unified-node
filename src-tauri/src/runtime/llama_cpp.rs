@@ -273,6 +273,29 @@ impl LlamaCppHttpExecutor {
         })
     }
 
+    fn certification_context_v176(&self, spec: &EffectiveModelSpecV171)
+        -> Result<u32, String> {
+        if spec.default_ctx > 0 {
+            return Ok(spec.default_ctx);
+        }
+        if let Some(legacy) = crate::core::model_registry::model_spec(&spec.selected_model) {
+            return Ok(legacy.default_ctx);
+        }
+        let slots: Vec<Value> = self.client
+            .get(format!("{}/slots", self.base_url))
+            .timeout(Duration::from_secs(5))
+            .send().map_err(|e| e.to_string())?
+            .error_for_status().map_err(|e| e.to_string())?
+            .json().map_err(|e| e.to_string())?;
+        slots.iter().map(|s| {
+            s.get("n_ctx").and_then(Value::as_u64)
+                .and_then(|n| u32::try_from(n).ok())
+                .filter(|n| *n > 0)
+        }).collect::<Option<Vec<u32>>>()
+            .and_then(|v| v.into_iter().min())
+            .ok_or_else(|| "certification_runtime_context_unavailable".into())
+    }
+
     pub fn execute_one(
         &self,
         workload: &CertificationWorkload,
@@ -290,7 +313,8 @@ impl LlamaCppHttpExecutor {
         // Certification is bounded independently of customer generation.
         // This is not a model output ceiling.
         let certification_token_ceiling =
-            (spec.default_ctx / 2).max(generation.max_tokens).max(1);
+            (self.certification_context_v176(&spec)? / 2)
+                .max(generation.max_tokens).max(1);
 
         let mut max_tokens = generation.max_tokens.max(1);
 
