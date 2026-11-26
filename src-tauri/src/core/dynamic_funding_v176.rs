@@ -322,7 +322,7 @@ pub(crate) fn runtime_context_metadata_v176(
     h: &crate::core::production_heartbeat::ProductionHeartbeatV1
 ) -> Option<Value> {
     if !cfg!(any(target_os="macos",target_os="windows",target_os="linux"))
-        || h.app_version!="1.7.6"
+        || !matches!(h.app_version.as_str(),"1.7.6" | "1.7.7")
         || h.status!="online" || h.model_status!="ready"
         || h.runtime.as_deref()!=Some("llama.cpp")
         || h.metadata.company_model_v1.ready
@@ -387,7 +387,7 @@ pub(crate) fn runtime_context_metadata_v176(
 
 pub(crate) fn heartbeat_metadata_v176(heartbeat: &crate::core::production_heartbeat::ProductionHeartbeatV1) -> Option<Value> {
     // Explicit local opt-in + actual runtime probe. Disabled by default, including release builds.
-    if !node_enabled(heartbeat.model_id.as_deref()) || heartbeat.app_version!="1.7.6" || heartbeat.status!="online" || heartbeat.model_status!="ready" ||
+    if !node_enabled(heartbeat.model_id.as_deref()) || !matches!(heartbeat.app_version.as_str(),"1.7.6" | "1.7.7") || heartbeat.status!="online" || heartbeat.model_status!="ready" ||
         heartbeat.model_id.as_deref().map(|s|s=="lfm3:1.7b").unwrap_or(true) ||
         heartbeat.metadata.company_model_v1.ready {return None;}
     let base=format!("http://{}:{}",crate::runtime::llama_process::LLAMA_DEFAULT_HOST,crate::runtime::llama_process::LLAMA_DEFAULT_PORT);
