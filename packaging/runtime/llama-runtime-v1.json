@@ -13,10 +13,16 @@
     "windows-x64": {
       "executable": "llama-server.exe",
       "acceleration": "platform-certified",
-      "validatedRuntimeSha256": "9332c4e0c917a0c1fb30e3c3224c1a6b3ea7db1900f3cf30b2dc1d7f8510252e",
+      "validatedRuntimeSha256": "d0873913a9cbe4c73723c05b0a7e093551e15eb0145326f90ae603e456564256",
       "sourceTag": "b12102",
       "sourceBuild": 12102,
-      "sourceCommit": "bbb02c93e9b83255b70ac1a755bb02b0a251f9a7"
+      "sourceCommit": "bbb02c93e9b83255b70ac1a755bb02b0a251f9a7",
+      "fundingRuntimeRevision": "windows-b12102-funding-v176",
+      "runtimeDirectory": "windows-x64-v176",
+      "vulkanRuntimeSha256": "277bbf163fbc3a4a35699a67ecbaff44dfb6b0db3607b6709e77b3ebacb96137",
+      "gpuBuildRun": "45805557915",
+      "gpuSourceCommit": "7d26c7c3e6b22a1956f38bd884be50edeccfbd69",
+      "cudaRuntimeSha256": null
     },
     "linux-x64": {
       "executable": "llama-server",
