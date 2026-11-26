@@ -1025,6 +1025,11 @@ fn sync_recommended_model_pack_v171(
             .files
             .iter()
             .filter(|artifact| {
+                #[cfg(target_os = "windows")]
+                if crate::core::windows_model_retirement_v177::skip_retired_download(state, artifact) {
+                    println!("MODEL_RETIRED_DOWNLOAD_SKIPPED={}", artifact.filename);
+                    return false;
+                }
                 if artifact.artifact_role
                     == "vision_projector"
                 {
@@ -2358,7 +2363,8 @@ struct IdleModelMigrationV177 {
 fn prepare_idle_model_migration_v177(
     state: &NodeState,
     current: &str,
-) -> Result<Option<IdleModelMigrationV177>, String> {
+) -> Result<(Option<IdleModelMigrationV177>,
+    crate::core::signed_model_registry::VerifiedSignedModelRegistryV1), String> {
     use crate::core::signed_model_registry as registry;
     let previous = registry::active_or_cached_model_registry_v171()
         .ok_or_else(|| "model_migration_current_registry_missing".to_string())?;
@@ -2372,12 +2378,12 @@ fn prepare_idle_model_migration_v177(
         &fresh.payload.models, &state.models) {
         return Err("model_migration_definition_requires_recertification".into());
     }
-    registry::install_verified_model_registry_v171(fresh);
+    registry::install_verified_model_registry_v171(fresh.clone());
     let Some(target) = crate::core::execution_model::primary_certified_model(state) else {
-        return Ok(None);
+        return Ok((None, fresh));
     };
     if target.selected_model == current {
-        return Ok(None);
+        return Ok((None, fresh));
     }
     let verified_config = |id: &str| -> Result<(LlamaProcessConfig, String), String> {
         let model = state.models.iter().find(|m| m.selected_model == id
@@ -2403,10 +2409,10 @@ fn prepare_idle_model_migration_v177(
     };
     let (target_config, target_acceleration) = verified_config(&target.selected_model)?;
     let (fallback_config, fallback_acceleration) = verified_config(current)?;
-    Ok(Some(IdleModelMigrationV177 {
+    Ok((Some(IdleModelMigrationV177 {
         target: target.selected_model, target_config, target_acceleration,
         fallback_config, fallback_acceleration,
-    }))
+    }), fresh))
 }
 
 fn start_checked_idle_runtime_v177(
@@ -2437,6 +2443,88 @@ fn start_checked_idle_runtime_v177(
         return Err("model_migration_runtime_slots_insufficient".into());
     }
     Ok((runtime, llama))
+}
+
+// The migration RPC is a withdrawal-only fence; it does not set the
+// active model. For retirement, pass the unchanged active replacement as
+// "from" and the certified standby being retired as "to". The same device
+// lock verifies both identities and excludes reserved or active work.
+#[cfg(target_os = "windows")]
+fn retire_idle_model_v177(
+    registry: &crate::core::signed_model_registry::VerifiedSignedModelRegistryV1,
+    state: &NodeState,
+    active: &str,
+    runtime: &ManagedLlamaProcess,
+    llama: &ProductionLlamaClient,
+    heartbeat: &mut ProductionHeartbeatV1,
+    http: &Client,
+    auth_client: &SupabaseAuthClient,
+    auth: &mut crate::core::production_task_http::LocalAuth,
+    hardware: &str,
+    worker: &str,
+    stop: &AtomicBool,
+) -> Result<bool, String> {
+    use crate::core::windows_model_retirement_v177 as retirement;
+    let active_path = if registry.payload.windows_model_retirements_v177.is_empty() {
+        // A fresh cancellation clears any old grace state without probing.
+        std::path::PathBuf::new()
+    } else {
+        llama.health_check()?;
+        let client = Client::builder().no_proxy().timeout(Duration::from_secs(5))
+            .build().map_err(|_| "retirement_health_client_failed".to_string())?;
+        let props: Value = client.get(format!("{}/props", runtime.base_url())).send()
+            .and_then(|r| r.error_for_status()).and_then(|r| r.json())
+            .map_err(|_| "retirement_runtime_props_unavailable".to_string())?;
+        std::path::PathBuf::from(props["model_path"].as_str()
+            .ok_or("retirement_active_model_path_missing")?)
+    };
+    let Some(candidate) = retirement::observe(registry, state, active, &active_path)?
+        else { return Ok(false); };
+    heartbeat.refresh_update_lifecycle_v1();
+    if heartbeat.status != "online" || stop.load(Ordering::Acquire)
+        || heartbeat.model_id.as_deref() != Some(active) {
+        return Ok(false);
+    }
+    send_heartbeat(http, auth_client, auth, heartbeat)?;
+    let grant = crate::core::production_task_http::begin_idle_model_migration_v1(
+        http, auth_client, auth, hardware, worker, active, &candidate.retired_model);
+    match grant {
+        Ok(false) => return Ok(false),
+        Err(error) => {
+            // A lost reply might already have withdrawn the device.
+            send_heartbeat(http, auth_client, auth, heartbeat)?;
+            println!("MODEL_RETIREMENT_PERMIT_ERROR={error}");
+            return Ok(false);
+        }
+        Ok(true) => {}
+    }
+    if stop.load(Ordering::Acquire) { return Ok(false); }
+    let retired = candidate.retired_model.clone();
+    let result = llama.health_check().and_then(|_| candidate.delete_after_withdrawal());
+    match result {
+        Ok(bytes) => {
+            println!("MODEL_RETIRED={retired} BYTES_FREED={bytes}");
+            // Caller rebuilds the certified roster before readmission.
+            Ok(true)
+        }
+        Err(error) => {
+            println!("MODEL_RETIREMENT_DEFERRED={error}");
+            // The replacement is unchanged. Do not advertise it until its
+            // runtime is healthy; a failed health check keeps the fence shut.
+            llama.health_check()?;
+            send_heartbeat(http, auth_client, auth, heartbeat)?;
+            Ok(false)
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn note_retirement_activation_v177(active: &str, enabled: &mut bool) {
+    if let Err(error) = crate::core::windows_model_retirement_v177::note_activation(active) {
+        // Retirement bookkeeping must never block ordinary inference.
+        *enabled = false;
+        println!("MODEL_RETIREMENT_DISABLED={error}");
+    }
 }
 
 pub fn run_node_service(
@@ -2725,6 +2813,13 @@ pub fn run_node_service(
         );
 
     let mut active_selected_model = base_heartbeat.model_id.clone();
+
+    #[cfg(target_os = "windows")]
+    let mut retirement_bookkeeping_ok_v177 = true;
+    #[cfg(target_os = "windows")]
+    if let Some(active) = active_selected_model.as_deref() {
+        note_retirement_activation_v177(active, &mut retirement_bookkeeping_ok_v177);
+    }
 
     let mut active_capability = base_heartbeat.model_capability.clone();
 
@@ -3241,7 +3336,7 @@ pub fn run_node_service(
                 next_registry_refresh_v177 = Instant::now() + registry_interval_v177;
                 if let Some(previous) = active_selected_model.clone() {
                     match prepare_idle_model_migration_v177(&state, &previous) {
-                        Ok(Some(plan)) => {
+                        Ok((Some(plan), _fresh)) => {
                             base_heartbeat.refresh_update_lifecycle_v1();
                             if base_heartbeat.status == "online" && !stop.load(Ordering::Acquire) {
                                 // Refresh readiness immediately before asking for the
@@ -3256,6 +3351,8 @@ pub fn run_node_service(
                                         if stop.load(Ordering::Acquire) {
                                             return Ok(());
                                         }
+                                        #[cfg(target_os = "windows")]
+                                        note_retirement_activation_v177(&plan.target, &mut retirement_bookkeeping_ok_v177);
                                         // Drop only the managed local runtime, not provider
                                         // credentials, desired state, or installed artifacts.
                                         llama = None;
@@ -3269,6 +3366,8 @@ pub fn run_node_service(
                                             }
                                             Err(error) => {
                                                 println!("MODEL_MIGRATION_TARGET_FAILED={error}");
+                                                #[cfg(target_os = "windows")]
+                                                note_retirement_activation_v177(&previous, &mut retirement_bookkeeping_ok_v177);
                                                 next_registry_refresh_v177 = Instant::now() + Duration::from_secs(1800);
                                                 let fallback_limit = certified_concurrency_for_model_v1(&state, &previous);
                                                 let (runtime, client) = start_checked_idle_runtime_v177(
@@ -3311,7 +3410,45 @@ pub fn run_node_service(
                                 }
                             }
                         }
-                        Ok(None) => println!("MODEL_REGISTRY_REFRESHED_NO_SWITCH=true"),
+                        Ok((None, _fresh)) => {
+                            println!("MODEL_REGISTRY_REFRESHED_NO_SWITCH=true");
+                            #[cfg(target_os = "windows")]
+                            if retirement_bookkeeping_ok_v177 {
+                                if let (Some(runtime), Some(client)) = (_managed_llama.as_ref(), llama.as_ref()) {
+                                    match retire_idle_model_v177(
+                                        &_fresh, &state, &previous, runtime, client,
+                                        &mut base_heartbeat, &http, &auth_client, &mut auth,
+                                        &hardware, &public_wallet.wallet_address, &stop,
+                                    ) {
+                                        Ok(true) => {
+                                            if stop.load(Ordering::Acquire) { return Ok(()); }
+                                            state = NodeState::detect();
+                                            base_heartbeat = ProductionHeartbeatV1::from_node_state(
+                                                &state, env!("CARGO_PKG_VERSION"), "laptop", &[]);
+                                            operational_limit_v1 = apply_active_model_heartbeat_v1(
+                                                &mut base_heartbeat, &state, &previous)?;
+                                            active_capability = base_heartbeat.model_capability.clone();
+                                            active_runtime = base_heartbeat.runtime.clone();
+                                            base_heartbeat.runtime_acceleration = runtime_acceleration.clone();
+                                            base_heartbeat.concurrency_limit = operational_limit_v1;
+                                            poll_capabilities = base_heartbeat.capabilities.clone();
+                                            send_heartbeat(&http, &auth_client, &mut auth, &base_heartbeat)?;
+                                            last_idle_heartbeat = Instant::now();
+                                            println!("MODEL_RETIREMENT_ROSTER_REFRESHED=true");
+                                            continue;
+                                        }
+                                        Ok(false) => {
+                                            if stop.load(Ordering::Acquire) { return Ok(()); }
+                                        }
+                                        Err(error) => {
+                                            // An uncertain withdrawal or failed replacement health
+                                            // must never be followed by a stale online heartbeat.
+                                            return Err(format!("model_retirement_idle_guard_failed:{error}"));
+                                        }
+                                    }
+                                }
+                            }
+                        },
                         Err(error) => println!("MODEL_REGISTRY_REFRESH_DEFERRED={error}"),
                     }
                 }
@@ -3528,6 +3665,8 @@ pub fn run_node_service(
             );
 
             if switch_required_v1 {
+                #[cfg(target_os = "windows")]
+                note_retirement_activation_v177(batch_model_id_v1, &mut retirement_bookkeeping_ok_v177);
                 if env::var("EDGESWARM_LLAMA_BASE_URL")
                     .ok()
                     .filter(|value_v1| !value_v1.trim().is_empty())
