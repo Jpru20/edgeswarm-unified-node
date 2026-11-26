@@ -20,6 +20,7 @@ use std::{
     io::Write,
     os::windows::fs::MetadataExt,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -122,7 +123,8 @@ fn read_receipt(root: &Path, name: &str, sha: &str) -> Option<OwnedArtifact> {
 // file. Merely discovering an existing matching GGUF never establishes ownership.
 pub(crate) fn record_new_download(root: &Path, artifact: &ModelArtifactV1) {
     let Some(managed) = managed_root() else { return; };
-    if fs::canonicalize(root).ok() != fs::canonicalize(managed).ok()
+    if fs::canonicalize(root).ok().zip(fs::canonicalize(managed).ok())
+        .map(|(a,b)| a == b) != Some(true)
         || artifact.artifact_role != "model" { return; }
     let Some(record) = identity(&root.join(&artifact.filename), &artifact.filename, &artifact.sha256)
         else { return; };
@@ -210,7 +212,8 @@ fn exact_discovery(root: &Path, model: &str, filename: &str) -> bool {
     let paths: Vec<_> = discover_models(root).into_iter()
         .filter(|m| m.selected_model == model).map(|m| m.path).collect();
     paths.len() == 1 && fs::canonicalize(&paths[0]).ok()
-        == fs::canonicalize(root.join(filename)).ok()
+        .zip(fs::canonicalize(root.join(filename)).ok())
+        .map(|(a,b)| a == b) == Some(true)
 }
 
 fn protected_company_or_training() -> bool {
@@ -283,7 +286,9 @@ pub(crate) fn observe(
             let Some(owned) = read_receipt(&root, &artifact.filename, &artifact.sha256)
                 else { continue; };
             let Some(replacement) = replacement_artifact(&root, new) else { continue; };
-            if fs::canonicalize(active_path).ok() != fs::canonicalize(root.join(&replacement.filename)).ok()
+            if fs::canonicalize(active_path).ok()
+                .zip(fs::canonicalize(root.join(&replacement.filename)).ok())
+                .map(|(a,b)| a == b) != Some(true)
                 || !exact_discovery(&root, &old.selected_model, &owned.filename)
                 || !exact_discovery(&root, active, &replacement.filename) { continue; }
             let first = previous.iter().find(|entry| continuous_observation(
@@ -310,30 +315,46 @@ pub(crate) fn observe(
 impl RetirementCandidate {
     // This method is reached only after the backend's idle withdrawal
     // permit, and a second health check of the unchanged replacement.
-    pub(crate) fn delete_after_withdrawal(self) -> Result<u64, String> {
+    pub(crate) fn delete_after_withdrawal(self, stop: &AtomicBool) -> Result<u64, String> {
         if managed_root().as_ref() != Some(&self.root)
             || now_unix()? >= self.expires_at_unix || protected_company_or_training()
             || self.retired_model == self.replacement_model
             || self.owned.filename.eq_ignore_ascii_case(&self.replacement.filename)
         { return Err("retirement_predelete_gate_failed".into()); }
-        let path = self.root.join(&self.owned.filename);
-        let replacement_path = self.root.join(&self.replacement.filename);
-        if identity(&replacement_path, &self.replacement.filename, &self.replacement.sha256)
-                .as_ref() != Some(&self.replacement)
-            || read_receipt(&self.root, &self.owned.filename, &self.owned.sha256)
-                .as_ref() != Some(&self.owned)
-            || !sha256_file(&replacement_path)?.eq_ignore_ascii_case(&self.replacement.sha256)
-            || !sha256_file(&path)?.eq_ignore_ascii_case(&self.owned.sha256)
-            || read_receipt(&self.root, &self.owned.filename, &self.owned.sha256)
-                .as_ref() != Some(&self.owned)
-            || now_unix()? >= self.expires_at_unix
-        { return Err("retirement_artifact_identity_changed".into()); }
-        // Never recursively delete, remove a model directory, or touch certificates.
-        fs::remove_file(&path).map_err(|e| format!("retirement_file_delete_failed:{e}"))?;
-        let receipt = receipt_path(&self.root, &self.owned.filename);
-        if plain_file(&receipt).is_some() { let _ = fs::remove_file(receipt); }
-        Ok(self.owned.bytes)
+        delete_verified_fixture_safe(&self.root, &self.owned, &self.replacement,
+            self.expires_at_unix, stop)
     }
+}
+
+// Isolated filesystem gate, also exercised with temporary fixtures. The
+// production wrapper first checks the exact managed root and idle permit.
+fn delete_verified_fixture_safe(
+    root: &Path, owned: &OwnedArtifact, replacement: &OwnedArtifact,
+    expires: u64, stop: &AtomicBool,
+) -> Result<u64, String> {
+    if stop.load(Ordering::Acquire) || now_unix()? >= expires
+        || !safe_filename(&owned.filename) || !safe_filename(&replacement.filename)
+        || owned.filename.eq_ignore_ascii_case(&replacement.filename)
+        || !plain_directory(root)
+    { return Err("retirement_predelete_gate_failed".into()); }
+    let path = root.join(&owned.filename);
+    let replacement_path = root.join(&replacement.filename);
+    if identity(&replacement_path, &replacement.filename, &replacement.sha256)
+            .as_ref() != Some(replacement)
+        || read_receipt(root, &owned.filename, &owned.sha256).as_ref() != Some(owned)
+        || !sha256_file(&replacement_path)?.eq_ignore_ascii_case(&replacement.sha256)
+        || !sha256_file(&path)?.eq_ignore_ascii_case(&owned.sha256)
+        || !plain_directory(root)
+        || read_receipt(root, &owned.filename, &owned.sha256).as_ref() != Some(owned)
+        || identity(&replacement_path, &replacement.filename, &replacement.sha256)
+            .as_ref() != Some(replacement)
+        || stop.load(Ordering::Acquire) || now_unix()? >= expires
+    { return Err("retirement_artifact_identity_changed".into()); }
+    // Never recursively delete, remove a model directory, or touch certificates.
+    fs::remove_file(&path).map_err(|e| format!("retirement_file_delete_failed:{e}"))?;
+    let receipt = receipt_path(root, &owned.filename);
+    if plain_file(&receipt).is_some() { let _ = fs::remove_file(receipt); }
+    Ok(owned.bytes)
 }
 
 #[cfg(test)]
@@ -377,6 +398,36 @@ mod tests {
         assert!(!continuous_observation(&observation, &rule, &changed, &replacement, 40, 35));
         let changed_rule = WindowsModelRetirementV177 { deprecated_at_unix: 11, ..rule.clone() };
         assert!(!continuous_observation(&observation, &changed_rule, &owned, &replacement, 40, 35));
+    }
+
+    #[test]
+    fn deletes_only_verified_owned_standby_and_preserves_replacement() {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let root = env::temp_dir().join(format!("swarm-retire-delete-{}-{nonce}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("old.gguf"), b"old model fixture").unwrap();
+        fs::write(root.join("new.gguf"), b"new model fixture").unwrap();
+        fs::write(root.join("personal.gguf"), b"unmanaged fixture").unwrap();
+        let owned = identity(&root.join("old.gguf"), "old.gguf",
+            &sha256_file(&root.join("old.gguf")).unwrap()).unwrap();
+        let replacement = identity(&root.join("new.gguf"), "new.gguf",
+            &sha256_file(&root.join("new.gguf")).unwrap()).unwrap();
+        let expiry = now_unix().unwrap() + 60;
+        let stop = AtomicBool::new(false);
+        assert!(delete_verified_fixture_safe(&root, &owned, &replacement, expiry, &stop).is_err());
+        assert!(root.join("old.gguf").exists());
+        fs::write(receipt_path(&root, "old.gguf"), serde_json::to_vec(&owned).unwrap()).unwrap();
+        assert!(delete_verified_fixture_safe(&root, &owned, &owned, expiry, &stop).is_err());
+        assert!(delete_verified_fixture_safe(&root, &owned, &replacement, 0, &stop).is_err());
+        stop.store(true, Ordering::Release);
+        assert!(delete_verified_fixture_safe(&root, &owned, &replacement, expiry, &stop).is_err());
+        stop.store(false, Ordering::Release);
+        assert_eq!(delete_verified_fixture_safe(&root, &owned, &replacement, expiry, &stop).unwrap(), owned.bytes);
+        assert!(!root.join("old.gguf").exists());
+        assert!(!receipt_path(&root, "old.gguf").exists());
+        assert_eq!(fs::read(root.join("new.gguf")).unwrap(), b"new model fixture");
+        assert_eq!(fs::read(root.join("personal.gguf")).unwrap(), b"unmanaged fixture");
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
