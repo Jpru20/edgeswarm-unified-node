@@ -8,7 +8,8 @@
       "executable": "llama-server",
       "acceleration": "metal",
       "metalEmbedded": true,
-      "validatedRuntimeSha256": "8a4c0a23355af2ba40c56c2d7b60a441c289fc8b33e2baeda1cc5ff2af126cce"
+      "validatedRuntimeSha256": "5b60f606c7dd72e9d1dcbc35a8871268ac507fc5f59d856609604ad080450942",
+      "fundingRuntimeRevision": "macos-v176-reused-v177"
     },
     "windows-x64": {
       "executable": "llama-server.exe",
