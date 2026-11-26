@@ -1,0 +1,184 @@
+name: Swarm v1.7.6 Windows GPU runtimes
+
+on:
+  push:
+    branches: [swarm-v176-runtime-port]
+    paths:
+      - '.github/workflows/swarm-v176-windows-gpu.yml'
+      - 'packaging/runtime/funding-v176/windows-b12102-*.patch'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [vulkan, cuda]
+    env:
+      BACKEND: ${{ matrix.backend }}
+      LLAMA_PIN: bbb02c93e9b83255b70ac1a755bb02b0a251f9a7
+      CUDA_ROOT: C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8
+      VULKAN_ROOT: C:\VulkanSDK\1.4.321.1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify and patch upstream source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $src = Join-Path $env:RUNNER_TEMP 'llama-b12102'
+          git -c core.autocrlf=false clone --depth 1 --branch b12102 https://github.com/ggml-org/llama.cpp.git $src
+          if ($LASTEXITCODE -ne 0) { throw 'CLONE_FAILED' }
+          $head = (git -C $src rev-parse HEAD).Trim()
+          if ($head -ne $env:LLAMA_PIN) { throw "UNEXPECTED_SOURCE=$head" }
+          foreach ($name in @('windows-b12102-runtime.patch','windows-b12102-json-compat.patch')) {
+            $original = Join-Path $env:GITHUB_WORKSPACE "packaging/runtime/funding-v176/$name"
+            $fixed = Join-Path $env:RUNNER_TEMP $name
+            $text = [IO.File]::ReadAllText($original).Replace([string]([char]13)+[char]10,[string][char]10)
+            [IO.File]::WriteAllText($fixed,$text,[Text.UTF8Encoding]::new($false))
+            git -C $src apply --check --index $fixed
+            if ($LASTEXITCODE -ne 0) { throw "PATCH_CHECK_FAILED=$name" }
+            git -C $src apply --index $fixed
+            if ($LASTEXITCODE -ne 0) { throw "PATCH_FAILED=$name" }
+            Write-Host "PATCH_APPLIED=$name"
+          }
+          git -C $src diff --cached --check
+          if ($LASTEXITCODE -ne 0) { throw 'SOURCE_DIFF_CHECK_FAILED' }
+          git -C $src diff --cached --stat
+          "LLAMA_SOURCE=$src" >> $env:GITHUB_ENV
+
+      - name: Install Vulkan SDK on runner
+        if: matrix.backend == 'vulkan'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $env:RUNNER_TEMP 'vulkansdk.exe'
+          curl.exe --fail --location --retry 3 --silent --show-error --output $installer https://sdk.lunarg.com/sdk/download/1.4.321.1/windows/vulkansdk-windows-X64-1.4.321.1.exe
+          if ($LASTEXITCODE -ne 0) { throw 'VULKAN_DOWNLOAD_FAILED' }
+          $p = Start-Process $installer -ArgumentList '-c','--am','--al','in' -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -notin @(0,3010)) { throw "VULKAN_INSTALL_FAILED=$($p.ExitCode)" }
+          Remove-Item $installer
+          if (!(Test-Path "$env:VULKAN_ROOT\Bin\glslc.exe")) { throw 'GLSLC_MISSING' }
+          "VULKAN_SDK=$env:VULKAN_ROOT" >> $env:GITHUB_ENV
+          "$env:VULKAN_ROOT\Bin" >> $env:GITHUB_PATH
+          & "$env:VULKAN_ROOT\Bin\glslc.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw 'GLSLC_FAILED' }
+
+      - name: Install CUDA 12.8 toolkit on runner (no display driver)
+        if: matrix.backend == 'cuda'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $env:RUNNER_TEMP 'cuda.exe'
+          curl.exe --fail --location --retry 3 --silent --show-error --output $installer https://developer.download.nvidia.com/compute/cuda/12.8.0/local_installers/cuda_12.8.0_571.96_windows.exe
+          if ($LASTEXITCODE -ne 0) { throw 'CUDA_DOWNLOAD_FAILED' }
+          $p = Start-Process $installer -ArgumentList '-s','cudart_12.8','nvcc_12.8','cublas_12.8','cublas_dev_12.8','nvml_dev_12.8' -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -notin @(0,3010)) { throw "CUDA_INSTALL_FAILED=$($p.ExitCode)" }
+          Remove-Item $installer
+          if (!(Test-Path "$env:CUDA_ROOT\bin\nvcc.exe")) { throw 'NVCC_MISSING' }
+          "CUDA_PATH=$env:CUDA_ROOT" >> $env:GITHUB_ENV
+          "$env:CUDA_ROOT\bin" >> $env:GITHUB_PATH
+          & "$env:CUDA_ROOT\bin\nvcc.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw 'NVCC_FAILED' }
+
+      - name: Build native runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $finder = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $finder -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) { throw 'MSVC_MISSING' }
+          $batch = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+          $vars = & cmd.exe /d /c ('call "'+$batch+'" >nul && set')
+          if ($LASTEXITCODE -ne 0) { throw 'MSVC_INIT_FAILED' }
+          foreach ($line in $vars) {
+            $i = $line.IndexOf('=')
+            if ($i -gt 0) { [Environment]::SetEnvironmentVariable($line.Substring(0,$i),$line.Substring($i+1),'Process') }
+          }
+          Get-Command cl, cmake, ninja | Format-Table Name, Source
+          $build = Join-Path $env:RUNNER_TEMP 'runtime-build'
+          $opts = @(
+            '-DCMAKE_BUILD_TYPE=Release',
+            '-DBUILD_SHARED_LIBS=ON',
+            '-DGGML_NATIVE=OFF',
+            '-DGGML_BACKEND_DL=ON',
+            '-DGGML_CPU_ALL_VARIANTS=ON',
+            '-DLLAMA_OPENSSL=OFF',
+            '-DLLAMA_BUILD_SERVER=ON',
+            '-DLLAMA_BUILD_TESTS=OFF',
+            '-DLLAMA_BUILD_EXAMPLES=OFF',
+            '-DLLAMA_BUILD_UI=OFF',
+            '-DLLAMA_USE_PREBUILT_UI=OFF'
+          )
+          if ($env:BACKEND -eq 'cuda') {
+            $opts += @('-DGGML_CUDA=ON','-DGGML_VULKAN=OFF',"-DCUDAToolkit_ROOT=$env:CUDA_ROOT")
+            $target = 'ggml-cuda'
+            $parallel = 2
+          } else {
+            $opts += @('-DGGML_CUDA=OFF','-DGGML_VULKAN=ON')
+            $target = 'ggml-vulkan'
+            $parallel = 4
+          }
+          cmake -S $env:LLAMA_SOURCE -B $build -G Ninja @opts
+          if ($LASTEXITCODE -ne 0) { throw 'CONFIGURE_FAILED' }
+          cmake --build $build --config Release --target llama-server $target --parallel $parallel
+          if ($LASTEXITCODE -ne 0) { throw 'BUILD_FAILED' }
+          "RUNTIME_BUILD=$build" >> $env:GITHUB_ENV
+          Write-Host 'NATIVE_BUILD=PASS'
+
+      - name: Stage runtime and hash payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = Join-Path $env:RUNTIME_BUILD 'bin'
+          $out = Join-Path $env:GITHUB_WORKSPACE 'runtime-artifact'
+          $payload = Join-Path $out 'current'
+          New-Item -ItemType Directory -Path $payload -Force | Out-Null
+          Copy-Item (Join-Path $bin 'llama-server.exe') $payload
+          Get-ChildItem $bin -File -Filter '*.dll' | Copy-Item -Destination $payload
+          if ($env:BACKEND -eq 'cuda') {
+            foreach ($dll in @('cudart64_12.dll','cublas64_12.dll','cublasLt64_12.dll')) {
+              Copy-Item "$env:CUDA_ROOT\bin\$dll" $payload
+            }
+          }
+          foreach ($required in @('llama-server.exe',"ggml-$env:BACKEND.dll",'ggml.dll','llama.dll')) {
+            if (!(Test-Path (Join-Path $payload $required))) { throw "PAYLOAD_MISSING=$required" }
+          }
+          $cpu = @(Get-ChildItem $payload -File -Filter 'ggml-cpu*.dll')
+          if ($cpu.Count -eq 0) { throw 'CPU_FALLBACK_MISSING' }
+          $hashes = @(Get-ChildItem $payload -File | Sort-Object Name | ForEach-Object {
+            @{ file=$_.Name; bytes=$_.Length; sha256=(Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+          })
+          $patches = @('windows-b12102-runtime.patch','windows-b12102-json-compat.patch') | ForEach-Object {
+            @{ file=$_; sha256=(Get-FileHash (Join-Path $env:RUNNER_TEMP $_) -Algorithm SHA256).Hash.ToLowerInvariant() }
+          }
+          [ordered]@{
+            backend=$env:BACKEND
+            upstreamCommit=$env:LLAMA_PIN
+            swarmCommit=$env:GITHUB_SHA
+            buildRun=$env:GITHUB_RUN_ID
+            cudaToolkit='12.8.0'
+            vulkanSdk='1.4.321.1'
+            nativeBuildPassed=$true
+            hardwareCertified=$false
+            patches=@($patches)
+            files=$hashes
+          } | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $out 'manifest.json') -Encoding utf8
+          Get-Content (Join-Path $out 'manifest.json')
+          Write-Host 'PAYLOAD_HASHES=PASS'
+          Write-Host 'HARDWARE_CERTIFICATION=PENDING'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: swarm-v176-windows-${{ matrix.backend }}
+          path: runtime-artifact/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
