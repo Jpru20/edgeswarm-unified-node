@@ -178,7 +178,7 @@ impl ManagedLlamaProcess {
         command.args(lfm3_args);
 
         // Isolate customer prompt state on the patched desktop runtimes.
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         command.args([
             "--cache-ram", "0",
             "--no-cache-idle-slots",
