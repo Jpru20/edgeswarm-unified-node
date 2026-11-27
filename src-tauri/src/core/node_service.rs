@@ -1303,14 +1303,20 @@ if adaptive_progress_requested_v1 {
                     }
                 };
 
-            for (
-                execution_id_for_event_v1,
-                event_v1,
-                sequence_v1,
-                output_chars_v1,
-                elapsed_ms_v1
-            ) in receiver_v1
-            {
+            // SWARM_EXECUTION_LIVENESS_V1
+            let mut last: Option<(String,u64,u64)> = None;
+            loop {
+                let (execution_id_for_event_v1,event_v1,output_chars_v1) =
+                    match receiver_v1.recv_timeout(Duration::from_secs(20)) {
+                        Ok((id,event,_,chars,_)) => (id,event,chars),
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            let Some((id,_,chars)) = last.as_ref() else { continue; };
+                            (id.clone(),"generation.progress".into(),*chars)
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    };
+                let sequence_v1 = last.as_ref().map_or(1,|(_,seq,_)|seq+1);
+                let elapsed_ms_v1 = execution_started_v1.elapsed().as_millis() as u64;
                 match send_task_progress_with_retry(
                     &progress_http_v1,
                     &progress_auth_client_v1,
@@ -1325,6 +1331,7 @@ if adaptive_progress_requested_v1 {
                     elapsed_ms_v1,
                 ) {
                     Ok(status) => {
+                        last = Some((execution_id_for_event_v1.clone(),sequence_v1,output_chars_v1));
                         println!(
                             "TASK_PROGRESS_HTTP_STATUS={} EVENT={} SEQUENCE={}",
                             status,
