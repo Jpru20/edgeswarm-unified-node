@@ -1,0 +1,22 @@
+diff --git a/common/json.h b/common/json.h
+--- a/common/json.h
++++ b/common/json.h
+@@ -183,6 +183,7 @@
+     bool is_boolean() const;
+     bool is_number()  const;
+     bool is_number_integer() const;
++    bool is_number_unsigned() const;
+     bool is_number_float()   const;
+ 
+     bool   empty() const;
+diff --git a/common/json.cpp b/common/json.cpp
+--- a/common/json.cpp
++++ b/common/json.cpp
+@@ -258,6 +258,7 @@
+ bool common_json::is_boolean()        const { return as_json(this).is_boolean(); }
+ bool common_json::is_number()         const { return as_json(this).is_number(); }
+ bool common_json::is_number_integer() const { return as_json(this).is_number_integer(); }
++bool common_json::is_number_unsigned() const { return as_json(this).is_number_unsigned(); }
+ bool common_json::is_number_float()   const { return as_json(this).is_number_float(); }
+ 
+ bool   common_json::empty() const { return as_json(this).empty(); }

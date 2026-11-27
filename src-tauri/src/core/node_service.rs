@@ -386,10 +386,21 @@ fn failure_payload(
     private_key: &str,
     reason: &str,
 ) -> Result<Value, String> {
-    let output = json!({
-        "error": reason
-    })
-    .to_string();
+    failure_payload_with_diagnostics_v176(
+        task,email,worker,hardware,private_key,reason,None
+    )
+}
+
+fn failure_payload_with_diagnostics_v176(
+    task: &TaskEnvelope,
+    email: &str,
+    worker: &str,
+    hardware: &str,
+    private_key: &str,
+    reason: &str,
+    diagnostics: Option<Value>,
+) -> Result<Value,String> {
+    let output = json!({"error":reason}).to_string();
 
     let hash = Sha256::digest(output.as_bytes())
         .iter()
@@ -399,7 +410,7 @@ fn failure_payload(
     let signature =
         result_signing::sign_result(&task.task_id_text(), 0, &hash, hardware, private_key)?;
 
-    Ok(json!({
+    let mut envelope = json!({
         "fileHash": hash,
         "payload": {
             "taskId": task.task_id,
@@ -417,11 +428,18 @@ fn failure_payload(
             "runtime": "llama.cpp",
             "runtimeAcceleration": "unknown"
         }
-    }))
+    });
+
+    if let Some(details) = diagnostics {
+        envelope["payload"]["inferenceFailureV176"] = details;
+    }
+
+    Ok(envelope)
 }
 
 fn build_task_submit_payload(
     task: &TaskEnvelope,
+    policy_prompt: &str,
     llama: Option<&ProductionLlamaClient>,
     vision_assets:
         Option<&PreparedVisionAssetsV1>,
@@ -435,8 +453,15 @@ fn build_task_submit_payload(
     runtime_acceleration: &str,
     stream_neural: bool,
     on_chunk: Option<&mut dyn FnMut(&str)>,
+    funding_auth_v176: &crate::core::production_task_http::LocalAuth,
+    funding_execution_id_v176: &str,
+    funding_stop_v176: &Arc<AtomicBool>,
+    prestarted_funding_v176: Option<&crate::core::dynamic_funding_v176::FundingSessionV176>,
 ) -> Result<Value, String> {
-    if let Some(result) = deterministic_executor::execute(task) {
+    let deterministic_result_v176 = if task.dynamic_funding_v176.is_none() {
+        deterministic_executor::execute(task)
+    } else { None };
+    if let Some(result) = deterministic_result_v176 {
         println!("DETERMINISTIC_EXECUTION_SUCCEEDED=true");
         println!("DETERMINISTIC_MODEL_ID={}", result.model_id_used);
 
@@ -535,16 +560,7 @@ fn build_task_submit_payload(
         task_adaptive_neural_execution_v1(task);
 
     let effective_max_output_tokens_v1 =
-        if adaptive_execution_v1 {
-            task.execution_contract
-                .as_ref()
-                .and_then(|contract| {
-                    contract.output_token_budget
-                })
-                .or(task.max_output_tokens)
-        } else {
-            task.max_output_tokens
-        };
+        effective_output_budget_v176(task, adaptive_execution_v1);
 
     let adaptive_absolute_ceiling_ms_v1 =
         if adaptive_execution_v1 {
@@ -563,7 +579,8 @@ fn build_task_submit_payload(
         println!(
             "ADAPTIVE_BACKEND_OUTPUT_TOKEN_HINT={}",
             effective_max_output_tokens_v1
-                .unwrap_or(4096)
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "unbounded".into())
         );
 
         println!(
@@ -573,72 +590,51 @@ fn build_task_submit_payload(
         );
     }
 
-    let inference_result =
-        if vision_required_v171 {
-            let prepared =
-                vision_assets
-                    .ok_or_else(|| {
-                        "vision_assets_unavailable"
-                            .to_string()
-                    })?;
-
-            println!(
-                "VISION_LOCAL_INFERENCE=true"
-            );
-
-            println!(
-                "VISION_STREAMING=false"
-            );
-
-            llama.execute_vision(
-                &task.prompt,
-                effective_max_output_tokens_v1,
-                &prepared.assets,
-            )
-        } else if stream_neural {
-            if let Some(callback) = on_chunk {
-                if adaptive_execution_v1 {
-                    llama.execute_streaming_adaptive(
-                        &task.prompt,
-                        effective_max_output_tokens_v1,
-                        adaptive_absolute_ceiling_ms_v1,
-                        |chunk| {
-                            callback(chunk)
-                        },
-                    )
-                } else {
-                    llama.execute_streaming(
-                        &task.prompt,
-                        effective_max_output_tokens_v1,
-                        |chunk| {
-                            callback(chunk)
-                        },
-                    )
-                }
-            } else if adaptive_execution_v1 {
-                llama.execute_adaptive(
-                    &task.prompt,
-                    effective_max_output_tokens_v1,
-                    adaptive_absolute_ceiling_ms_v1,
-                )
-            } else {
-                llama.execute(
-                    &task.prompt,
-                    effective_max_output_tokens_v1,
-                )
+    let inference_result = if task.dynamic_funding_v176.is_some() {
+        (|| {
+            if !adaptive_execution_v1 || !stream_neural || vision_required_v171 ||
+                effective_max_output_tokens_v1.is_some() || on_chunk.is_none() {
+                return Err("funding_delivery_not_supported".to_string());
             }
-        } else if adaptive_execution_v1 {
-            llama.execute_adaptive(
-                &task.prompt,
-                effective_max_output_tokens_v1,
-                adaptive_absolute_ceiling_ms_v1,
-            )
-        } else {
-            llama.execute(
-                &task.prompt,
-                effective_max_output_tokens_v1,
-            )
-        };
+            let local_funding = if prestarted_funding_v176.is_none() {
+                Some(crate::core::dynamic_funding_v176::FundingSessionV176::start(
+                    task, llama.funding_base_url_v176(), funding_auth_v176, hardware,
+                    funding_execution_id_v176, funding_stop_v176, adaptive_absolute_ceiling_ms_v1,
+                )?)
+            } else { None };
+            let funding = prestarted_funding_v176.or(local_funding.as_ref())
+                .ok_or("funding_session_missing")?;
+            let remaining = funding.remaining_ms()?;
+            let result = llama.execute_customer_v176(
+                &task.prompt, policy_prompt, None, true, Some(remaining),
+                None, on_chunk, Some(funding),
+            )?;
+            funding.finish(&result.ai_output)?;
+            Ok(result)
+        })()
+    } else if vision_required_v171 {
+        let prepared = vision_assets
+            .ok_or_else(|| "vision_assets_unavailable".to_string())?;
+
+        println!("VISION_LOCAL_INFERENCE=true");
+        println!("VISION_STREAMING=false");
+
+        llama.execute_customer_v176(
+            &task.prompt, policy_prompt,
+            effective_max_output_tokens_v1,
+            false,None,Some(&prepared.assets),None,None
+        )
+    } else {
+        llama.execute_customer_v176(
+            &task.prompt, policy_prompt,
+            effective_max_output_tokens_v1,
+            adaptive_execution_v1,
+            adaptive_absolute_ceiling_ms_v1,
+            None,
+            if stream_neural { on_chunk } else { None },
+            None,
+        )
+    };
 
     match inference_result {
         Ok(result) => {
@@ -679,6 +675,34 @@ fn build_task_submit_payload(
                     payload.insert("max_tokens".into(), json!(result.max_tokens));
                 }
                 payload.insert("token_count_method".into(), json!(result.token_count_method));
+                let t = &result.runtime_telemetry_v176;
+                for (key, value) in [
+                    ("runtime_prompt_n", t.prompt_n),
+                    ("runtime_cache_n", t.cache_n),
+                    ("runtime_cached_tokens", t.cached_tokens),
+                    ("runtime_first_content_ms", t.first_content_ms),
+                    ("runtime_generation_n_ctx", t.context.generation_n_ctx),
+                    ("runtime_n_ctx", t.context.runtime_n_ctx),
+                    ("runtime_model_n_ctx_train", t.context.model_n_ctx_train),
+                    ("runtime_total_slots", t.context.total_slots),
+                ] {
+                    if let Some(n) = value {
+                        payload.insert(key.into(), json!(n));
+                        println!("RUNTIME_TELEMETRY {key}={n}");
+                    }
+                }
+
+
+                // Preserve actual runtime timings when available.
+                if let Some(ms) = result.prompt_eval_ms {
+                    payload.insert("prompt_eval_ms".into(), json!(ms));
+                    println!("INFERENCE_PROMPT_EVAL_MS={ms}");
+                }
+                if let Some(ms) = result.generation_ms {
+                    payload.insert("generation_ms".into(), json!(ms));
+                    println!("INFERENCE_GENERATION_MS={ms}");
+                }
+
                 if let Some(reason) = result.finish_reason.as_ref() {
                     payload.insert("finish_reason".into(), json!(reason));
                 }
@@ -689,14 +713,18 @@ fn build_task_submit_payload(
         }
         Err(error) => {
             println!("INFERENCE_SUCCEEDED=false");
-            println!("INFERENCE_ERROR={error}");
-            failure_payload(
+            let details =
+                crate::core::production_inference::inference_failure_details_v176(&error);
+            println!("INFERENCE_FAILURE_V176={details}");
+
+            failure_payload_with_diagnostics_v176(
                 task,
                 provider_email,
                 worker,
                 hardware,
                 private_key,
                 "neural_inference_failed",
+                Some(details),
             )
         }
     }
@@ -1059,6 +1087,11 @@ fn sync_recommended_model_pack_v171(
             .files
             .iter()
             .filter(|artifact| {
+                #[cfg(target_os = "windows")]
+                if crate::core::windows_model_retirement_v177::skip_retired_download(state, artifact) {
+                    println!("MODEL_RETIRED_DOWNLOAD_SKIPPED={}", artifact.filename);
+                    return false;
+                }
                 if artifact.artifact_role
                     == "vision_projector"
                 {
@@ -1251,6 +1284,7 @@ let adaptive_internal_streaming_v1 =
     );
 
 let adaptive_progress_requested_v1 =
+    task.dynamic_funding_v176.is_none() &&
     task_adaptive_progress_reporting_v1(
         &task
     );
@@ -1663,6 +1697,7 @@ let mut stream_callback_v1 =
 let mut execution_task_v1 =
     task.clone();
 
+let mut retrieval_telemetry_v176: Option<Value> = None;
 let mut tool_execution_json_v1:
     Option<String> = None;
 
@@ -1682,7 +1717,25 @@ let node_web_retrieval_required_v1 =
         })
         .unwrap_or(false);
 
-if node_web_retrieval_required_v1 {
+// FUNDED_RETRIEVAL_LEASE_V176
+let retrieval_funding_v176 =
+    if node_web_retrieval_required_v1 && task.dynamic_funding_v176.is_some() {
+        (|| {
+            let client = llama.as_ref().ok_or("neural_runtime_unavailable")?;
+            crate::core::dynamic_funding_v176::FundingSessionV176::start(
+                &task, client.funding_base_url_v176(), &auth, &hardware,
+                &execution_id_v1, &stop,
+                task.execution_contract.as_ref().and_then(|c| c.absolute_ceiling_ms),
+            ).map(Some)
+        })()
+    } else { Ok(None) };
+
+if let Err(reason) = &retrieval_funding_v176 {
+    println!("FUNDED_RETRIEVAL_START=FAIL");
+    node_web_retrieval_error_v1 = Some(reason.clone());
+}
+
+if node_web_retrieval_required_v1 && node_web_retrieval_error_v1.is_none() {
     match llama.as_ref() {
         Some(llama_client_v1) => {
             match prepare_node_web_retrieval_v1(
@@ -1700,6 +1753,8 @@ if node_web_retrieval_required_v1 {
                         prepared_v1.elapsed_ms
                     );
 
+                    println!("RETRIEVAL_TELEMETRY_V176={}", prepared_v1.telemetry_v176);
+                    retrieval_telemetry_v176 = Some(prepared_v1.telemetry_v176);
                     execution_task_v1.prompt =
                         prepared_v1.prompt;
 
@@ -1850,6 +1905,7 @@ let mut submit_payload =
     } else {
         build_task_submit_payload(
             &execution_task_v1,
+            &task.prompt,
             llama.as_ref(),
             prepared_vision_assets_v1.as_ref(),
             &provider_email_for_task_v1,
@@ -1869,8 +1925,12 @@ let mut submit_payload =
             } else {
                 None
             },
+            &auth, &execution_id_v1, &stop,
+            retrieval_funding_v176.as_ref().ok().and_then(|s| s.as_ref()),
         )?
     };
+
+drop(retrieval_funding_v176);
 
 if let Some(tool_execution_json_v1) =
     tool_execution_json_v1
@@ -1903,6 +1963,10 @@ if let Some(tool_execution_json_v1) =
                 "tool_execution_payload_object_missing"
                     .to_string()
             })?;
+
+    if let Some(metrics) = retrieval_telemetry_v176.take() {
+        payload_object_v1.insert("retrievalTelemetryV176".into(), metrics);
+    }
 
     payload_object_v1.insert(
         "toolExecutionJson".into(),
@@ -2014,8 +2078,10 @@ if stream_enabled_v1 {
     };
 
     let terminal_payload_v1 = if inference_succeeded_v1 {
+        let physical_limit_v176 = task.dynamic_funding_v176.is_some() &&
+            submit_payload.pointer("/payload/finish_reason").and_then(Value::as_str)==Some("length");
         json!({
-            "outputComplete": true
+            "outputComplete": !physical_limit_v176
         })
     } else {
         json!({
@@ -2322,6 +2388,225 @@ fn run_capacity_test_at_idle_v1(
     Ok(())
 }
 
+// MODEL_MIGRATION_INSTALLED_CERTIFIED_V177
+// Only priority changes may reuse existing capacity certificates. New artifact
+// identities or changed execution definitions require normal provisioning and
+// certification; never reinterpret a running certificate under a new artifact.
+fn compatible_registry_refresh_v177(
+    previous: &[crate::core::signed_model_registry::SignedModelDefinitionV1],
+    fresh: &[crate::core::signed_model_registry::SignedModelDefinitionV1],
+    models: &[crate::core::model::ModelState],
+) -> bool {
+    models.iter().filter(|m| m.status == "ready"
+        && m.capacity_status == crate::core::capacity::CapacityStatus::Certified
+        && m.certified_concurrency.unwrap_or(0) > 0)
+        .all(|m| {
+            let Some(old) = previous.iter().find(|d| d.selected_model == m.selected_model) else {
+                return false;
+            };
+            let Some(new) = fresh.iter().find(|d| d.selected_model == m.selected_model) else {
+                return false;
+            };
+            let mut old = old.clone();
+            old.priority = new.priority;
+            &old == new && new.artifact_id == m.model_id
+                && new.capability == m.capability && new.runtime == m.runtime
+                && new.tier == m.tier
+        })
+}
+
+struct IdleModelMigrationV177 {
+    target: String,
+    target_config: LlamaProcessConfig,
+    target_acceleration: String,
+    fallback_config: LlamaProcessConfig,
+    fallback_acceleration: String,
+}
+
+fn prepare_idle_model_migration_v177(
+    state: &NodeState,
+    current: &str,
+) -> Result<(Option<IdleModelMigrationV177>,
+    crate::core::signed_model_registry::VerifiedSignedModelRegistryV1), String> {
+    use crate::core::signed_model_registry as registry;
+    let previous = registry::active_or_cached_model_registry_v171()
+        .ok_or_else(|| "model_migration_current_registry_missing".to_string())?;
+    // Network only: an expired or unreachable registry must not authorize
+    // a new model selection from the fallback built-in table.
+    let fresh = registry::fetch_signed_model_registry_v171()?;
+    if fresh.payload.issued_at_unix < previous.payload.issued_at_unix {
+        return Err("model_migration_stale_registry".into());
+    }
+    if !compatible_registry_refresh_v177(&previous.payload.models,
+        &fresh.payload.models, &state.models) {
+        return Err("model_migration_definition_requires_recertification".into());
+    }
+    registry::install_verified_model_registry_v171(fresh.clone());
+    let Some(target) = crate::core::execution_model::primary_certified_model(state) else {
+        return Ok((None, fresh));
+    };
+    if target.selected_model == current {
+        return Ok((None, fresh));
+    }
+    let verified_config = |id: &str| -> Result<(LlamaProcessConfig, String), String> {
+        let model = state.models.iter().find(|m| m.selected_model == id
+            && m.status == "ready"
+            && m.capacity_status == crate::core::capacity::CapacityStatus::Certified
+            && m.certified_concurrency.unwrap_or(0) > 0)
+            .ok_or_else(|| "model_migration_target_not_certified".to_string())?;
+        let definition = registry::signed_model_definition_v171(id)
+            .ok_or_else(|| "model_migration_definition_missing".to_string())?;
+        let model_path = resolve_active_model_path_v1(id)?;
+        let path = std::path::Path::new(&model_path);
+        let filename = path.file_name().and_then(|s| s.to_str())
+            .ok_or_else(|| "model_migration_filename_missing".to_string())?;
+        let artifact = definition.artifacts.iter().find(|a|
+            a.artifact_role == "model" && a.filename == filename)
+            .ok_or_else(|| "model_migration_artifact_missing".to_string())?;
+        if !crate::core::certificate_match::sha256_file(path)?
+            .eq_ignore_ascii_case(&artifact.sha256) {
+            return Err("model_migration_artifact_hash_mismatch".into());
+        }
+        Ok((execution_config_for_certified_model_v1(model_path, &model.acceleration, id)?,
+            model.acceleration.clone()))
+    };
+    let (target_config, target_acceleration) = verified_config(&target.selected_model)?;
+    let (fallback_config, fallback_acceleration) = verified_config(current)?;
+    Ok((Some(IdleModelMigrationV177 {
+        target: target.selected_model, target_config, target_acceleration,
+        fallback_config, fallback_acceleration,
+    }), fresh))
+}
+
+fn start_checked_idle_runtime_v177(
+    config: &LlamaProcessConfig,
+    acceleration: &str,
+    expected_slots: u16,
+) -> Result<(ManagedLlamaProcess, ProductionLlamaClient), String> {
+    let runtime = ManagedLlamaProcess::start(config)?;
+    if runtime.acceleration() != acceleration {
+        return Err("model_migration_acceleration_mismatch".into());
+    }
+    let base = runtime.base_url().to_string();
+    let llama = ProductionLlamaClient::new(base.clone())?;
+    llama.health_check()?;
+    let http = Client::builder().no_proxy().timeout(Duration::from_secs(5))
+        .build().map_err(|_| "model_migration_health_client_failed".to_string())?;
+    let props: Value = http.get(format!("{base}/props")).send()
+        .and_then(|r| r.error_for_status()).and_then(|r| r.json())
+        .map_err(|_| "model_migration_props_unavailable".to_string())?;
+    let actual = props["model_path"].as_str()
+        .ok_or_else(|| "model_migration_runtime_model_missing".to_string())?;
+    if std::fs::canonicalize(actual).ok() != Some(std::fs::canonicalize(&config.model_path)
+        .map_err(|_| "model_migration_expected_path_invalid".to_string())?) {
+        return Err("model_migration_runtime_model_mismatch".into());
+    }
+    if crate::core::real_capacity_certification::reported_runtime_slot_count_v1(&base)?
+        < expected_slots {
+        return Err("model_migration_runtime_slots_insufficient".into());
+    }
+    Ok((runtime, llama))
+}
+
+// The migration RPC is a withdrawal-only fence; it does not set the
+// active model. For retirement, pass the unchanged active replacement as
+// "from" and the certified standby being retired as "to". The same device
+// lock verifies both identities and excludes reserved or active work.
+#[cfg(target_os = "windows")]
+fn retire_idle_model_v177(
+    registry: &crate::core::signed_model_registry::VerifiedSignedModelRegistryV1,
+    state: &NodeState,
+    active: &str,
+    runtime: &ManagedLlamaProcess,
+    llama: &ProductionLlamaClient,
+    heartbeat: &mut ProductionHeartbeatV1,
+    http: &Client,
+    auth_client: &SupabaseAuthClient,
+    auth: &mut crate::core::production_task_http::LocalAuth,
+    hardware: &str,
+    worker: &str,
+    stop: &AtomicBool,
+) -> Result<bool, String> {
+    use crate::core::windows_model_retirement_v177 as retirement;
+    let preflight = (|| -> Result<_, String> {
+        let active_path = if registry.payload.windows_model_retirements_v177.is_empty() {
+            // A fresh cancellation clears any old grace state without probing.
+            std::path::PathBuf::new()
+        } else {
+            llama.health_check()?;
+            let client = Client::builder().no_proxy().timeout(Duration::from_secs(5))
+                .build().map_err(|_| "retirement_health_client_failed".to_string())?;
+            let props: Value = client.get(format!("{}/props", runtime.base_url())).send()
+                .and_then(|r| r.error_for_status()).and_then(|r| r.json())
+                .map_err(|_| "retirement_runtime_props_unavailable".to_string())?;
+            std::path::PathBuf::from(props["model_path"].as_str()
+                .ok_or("retirement_active_model_path_missing")?)
+        };
+        retirement::observe(registry, state, active, &active_path)
+    })();
+    let candidate = match preflight {
+        Ok(Some(candidate)) => candidate,
+        Ok(None) => return Ok(false),
+        Err(error) => {
+            println!("MODEL_RETIREMENT_PREFLIGHT_DEFERRED={error}");
+            // No assignment withdrawal occurred. Invalidate grace and keep
+            // normal customer inference independent of retirement bookkeeping.
+            if let Err(reset_error) = retirement::note_activation("") {
+                println!("MODEL_RETIREMENT_GRACE_RESET_FAILED={reset_error}");
+            }
+            return Ok(false);
+        }
+    };
+    heartbeat.refresh_update_lifecycle_v1();
+    if heartbeat.status != "online" || stop.load(Ordering::Acquire)
+        || heartbeat.model_id.as_deref() != Some(active) {
+        return Ok(false);
+    }
+    if let Err(error) = send_heartbeat(http, auth_client, auth, heartbeat) {
+        println!("MODEL_RETIREMENT_HEARTBEAT_DEFERRED={error}");
+        return Ok(false);
+    }
+    let grant = crate::core::production_task_http::begin_idle_model_migration_v1(
+        http, auth_client, auth, hardware, worker, active, &candidate.retired_model);
+    match grant {
+        Ok(false) => return Ok(false),
+        Err(error) => {
+            // A lost reply might already have withdrawn the device.
+            send_heartbeat(http, auth_client, auth, heartbeat)?;
+            println!("MODEL_RETIREMENT_PERMIT_ERROR={error}");
+            return Ok(false);
+        }
+        Ok(true) => {}
+    }
+    if stop.load(Ordering::Acquire) { return Ok(false); }
+    let retired = candidate.retired_model.clone();
+    let result = llama.health_check().and_then(|_| candidate.delete_after_withdrawal(stop));
+    match result {
+        Ok(bytes) => {
+            println!("MODEL_RETIRED={retired} BYTES_FREED={bytes}");
+            // Caller rebuilds the certified roster before readmission.
+            Ok(true)
+        }
+        Err(error) => {
+            println!("MODEL_RETIREMENT_DEFERRED={error}");
+            // The replacement is unchanged. Do not advertise it until its
+            // runtime is healthy; a failed health check keeps the fence shut.
+            llama.health_check()?;
+            send_heartbeat(http, auth_client, auth, heartbeat)?;
+            Ok(false)
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn note_retirement_activation_v177(active: &str, enabled: &mut bool) {
+    if let Err(error) = crate::core::windows_model_retirement_v177::note_activation(active) {
+        // Retirement bookkeeping must never block ordinary inference.
+        *enabled = false;
+        println!("MODEL_RETIREMENT_DISABLED={error}");
+    }
+}
+
 pub fn run_node_service(
     stop: Arc<AtomicBool>,
     mut wallet_password: Zeroizing<String>,
@@ -2609,6 +2894,13 @@ pub fn run_node_service(
 
     let mut active_selected_model = base_heartbeat.model_id.clone();
 
+    #[cfg(target_os = "windows")]
+    let mut retirement_bookkeeping_ok_v177 = true;
+    #[cfg(target_os = "windows")]
+    if let Some(active) = active_selected_model.as_deref() {
+        note_retirement_activation_v177(active, &mut retirement_bookkeeping_ok_v177);
+    }
+
     let mut active_capability = base_heartbeat.model_capability.clone();
 
     let mut active_runtime = base_heartbeat.runtime.clone();
@@ -2744,6 +3036,12 @@ pub fn run_node_service(
     }
 
     let mut last_idle_heartbeat = Instant::now();
+    // Spread periodic network reads across devices, and do not restart a
+    // runtime merely to refresh timestamps in its signed registry.
+    let registry_jitter_v177 = hardware.as_bytes().iter()
+        .fold(0_u64, |n, b| n + u64::from(*b)) % 60;
+    let registry_interval_v177 = Duration::from_secs(300 + registry_jitter_v177);
+    let mut next_registry_refresh_v177 = Instant::now() + registry_interval_v177;
     let mut last_block_reason: Option<String> = None;
 
     // Claimed tasks discovered during correction redelivery are never
@@ -3105,6 +3403,137 @@ pub fn run_node_service(
         };
 
         if tasks_v1.is_empty() {
+            // A successful empty dispatch response and an empty local queue
+            // establish local quiescence. W10's device lock separately checks
+            // reserved work that has not yet reached this worker.
+            if Instant::now() >= next_registry_refresh_v177
+                && queued_claimed_tasks_v1.is_empty()
+                && !stop.load(Ordering::Acquire)
+                && !single_task_mode_v1
+                && _managed_llama.is_some()
+                && active_company_runtime_v1.is_none()
+                && !training_runtime_download_in_flight_v1.load(Ordering::Acquire)
+            {
+                next_registry_refresh_v177 = Instant::now() + registry_interval_v177;
+                if let Some(previous) = active_selected_model.clone() {
+                    match prepare_idle_model_migration_v177(&state, &previous) {
+                        Ok((Some(plan), _fresh)) => {
+                            base_heartbeat.refresh_update_lifecycle_v1();
+                            if base_heartbeat.status == "online" && !stop.load(Ordering::Acquire) {
+                                // Refresh readiness immediately before asking for the
+                                // atomic withdrawal. A denied grant leaves the old model live.
+                                let permit = send_heartbeat(&http, &auth_client, &mut auth, &base_heartbeat)
+                                    .and_then(|_| crate::core::production_task_http::
+                                        begin_idle_model_migration_v1(&http, &auth_client, &mut auth,
+                                            &hardware, &public_wallet.wallet_address, &previous, &plan.target));
+                                match permit {
+                                    Ok(true) => {
+                                        println!("MODEL_MIGRATION_ASSIGNMENT_WITHDRAWN=true");
+                                        if stop.load(Ordering::Acquire) {
+                                            return Ok(());
+                                        }
+                                        #[cfg(target_os = "windows")]
+                                        note_retirement_activation_v177(&plan.target, &mut retirement_bookkeeping_ok_v177);
+                                        // Drop only the managed local runtime, not provider
+                                        // credentials, desired state, or installed artifacts.
+                                        llama = None;
+                                        _managed_llama = None;
+                                        let target_limit = certified_concurrency_for_model_v1(&state, &plan.target);
+                                        let (runtime, client, actual_model) = match start_checked_idle_runtime_v177(
+                                            &plan.target_config, &plan.target_acceleration, target_limit) {
+                                            Ok((runtime, client)) => {
+                                                println!("MODEL_MIGRATION_ACTIVATED={}", plan.target);
+                                                (runtime, client, plan.target)
+                                            }
+                                            Err(error) => {
+                                                println!("MODEL_MIGRATION_TARGET_FAILED={error}");
+                                                #[cfg(target_os = "windows")]
+                                                note_retirement_activation_v177(&previous, &mut retirement_bookkeeping_ok_v177);
+                                                next_registry_refresh_v177 = Instant::now() + Duration::from_secs(1800);
+                                                let fallback_limit = certified_concurrency_for_model_v1(&state, &previous);
+                                                let (runtime, client) = start_checked_idle_runtime_v177(
+                                                    &plan.fallback_config, &plan.fallback_acceleration, fallback_limit)?;
+                                                println!("MODEL_MIGRATION_ROLLBACK={previous}");
+                                                (runtime, client, previous)
+                                            }
+                                        };
+                                        runtime_acceleration = runtime.acceleration().to_string();
+                                        _managed_llama = Some(runtime);
+                                        llama = Some(client);
+                                        active_selected_model = Some(actual_model.clone());
+                                        base_heartbeat = ProductionHeartbeatV1::from_node_state(
+                                            &state, env!("CARGO_PKG_VERSION"), "laptop", &[]);
+                                        operational_limit_v1 = apply_active_model_heartbeat_v1(
+                                            &mut base_heartbeat, &state, &actual_model)?;
+                                        active_capability = base_heartbeat.model_capability.clone();
+                                        active_runtime = base_heartbeat.runtime.clone();
+                                        base_heartbeat.runtime_acceleration = runtime_acceleration.clone();
+                                        base_heartbeat.concurrency_limit = operational_limit_v1;
+                                        poll_capabilities = base_heartbeat.capabilities.clone();
+                                        if stop.load(Ordering::Acquire) {
+                                            return Ok(());
+                                        }
+                                        // Never resume polling until the healthy active
+                                        // model's readiness has been acknowledged.
+                                        send_heartbeat(&http, &auth_client, &mut auth, &base_heartbeat)?;
+                                        last_idle_heartbeat = Instant::now();
+                                        println!("MODEL_MIGRATION_READY_MODEL={actual_model}");
+                                        continue;
+                                    }
+                                    Ok(false) => {}
+                                    Err(error) => {
+                                        // A lost response may have withdrawn assignment.
+                                        // Reassert only the unchanged, healthy old runtime.
+                                        println!("MODEL_MIGRATION_PERMIT_ERROR={error}");
+                                        send_heartbeat(&http, &auth_client, &mut auth, &base_heartbeat)?;
+                                        last_idle_heartbeat = Instant::now();
+                                    }
+                                }
+                            }
+                        }
+                        Ok((None, _fresh)) => {
+                            println!("MODEL_REGISTRY_REFRESHED_NO_SWITCH=true");
+                            #[cfg(target_os = "windows")]
+                            if retirement_bookkeeping_ok_v177 {
+                                if let (Some(runtime), Some(client)) = (_managed_llama.as_ref(), llama.as_ref()) {
+                                    match retire_idle_model_v177(
+                                        &_fresh, &state, &previous, runtime, client,
+                                        &mut base_heartbeat, &http, &auth_client, &mut auth,
+                                        &hardware, &public_wallet.wallet_address, &stop,
+                                    ) {
+                                        Ok(true) => {
+                                            if stop.load(Ordering::Acquire) { return Ok(()); }
+                                            state = NodeState::detect();
+                                            base_heartbeat = ProductionHeartbeatV1::from_node_state(
+                                                &state, env!("CARGO_PKG_VERSION"), "laptop", &[]);
+                                            operational_limit_v1 = apply_active_model_heartbeat_v1(
+                                                &mut base_heartbeat, &state, &previous)?;
+                                            active_capability = base_heartbeat.model_capability.clone();
+                                            active_runtime = base_heartbeat.runtime.clone();
+                                            base_heartbeat.runtime_acceleration = runtime_acceleration.clone();
+                                            base_heartbeat.concurrency_limit = operational_limit_v1;
+                                            poll_capabilities = base_heartbeat.capabilities.clone();
+                                            send_heartbeat(&http, &auth_client, &mut auth, &base_heartbeat)?;
+                                            last_idle_heartbeat = Instant::now();
+                                            println!("MODEL_RETIREMENT_ROSTER_REFRESHED=true");
+                                            continue;
+                                        }
+                                        Ok(false) => {
+                                            if stop.load(Ordering::Acquire) { return Ok(()); }
+                                        }
+                                        Err(error) => {
+                                            // An uncertain withdrawal or failed replacement health
+                                            // must never be followed by a stale online heartbeat.
+                                            return Err(format!("model_retirement_idle_guard_failed:{error}"));
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        Err(error) => println!("MODEL_REGISTRY_REFRESH_DEFERRED={error}"),
+                    }
+                }
+            }
             if last_idle_heartbeat.elapsed()
                 >= Duration::from_secs(15)
             {
@@ -3317,6 +3746,8 @@ pub fn run_node_service(
             );
 
             if switch_required_v1 {
+                #[cfg(target_os = "windows")]
+                note_retirement_activation_v177(batch_model_id_v1, &mut retirement_bookkeeping_ok_v177);
                 if env::var("EDGESWARM_LLAMA_BASE_URL")
                     .ok()
                     .filter(|value_v1| !value_v1.trim().is_empty())
@@ -4283,5 +4714,143 @@ pub fn run_node_service(
 
         last_idle_heartbeat = Instant::now();
         thread::sleep(Duration::from_millis(100));
+    }
+}
+
+
+#[cfg(test)]
+mod failure_compatibility_v176_tests {
+    use super::*;
+
+    #[test]
+    fn diagnostic_failure_preserves_legacy_signed_output() {
+        let task: TaskEnvelope = serde_json::from_value(
+            json!({"taskId":42,"prompt":"Test"})
+        ).unwrap();
+
+        let key = format!("{:064x}",1);
+        let hardware = "a".repeat(64);
+
+        let old = failure_payload(
+            &task,"test@example.com","worker",
+            &hardware,&key,"neural_inference_failed"
+        ).unwrap();
+
+        let new = failure_payload_with_diagnostics_v176(
+            &task,"test@example.com","worker",
+            &hardware,&key,"neural_inference_failed",
+            Some(json!({
+                "version":"inference-failure-v176",
+                "code":"context_capacity_exceeded",
+                "promptTokens":2077,
+                "contextTokens":1024
+            }))
+        ).unwrap();
+
+        assert_eq!(
+            new["payload"]["aiOutput"],
+            r#"{"error":"neural_inference_failed"}"#
+        );
+        assert_eq!(old["fileHash"],new["fileHash"]);
+        assert_eq!(new["payload"]["score"],0);
+        assert_eq!(new["payload"]["status"],"error");
+        assert_eq!(
+            new["payload"]["inferenceFailureV176"]["promptTokens"],
+            2077
+        );
+    }
+}
+
+fn effective_output_budget_v176(
+    task: &crate::core::task_client::TaskEnvelope,
+    adaptive: bool,
+) -> Option<u64> {
+    if adaptive {
+        task.execution_contract.as_ref()
+            .and_then(|c| c.output_token_budget)
+            .or(task.max_output_tokens)
+    } else {
+        task.max_output_tokens
+    }
+}
+
+#[cfg(test)]
+mod output_budget_tests_v176 {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn natural_and_explicit_output_contracts_v176() {
+        for (budget, task_max, expected) in [
+            (None, None, None),
+            (None, Some(300), Some(300)),
+            (Some(192), Some(192), Some(192)),
+        ] {
+            let task = serde_json::from_value(json!({
+                "taskId": "test-v176",
+                "prompt": "Explain distributed inference.",
+                "maxOutputTokens": task_max,
+                "executionContract": {
+                    "version": "adaptive-execution-v1",
+                    "outputTokenBudget": budget,
+                    "naturalCompletion": expected.is_none()
+                }
+            })).unwrap();
+
+            assert_eq!(
+                effective_output_budget_v176(&task, true),
+                expected
+            );
+            assert_eq!(
+                effective_output_budget_v176(&task, false),
+                task_max
+            );
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod idle_model_migration_tests_v177 {
+    use super::*;
+    use crate::core::{model::ModelState, capacity::CapacityStatus,
+        signed_model_registry::SignedModelDefinitionV1};
+
+    fn definition() -> SignedModelDefinitionV1 {
+        serde_json::from_value(json!({
+            "selectedModel":"fixture:7b","artifactId":"fixture-artifact",
+            "capability":"Neural-Inference-7B","tier":3,"runtime":"llama.cpp",
+            "minRamGb":16,"defaultCtx":null,"defaultMaxTokens":384,
+            "allowedMaxTokens":4294967295_u64,"experimental":false,
+            "priority":130,"quantization":"Q4_K_M","patterns":["fixture.gguf"],
+            "artifacts":[{"artifactRole":"model","filename":"fixture.gguf",
+              "downloadUrl":"https://example.invalid/fixture.gguf","sha256":"a".repeat(64)}]
+        })).unwrap()
+    }
+
+    fn certified() -> ModelState {
+        ModelState { selected_model:"fixture:7b".into(), model_id:"fixture-artifact".into(),
+            capability:"Neural-Inference-7B".into(), tier:3, runtime:"llama.cpp".into(),
+            acceleration:"metal".into(), status:"ready".into(),
+            capacity_status:CapacityStatus::Certified, certified_concurrency:Some(1) }
+    }
+
+    #[test]
+    fn registry_priority_changes_preserve_existing_certificate_v177() {
+        let old = definition();
+        let mut new = old.clone();
+        new.priority = 110;
+        assert!(compatible_registry_refresh_v177(&[old.clone()], &[new.clone()], &[certified()]));
+        new.artifacts[0].sha256 = "b".repeat(64);
+        assert!(!compatible_registry_refresh_v177(&[old.clone()], &[new], &[certified()]));
+        assert!(!compatible_registry_refresh_v177(&[old], &[], &[certified()]));
+    }
+
+    #[test]
+    fn runtime_definition_changes_require_recertification_v177() {
+        let old = definition();
+        let mut new = old.clone();
+        new.allowed_max_tokens = 2048;
+        assert!(!compatible_registry_refresh_v177(&[old], &[new], &[certified()]));
     }
 }

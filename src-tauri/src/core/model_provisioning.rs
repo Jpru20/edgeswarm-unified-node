@@ -539,6 +539,12 @@ fn download_artifact_v1(
         return Ok(root.join(&artifact.filename));
     }
 
+    #[cfg(target_os = "windows")]
+    let newly_managed = matches!(
+        fs::symlink_metadata(root.join(&artifact.filename)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound
+    );
+
     let prefix = root.join(format!("{}.download", artifact.filename));
     let manifest = root.join(format!("{}.download.sha256", artifact.filename));
     let assembly = root.join(format!("{}.download.assembled", artifact.filename));
@@ -641,6 +647,10 @@ fn download_artifact_v1(
         session_start,
     )?;
     let _ = fs::remove_file(&manifest);
+    #[cfg(target_os = "windows")]
+    if newly_managed {
+        crate::core::windows_model_retirement_v177::record_new_download(root, artifact);
+    }
     Ok(installed)
 }
 

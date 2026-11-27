@@ -109,6 +109,32 @@ Write-Host "MSI_VULKAN_BACKEND_PATH=$($VulkanBackend.FullName)"
 Write-Host "MSI_CUDA_RUNTIME_PAYLOAD=PASS"
 Write-Host "MSI_VULKAN_RUNTIME_PAYLOAD=PASS"
 
+# WINDOWS_V176_MSI_FULL_RUNTIME_PAYLOAD_VERIFY
+if ($RuntimeManifest.targets.'windows-x64'.fundingRuntimeRevision -eq 'windows-b12102-funding-v176') {
+    $RuntimeRoots = [ordered]@{
+        cpu = $Llama.DirectoryName
+        vulkan = $VulkanServer.DirectoryName
+        cuda = $CudaServer.DirectoryName
+    }
+    $Pinned = $RuntimeManifest.targets.'windows-x64'.payloads
+    foreach ($Backend in $RuntimeRoots.Keys) {
+        $Files = @(Get-ChildItem -LiteralPath $RuntimeRoots[$Backend] -Force -File)
+        $Expected = @($Pinned.$Backend)
+        if ($Files.Count -ne $Expected.Count -or $Expected.Count -eq 0) {
+            throw "msi_runtime_payload_count_mismatch_$Backend"
+        }
+        foreach ($File in $Files) {
+            $Match = @($Expected | Where-Object { $_.file -ceq $File.Name })
+            $Sha = (Get-FileHash -LiteralPath $File.FullName -Algorithm SHA256).Hash.ToLower()
+            if ($Match.Count -ne 1 -or $Match[0].sha256 -ne $Sha -or [long]$Match[0].bytes -ne $File.Length) {
+                throw "msi_runtime_payload_hash_mismatch_${Backend}_$($File.Name)"
+            }
+        }
+        Write-Host "MSI_RUNTIME_PAYLOAD_HASHES_${Backend}=PASS"
+    }
+}
+
+
 
 # WINDOWS_BACKGROUND_HELPER_PAYLOAD_V1
 $Headless = Get-ChildItem $Audit -Recurse `

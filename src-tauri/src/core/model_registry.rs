@@ -372,7 +372,7 @@ pub fn effective_model_specs_v171()
                     min_ram_gb:
                         model.min_ram_gb,
                     default_ctx:
-                        model.default_ctx,
+                        model.default_ctx.unwrap_or(0),
                     default_max_tokens:
                         model.default_max_tokens,
                     allowed_max_tokens:

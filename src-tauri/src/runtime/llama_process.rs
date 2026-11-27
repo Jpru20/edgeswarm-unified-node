@@ -170,6 +170,22 @@ impl ManagedLlamaProcess {
         )?;
 
         let mut command = Command::new(&config.executable);
+        command.args(gemma4_thinking_args_v176(&config.model_path));
+        let lfm3_args = lfm3_windows_thinking_args_v177(&config.model_path);
+        if !lfm3_args.is_empty() && config.context_tokens != 0 {
+            return Err("lfm3_requires_model_native_context".into());
+        }
+        command.args(lfm3_args);
+
+        // Isolate customer prompt state on the patched desktop runtimes.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        command.args([
+            "--cache-ram", "0",
+            "--no-cache-idle-slots",
+            "--no-cache-prompt",
+            "--slot-prompt-similarity", "0",
+        ]);
+
 
         // SWARM_VISION_PROJECTOR_RUNTIME_V171
 
@@ -709,5 +725,62 @@ mod tests {
             .unwrap_err(),
             "llama_server_managed_port_in_use"
         );
+    }
+}
+
+fn gemma4_thinking_args_v176(path: &std::path::Path) -> &'static [&'static str] {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64"))
+        && path.file_name().and_then(|v| v.to_str()) == Some("gemma-4-E4B_q4_0-it.gguf")
+    {
+        &["--jinja", "--reasoning", "on", "--reasoning-budget", "-1",
+          "--reasoning-format", "deepseek"]
+    } else {
+        &[]
+    }
+}
+
+fn lfm3_windows_thinking_args_v177(path: &std::path::Path) -> &'static [&'static str] {
+    if cfg!(target_os = "windows")
+        && path.file_name().and_then(|v| v.to_str()) == Some("LFM3-1.7B-Q4_K_M.gguf")
+    {
+        &["--jinja", "--reasoning", "on", "--reasoning-budget", "-1",
+          "--reasoning-format", "deepseek", "--parallel", "1",
+          "--no-context-shift", "--n-predict", "-1"]
+    } else {
+        &[]
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod lfm3_thinking_v177 {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn lfm3_keeps_full_native_context_and_unrestricted_thinking() {
+        assert_eq!(lfm3_windows_thinking_args_v177(Path::new("LFM3-1.7B-Q4_K_M.gguf")),
+            &["--jinja", "--reasoning", "on", "--reasoning-budget", "-1",
+              "--reasoning-format", "deepseek", "--parallel", "1",
+              "--no-context-shift", "--n-predict", "-1"]);
+        assert!(lfm3_windows_thinking_args_v177(Path::new("Qwen2.5-7B-Instruct-Q4_K_M.gguf")).is_empty());
+    }
+}
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+mod gemma4_thinking_v176 {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn gemma_thinking_is_unrestricted() {
+        assert_eq!(gemma4_thinking_args_v176(Path::new("gemma-4-E4B_q4_0-it.gguf")),
+            &["--jinja", "--reasoning", "on", "--reasoning-budget", "-1",
+              "--reasoning-format", "deepseek"]);
+    }
+
+    #[test]
+    fn existing_models_are_unchanged() {
+        assert!(gemma4_thinking_args_v176(Path::new("Qwen2.5-7B-Instruct-Q4_K_M.gguf")).is_empty());
+        assert!(gemma4_thinking_args_v176(Path::new("LFM3-1.7B-Q4_K_M.gguf")).is_empty());
     }
 }

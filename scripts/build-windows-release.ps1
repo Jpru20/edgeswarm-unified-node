@@ -57,12 +57,16 @@ Write-Host 'RELEASE_CONFIG_VALID=PASS'
 Write-Host "SOURCE_REF=$ExpectedSourceRef"
 Write-Host "SOURCE_COMMIT=$Head"
 Write-Host "TARGET_DIR=$TargetDir"
-$RuntimeSource = Join-Path $env:USERPROFILE "edgeswarm-runtime-build\release\windows-x64-v172\current"
+$RuntimeManifest = Get-Content (Join-Path $Repo "packaging\runtime\llama-runtime-v1.json") -Raw | ConvertFrom-Json
+$WindowsRuntime = $RuntimeManifest.targets.'windows-x64'
+if ([string]$WindowsRuntime.runtimeDirectory -ne 'windows-x64-v176') { throw 'windows_v176_runtime_manifest_missing' }
+$RuntimeRoot = Join-Path $env:USERPROFILE "edgeswarm-runtime-build\release\windows-x64-v176"
+$RuntimeSource = Join-Path $RuntimeRoot "current"
 $RuntimeExe = Join-Path $RuntimeSource "llama-server.exe"
 
 # WINDOWS_ACCELERATED_RUNTIME_PAYLOAD_V2
-$CudaRuntimeSource = Join-Path $env:USERPROFILE "edgeswarm-runtime-build\release\windows-x64-v172\cuda\current"
-$VulkanRuntimeSource = Join-Path $env:USERPROFILE "edgeswarm-runtime-build\release\windows-x64-v172\vulkan\current"
+$CudaRuntimeSource = Join-Path $RuntimeRoot "cuda\current"
+$VulkanRuntimeSource = Join-Path $RuntimeRoot "vulkan\current"
 
 $CudaRuntimeExe = Join-Path $CudaRuntimeSource "llama-server.exe"
 $CudaBackendDll = Join-Path $CudaRuntimeSource "ggml-cuda.dll"
@@ -113,6 +117,9 @@ else {
 foreach ($Required in @(
     $CudaRuntimeExe,
     $CudaBackendDll,
+    (Join-Path $CudaRuntimeSource "cublas64_12.dll"),
+    (Join-Path $CudaRuntimeSource "cublasLt64_12.dll"),
+    (Join-Path $CudaRuntimeSource "cudart64_12.dll"),
     $VulkanRuntimeExe,
     $VulkanBackendDll
 )) {
@@ -120,8 +127,7 @@ foreach ($Required in @(
         throw "windows_accelerated_runtime_payload_missing_$Required"
     }
 }
-$RuntimeManifest = Get-Content (Join-Path $Repo "packaging\runtime\llama-runtime-v1.json") -Raw | ConvertFrom-Json
-$ExpectedRuntimeSha = [string]$RuntimeManifest.targets.'windows-x64'.validatedRuntimeSha256
+$ExpectedRuntimeSha = [string]$WindowsRuntime.validatedRuntimeSha256
 
 if (!(Test-Path $RuntimeExe)) { throw "windows_llama_runtime_missing" }
 if ([string]::IsNullOrWhiteSpace($ExpectedRuntimeSha)) { throw "windows_llama_manifest_sha_missing" }
@@ -130,6 +136,46 @@ $ActualRuntimeSha = (Get-FileHash $RuntimeExe -Algorithm SHA256).Hash.ToLower()
 if ($ActualRuntimeSha -ne $ExpectedRuntimeSha.ToLower()) {
     throw "windows_llama_runtime_sha_mismatch"
 }
+
+# WINDOWS_V176_RUNTIME_PAYLOAD_INTEGRITY
+# Pin the launcher and every shared library, not only the launcher.
+$PayloadRoots = [ordered]@{
+    cpu = $RuntimeSource
+    vulkan = $VulkanRuntimeSource
+    cuda = $CudaRuntimeSource
+}
+$Inventory = @()
+foreach ($Backend in $PayloadRoots.Keys) {
+    $Directory = $PayloadRoots[$Backend]
+    $ExpectedLauncher = switch ($Backend) {
+        'cpu' { [string]$WindowsRuntime.validatedRuntimeSha256 }
+        'vulkan' { [string]$WindowsRuntime.vulkanRuntimeSha256 }
+        'cuda' { [string]$WindowsRuntime.cudaRuntimeSha256 }
+    }
+    if ($ExpectedLauncher -notmatch '^[a-fA-F0-9]{64}$') {
+        throw "windows_runtime_launcher_not_pinned_$Backend"
+    }
+    $LauncherHash = (Get-FileHash (Join-Path $Directory 'llama-server.exe') -Algorithm SHA256).Hash
+    if ($LauncherHash -ne $ExpectedLauncher) { throw "windows_runtime_launcher_hash_mismatch_$Backend" }
+    $Children = @(Get-ChildItem -LiteralPath $Directory -Force)
+    if (@($Children | Where-Object { $_.PSIsContainer -or $_.Extension -notin @('.exe','.dll') -or ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) }).Count -ne 0) {
+        throw "windows_runtime_unexpected_payload_$Backend"
+    }
+    $Pinned = @($WindowsRuntime.payloads.$Backend)
+    if ($Pinned.Count -ne $Children.Count -or $Pinned.Count -eq 0) {
+        throw "windows_runtime_inventory_not_pinned_$Backend"
+    }
+    foreach ($File in $Children) {
+        $Hash = (Get-FileHash -LiteralPath $File.FullName -Algorithm SHA256).Hash.ToLower()
+        $Match = @($Pinned | Where-Object { $_.file -ceq $File.Name })
+        if ($Match.Count -ne 1 -or $Match[0].sha256 -ne $Hash -or [long]$Match[0].bytes -ne $File.Length) {
+            throw "windows_runtime_payload_hash_mismatch_${Backend}_$($File.Name)"
+        }
+        $Inventory += [ordered]@{backend=$Backend;file=$File.Name;sha256=$Hash;bytes=$File.Length}
+    }
+    Write-Host "WINDOWS_RUNTIME_PAYLOAD_HASHES_${Backend}=PASS"
+}
+$Inventory | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $TargetDir 'windows-runtime-payload-v176.json')
 
 # WINDOWS_BACKGROUND_HELPERS_V1
 $TargetTriple = (& rustc --print host-tuple).Trim()

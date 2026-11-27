@@ -33,7 +33,7 @@ pub const MODEL_REGISTRY_PAYLOAD_VERSION_V1:
     &str =
     "swarm-model-registry-v1";
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SignedModelArtifactV1 {
     pub artifact_role: String,
@@ -42,7 +42,7 @@ pub struct SignedModelArtifactV1 {
     pub sha256: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SignedModelDefinitionV1 {
     pub selected_model: String,
@@ -56,7 +56,8 @@ pub struct SignedModelDefinitionV1 {
     pub tier: u8,
     pub runtime: String,
     pub min_ram_gb: u16,
-    pub default_ctx: u32,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub default_ctx: Option<u32>,
     pub default_max_tokens: u32,
     pub allowed_max_tokens: u32,
     pub experimental: bool,
@@ -66,6 +67,17 @@ pub struct SignedModelDefinitionV1 {
     pub artifacts: Vec<SignedModelArtifactV1>,
 }
 
+// An explicit signed retirement is separate from model preference/availability.
+// Older clients ignore this optional field. Priority alone never permits deletion.
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsModelRetirementV177 {
+    pub retired_model: String,
+    pub replacement_model: String,
+    pub artifact_sha256: String,
+    pub deprecated_at_unix: u64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SignedModelRegistryPayloadV1 {
@@ -73,6 +85,8 @@ pub struct SignedModelRegistryPayloadV1 {
     pub issued_at_unix: u64,
     pub expires_at_unix: u64,
     pub models: Vec<SignedModelDefinitionV1>,
+    #[serde(default)]
+    pub windows_model_retirements_v177: Vec<WindowsModelRetirementV177>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -393,7 +407,7 @@ fn validate_registry_payload_v171(
             );
         }
 
-        if model.default_ctx == 0
+        if model.default_ctx == Some(0)
             || model.default_max_tokens == 0
             || model.allowed_max_tokens
                 < model.default_max_tokens
@@ -545,6 +559,44 @@ fn validate_registry_payload_v171(
         }
     }
 
+    validate_windows_retirements_v177(payload)?;
+    Ok(())
+}
+
+pub(crate) fn validate_windows_retirements_v177(
+    payload: &SignedModelRegistryPayloadV1,
+) -> Result<(), String> {
+    let rules = &payload.windows_model_retirements_v177;
+    let mut seen = HashSet::new();
+    for rule in rules {
+        if !seen.insert(rule.retired_model.to_ascii_lowercase())
+            || rule.retired_model == rule.replacement_model
+            || rule.deprecated_at_unix == 0
+            || rule.deprecated_at_unix > payload.issued_at_unix
+            || !validate_sha256_v171(&rule.artifact_sha256)
+        {
+            return Err("model_retirement_identity_invalid".into());
+        }
+        let old = payload.models.iter().find(|m| m.selected_model == rule.retired_model)
+            .ok_or("model_retirement_definition_missing")?;
+        let new = payload.models.iter().find(|m| m.selected_model == rule.replacement_model)
+            .ok_or("model_retirement_replacement_missing")?;
+        // Preserve capability and reject retirement of multi-artifact/vision packs,
+        // a shared artifact, or any replacement that is also being retired.
+        if old.artifacts.len() != 1 || old.artifacts[0].artifact_role != "model"
+            || old.vision_capability.is_some()
+            || !old.artifacts[0].sha256.eq_ignore_ascii_case(&rule.artifact_sha256)
+            || old.capability != new.capability || old.tier != new.tier
+            || old.runtime != new.runtime || new.experimental || new.priority >= old.priority
+            || rules.iter().any(|r| r.retired_model == rule.replacement_model)
+            || payload.models.iter().filter(|m| m.selected_model != old.selected_model)
+                .flat_map(|m| &m.artifacts).any(|a|
+                    a.filename.eq_ignore_ascii_case(&old.artifacts[0].filename)
+                    || a.sha256.eq_ignore_ascii_case(&old.artifacts[0].sha256))
+        {
+            return Err("model_retirement_unsafe_definition".into());
+        }
+    }
     Ok(())
 }
 
@@ -825,6 +877,7 @@ mod tests {
                 now.saturating_sub(1),
             expires_at_unix:
                 now.saturating_add(3600),
+            windows_model_retirements_v177: Vec::new(),
             models: vec![
                 SignedModelDefinitionV1 {
                     selected_model:
@@ -839,7 +892,7 @@ mod tests {
                     runtime:
                         "llama.cpp".into(),
                     min_ram_gb: 64,
-                    default_ctx: 4096,
+                    default_ctx: Some(4096),
                     default_max_tokens: 512,
                     allowed_max_tokens: 2048,
                     experimental: false,
@@ -867,6 +920,47 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn signed_retirement_requires_distinct_safe_replacement_v177() {
+        let mut payload = valid_payload_v171();
+        let mut replacement = payload.models[0].clone();
+        replacement.selected_model = "replacement:1".into();
+        replacement.artifact_id = "replacement".into();
+        replacement.priority = 1;
+        replacement.artifacts[0].filename = "replacement.gguf".into();
+        replacement.artifacts[0].sha256 = "b".repeat(64);
+        payload.models.push(replacement);
+        payload.windows_model_retirements_v177.push(WindowsModelRetirementV177 {
+            retired_model: "future-model:1".into(),
+            replacement_model: "replacement:1".into(),
+            artifact_sha256: "a".repeat(64),
+            deprecated_at_unix: payload.issued_at_unix,
+        });
+        assert!(validate_registry_payload_v171(&payload).is_ok());
+        let mut invalid = payload.clone();
+        invalid.models[1].tier = 4;
+        assert!(validate_registry_payload_v171(&invalid).is_err());
+        let mut shared = payload.clone();
+        shared.models[1].artifacts[0].sha256 = "a".repeat(64);
+        assert!(validate_registry_payload_v171(&shared).is_err());
+        payload.models[1].priority = 20;
+        assert!(validate_registry_payload_v171(&payload).is_err());
+    }
+
+    #[test]
+    fn dynamic_context_is_valid_v176() {
+        let mut payload = valid_payload_v171();
+        payload.models[0].default_ctx = None;
+        validate_registry_payload_v171(&payload).unwrap();
+    }
+
+    #[test]
+    fn explicit_zero_context_is_invalid_v176() {
+        let mut payload = valid_payload_v171();
+        payload.models[0].default_ctx = Some(0);
+        assert!(validate_registry_payload_v171(&payload).is_err());
     }
 
     #[test]

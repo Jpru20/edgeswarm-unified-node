@@ -65,14 +65,33 @@ pub fn pack_locked_context(
 
 // Diagnostics only: count tokens with the local model tokenizer.
 pub fn count_local_tokens(prompt: &str) -> Result<usize, String> {
+    count_tokens_at_v176("http://127.0.0.1:18081", prompt)
+}
+
+pub(crate) fn is_loopback_runtime_v176(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url).ok().map(|url| {
+        matches!(url.scheme(), "http" | "https")
+            && matches!(url.host_str(), Some("127.0.0.1" | "[::1]" | "::1"))
+            && url.username().is_empty()
+            && url.password().is_none()
+    }).unwrap_or(false)
+}
+
+pub(crate) fn count_tokens_at_v176(
+    base_url: &str, prompt: &str
+) -> Result<usize, String> {
+    if !is_loopback_runtime_v176(base_url) {
+        return Err("tokenizer_not_local".into());
+    }
     let http = Client::builder()
         .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(12))
         .build()
         .map_err(|_| "token_client_failed")?;
 
     let template: Value = http
-        .post("http://127.0.0.1:18081/apply-template")
+        .post(format!("{}/apply-template", base_url))
         .json(&json!({"messages":[{"role":"user","content":prompt}]}))
         .send()
         .map_err(|_| "template_unavailable")?
@@ -86,7 +105,7 @@ pub fn count_local_tokens(prompt: &str) -> Result<usize, String> {
         .ok_or("template_missing_prompt")?;
 
     let counted: Value = http
-        .post("http://127.0.0.1:18081/tokenize")
+        .post(format!("{}/tokenize", base_url))
         .json(&json!({
             "content":rendered,
             "parse_special":true,
